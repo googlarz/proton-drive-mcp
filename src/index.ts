@@ -15,6 +15,7 @@ import {
   DriveCliNotFoundError,
   DriveCliError,
   DriveNotAuthenticatedError,
+  DriveParseError,
 } from "./utils/errors.js";
 import { logger } from "./utils/logger.js";
 
@@ -60,6 +61,8 @@ function handleError(err: unknown): ToolResult {
   if (err instanceof DriveCliNotFoundError) return fail(err.message);
   if (err instanceof DriveNotAuthenticatedError) return fail(err.message);
   if (err instanceof DriveCliError) return fail(`CLI error: ${err.message}`);
+  if (err instanceof DriveParseError) return fail(`Parse error: ${err.message}`);
+  if (err instanceof Error) return fail(err.message);
   return fail(`Unexpected error: ${String(err)}`);
 }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.2 — 2026-06-10
+
+### Fixed
+- `DriveParseError` now surfaces as "Parse error: ..." instead of "Unexpected error: Error: ..."
+- Validation errors (empty path, invalid email) now show the message directly without the misleading "Unexpected error:" prefix
+
 ## 1.0.1 — 2026-06-10
 
 ### Added

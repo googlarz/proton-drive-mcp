@@ -17,6 +17,7 @@ export class DriveService {
   constructor(runner?: Runner) {
     this.run = runner ?? defaultRunDrive;
   }
+
   // Auth
   async authStatus(): Promise<AuthStatus> {
     const result = await this.run(["auth", "status"]);
