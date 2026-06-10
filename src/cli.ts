@@ -29,7 +29,7 @@
 import { DriveService } from "./services/drive.js";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./utils/errors.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
-import { validatePath, validateLocalPath, validateEmail, validateMessage } from "./utils/validation.js";
+import { validateRemotePath, validateLocalPath, validateEmail, validateMessage } from "./utils/validation.js";
 
 const drive = new DriveService();
 const args = process.argv.slice(2);
@@ -64,7 +64,7 @@ Flags:
 
 function requirePath(value: string | undefined, usage: string): string {
   if (!value) { console.error(`Usage: ${usage}`); process.exit(1); }
-  try { return validatePath(value); }
+  try { return validateRemotePath(value); }
   catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); }
   return "" as never; // unreachable; process.exit(1) above always terminates
 }

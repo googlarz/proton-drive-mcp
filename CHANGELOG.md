@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.14 — 2026-06-10
+
+### Fixed
+- **`restore()` command group** — was calling `["restore", path]` (top-level); corrected to `["trash", "restore", path]` matching the CLI's trash command group (same pattern as `trash list`, `trash empty`)
+- **`validateRemotePath`** — new function enforcing that remote Drive paths start with `/`; prevents ambiguous relative paths from being forwarded to the CLI; replaces `validatePath` in all MCP and CLI remote-path positions
+- **`cli.ts` no-argument invocation** — invoking `node dist/cli.js` with no arguments now starts the MCP server instead of printing help and exiting; enables Glama/Docker environments that auto-detect `dist/cli.js` as the entry point
+
 ## 1.0.13 — 2026-06-10
 
 ### Fixed

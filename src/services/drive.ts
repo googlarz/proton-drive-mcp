@@ -164,7 +164,7 @@ export class DriveService {
   }
 
   async restore(remotePath: string): Promise<void> {
-    await this.run(["restore", remotePath]);
+    await this.run(["trash", "restore", remotePath]);
   }
 
   async emptyTrash(): Promise<void> {

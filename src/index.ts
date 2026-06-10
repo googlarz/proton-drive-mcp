@@ -17,7 +17,7 @@ import {
   DriveNotAuthenticatedError,
   DriveParseError,
 } from "./utils/errors.js";
-import { validatePath, validateLocalPath, validateEmail, validateMessage } from "./utils/validation.js";
+import { validateRemotePath, validateLocalPath, validateEmail, validateMessage } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
 
 const require = createRequire(import.meta.url);
@@ -350,10 +350,10 @@ export async function main() {
           return ok(await drive.version());
 
         case "drive_list":
-          return ok(await drive.list(validatePath(a.path)));
+          return ok(await drive.list(validateRemotePath(a.path)));
 
         case "drive_mkdir": {
-          const mkdirPath = validatePath(a.path);
+          const mkdirPath = validateRemotePath(a.path);
           await drive.mkdir(mkdirPath);
           return ok({ message: `Folder created: ${mkdirPath}` });
         }
@@ -365,7 +365,7 @@ export async function main() {
           }
           const uploadResult = await drive.upload(
             validateLocalPath(a.localPath),
-            validatePath(a.remotePath),
+            validateRemotePath(a.remotePath),
             cs as "skip" | "overwrite" | "rename"
           );
           if (uploadResult.failed > 0) {
@@ -375,11 +375,11 @@ export async function main() {
         }
 
         case "drive_download":
-          return ok(await drive.download(validatePath(a.remotePath), validateLocalPath(a.localPath)));
+          return ok(await drive.download(validateRemotePath(a.remotePath), validateLocalPath(a.localPath)));
 
         case "drive_move": {
-          const moveSrc = validatePath(a.sourcePath);
-          const moveDst = validatePath(a.destinationPath);
+          const moveSrc = validateRemotePath(a.sourcePath);
+          const moveDst = validateRemotePath(a.destinationPath);
           await drive.move(moveSrc, moveDst);
           return ok({ message: `Moved: ${moveSrc} → ${moveDst}` });
         }
@@ -388,7 +388,7 @@ export async function main() {
           if (a.confirmed !== true) {
             return fail("drive_delete requires confirmed=true. Ask the user to confirm before deleting.");
           }
-          const deletePath = validatePath(a.path);
+          const deletePath = validateRemotePath(a.path);
           await drive.delete(deletePath);
           return ok({ message: `Deleted: ${deletePath}` });
         }
@@ -397,7 +397,7 @@ export async function main() {
           return ok(await drive.listTrash());
 
         case "drive_share_status":
-          return ok(await drive.shareStatus(validatePath(a.path)));
+          return ok(await drive.shareStatus(validateRemotePath(a.path)));
 
         case "drive_share_invite": {
           const email = validateEmail(a.email);
@@ -410,7 +410,7 @@ export async function main() {
           }
           const inviteMsg = typeof a.message === "string" ? validateMessage(a.message) : undefined;
           await drive.shareInvite(
-            validatePath(a.path),
+            validateRemotePath(a.path),
             email,
             role as "viewer" | "editor" | "admin",
             inviteMsg
@@ -421,18 +421,18 @@ export async function main() {
         case "drive_share_revoke":
         {
           const revokeEmail = validateEmail(a.email);
-          await drive.shareRevoke(validatePath(a.path), revokeEmail);
+          await drive.shareRevoke(validateRemotePath(a.path), revokeEmail);
           return ok({ message: `Revoked access for ${revokeEmail}.` });
         }
 
         case "drive_trash": {
-          const trashPath = validatePath(a.path);
+          const trashPath = validateRemotePath(a.path);
           await drive.trash(trashPath);
           return ok({ message: `Moved to trash: ${trashPath}` });
         }
 
         case "drive_restore": {
-          const restorePath = validatePath(a.path);
+          const restorePath = validateRemotePath(a.path);
           await drive.restore(restorePath);
           return ok({ message: `Restored from trash: ${restorePath}` });
         }

@@ -7,7 +7,7 @@ import {
   DriveNotAuthenticatedError,
   DriveParseError,
 } from "../dist/utils/errors.js";
-import { validatePath, validateLocalPath, validateEmail, validateMessage } from "../dist/utils/validation.js";
+import { validatePath, validateRemotePath, validateLocalPath, validateEmail, validateMessage } from "../dist/utils/validation.js";
 import { checkCliAvailable } from "../dist/utils/subprocess.js";
 
 // ─── Test runner factory ──────────────────────────────────────────────────────
@@ -383,7 +383,7 @@ describe("restore", () => {
     const drive = new DriveService(t.runner);
     t.setResult(null);
     await drive.restore("/my-files/old.pdf");
-    assert.deepEqual(t.lastCall(), ["restore", "/my-files/old.pdf"]);
+    assert.deepEqual(t.lastCall(), ["trash", "restore", "/my-files/old.pdf"]);
   });
 });
 
@@ -491,6 +491,22 @@ describe("validatePath", () => {
 
   it("throws on traversal segment '..'", () => {
     assert.throws(() => validatePath("/my-files/../etc/passwd"), /must not contain/);
+  });
+
+});
+
+// ─── validateRemotePath ───────────────────────────────────────────────────────
+describe("validateRemotePath", () => {
+  it("accepts absolute remote path", () => {
+    assert.equal(validateRemotePath("/my-files/report.pdf"), "/my-files/report.pdf");
+  });
+
+  it("throws on relative path (no leading slash)", () => {
+    assert.throws(() => validateRemotePath("my-files/report.pdf"), /must be absolute/);
+  });
+
+  it("inherits validatePath checks (traversal)", () => {
+    assert.throws(() => validateRemotePath("/my-files/../etc/passwd"), /must not contain/);
   });
 });
 

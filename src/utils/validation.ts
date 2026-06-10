@@ -14,6 +14,12 @@ export function validatePath(path: unknown): string {
   return p;
 }
 
+export function validateRemotePath(path: unknown): string {
+  const p = validatePath(path);
+  if (!p.startsWith("/")) throw new Error(`remote path must be absolute (start with '/'): ${p}`);
+  return p;
+}
+
 export function validateMessage(message: unknown): string {
   const m = String(message ?? "").trim();
   if (m.startsWith("-")) throw new Error(`message must not start with '-': ${m}`);
