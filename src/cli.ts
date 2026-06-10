@@ -166,6 +166,10 @@ async function run() {
           console.error("Usage: share invite <path> <email> <role>");
           process.exit(1);
         }
+        if (email.startsWith("-")) {
+          console.error(`Invalid email: ${email}`);
+          process.exit(1);
+        }
         if (!["viewer", "editor", "admin"].includes(role)) {
           console.error(`Invalid role: ${role}. Must be viewer, editor, or admin.`);
           process.exit(1);

@@ -28,8 +28,8 @@ jobs:
           TAG=${GITHUB_REF_NAME#v}
           [ "$PKG" = "$TAG" ] || (echo "package.json version ($PKG) does not match tag ($TAG)" && exit 1)
 
-      - name: Run tests
-        run: npm test
+      - name: Lint and test
+        run: npm run ci
 
       - name: Publish
         run: npm publish

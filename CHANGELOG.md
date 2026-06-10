@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.9 — 2026-06-10
+
+### Fixed
+- `drive_trash` and `drive_restore` success messages now include the path (e.g. `"Moved to trash: /my-files/old.pdf"`)
+- `validateEmail` now rejects values starting with `-` — consistent with `validatePath` and `validateMessage`
+- `drive_share_revoke` success message now uses the validated email string instead of the raw `a.email` input
+- CLI `share invite` now rejects email values starting with `-` before calling the service
+- Publish workflow now runs `npm run ci` (lint + test) instead of only `npm test`, ensuring type errors don't block a publish
+
 ## 1.0.8 — 2026-06-10
 
 ### Fixed

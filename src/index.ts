@@ -61,6 +61,7 @@ function validateMessage(message: unknown): string {
 
 function validateEmail(email: unknown): string {
   const e = String(email ?? "").trim();
+  if (e.startsWith("-")) throw new Error(`email must not start with '-': ${e}`);
   if (!EMAIL_RE.test(e)) throw new Error(`invalid email address: ${e}`);
   return e;
 }
@@ -417,16 +418,23 @@ async function main() {
         }
 
         case "drive_share_revoke":
-          await drive.shareRevoke(validatePath(a.path), validateEmail(a.email));
-          return ok({ message: `Revoked access for ${a.email}.` });
+        {
+          const revokeEmail = validateEmail(a.email);
+          await drive.shareRevoke(validatePath(a.path), revokeEmail);
+          return ok({ message: `Revoked access for ${revokeEmail}.` });
+        }
 
-        case "drive_trash":
-          await drive.trash(validatePath(a.path));
-          return ok({ message: "Moved to trash." });
+        case "drive_trash": {
+          const trashPath = validatePath(a.path);
+          await drive.trash(trashPath);
+          return ok({ message: `Moved to trash: ${trashPath}` });
+        }
 
-        case "drive_restore":
-          await drive.restore(validatePath(a.path));
-          return ok({ message: "Restored from trash." });
+        case "drive_restore": {
+          const restorePath = validatePath(a.path);
+          await drive.restore(restorePath);
+          return ok({ message: `Restored from trash: ${restorePath}` });
+        }
 
         case "drive_empty_trash":
           if (a.confirmed !== true) {
