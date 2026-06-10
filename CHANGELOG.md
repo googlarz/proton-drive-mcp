@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.18 — 2026-06-10
+
+### Fixed
+- CI publish workflow now has NPM_TOKEN secret configured
+
 ## 1.0.17 — 2026-06-10
 
 ### Added
