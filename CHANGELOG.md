@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.16 — 2026-06-10
+
+### Improved
+- **Tool descriptions rewritten** — all 16 tools now include usage guidelines (when to use vs alternatives), behavioral transparency (side effects, auth requirements, overwrite warnings), and richer parameter descriptions with format constraints
+- **MCP annotations added** — `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` set correctly on all tools; improves tool selection by MCP clients and raises Glama TDQS baseline scores
+
 ## 1.0.15 — 2026-06-10
 
 ### Fixed
