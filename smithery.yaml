@@ -28,10 +28,15 @@ tools:
   - drive_trash
   - drive_restore
   - drive_empty_trash
+  - drive_read_file
+  - drive_write_file
 startCommand:
   type: stdio
   configSchema:
     type: object
-    properties: {}
+    properties:
+      PROTON_DRIVE_SYNC_PATH:
+        type: string
+        description: "Absolute path to the root of your local Proton Drive sync folder. Required only for drive_read_file and drive_write_file. Example: /Users/you/Proton Drive"
   commandFunction: |-
     (_config) => ({ command: "npx", args: ["-y", "proton-drive-mcp"] })

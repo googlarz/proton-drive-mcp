@@ -222,6 +222,9 @@ proton-drive-cli share status /my-files/Projects
 ### Trash
 `drive_list_trash` · `drive_trash` · `drive_restore` · `drive_empty_trash`
 
+### Local sync (requires `PROTON_DRIVE_SYNC_PATH`)
+`drive_read_file` · `drive_write_file`
+
 ---
 
 ## Tool reference
@@ -244,6 +247,8 @@ proton-drive-cli share status /my-files/Projects
 | `drive_trash` | Move to trash | `path` |
 | `drive_restore` | Restore from trash | `path` |
 | `drive_empty_trash` | Permanently delete all trash ⚠️ | `confirmed: true` |
+| `drive_read_file` | Read text file from local sync folder | `path` |
+| `drive_write_file` | Write text file to local sync folder ⚠️ | `path`, `content` |
 
 > ⚠️ **Destructive tools** require `confirmed: true`. Use `drive_list_trash` first so you know what will be deleted, then pass `confirmed: true` to proceed.
 
@@ -271,7 +276,19 @@ proton-drive-cli share status /my-files/Projects
 
 ---
 
+## Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `PROTON_DRIVE_SYNC_PATH` | Optional | Absolute path to your local Proton Drive sync folder root (e.g. `/Users/you/Proton Drive`). Required only for `drive_read_file` and `drive_write_file`. The Proton Drive desktop app must be running to sync written files to the cloud. |
+| `PROTON_DRIVE_BIN` | Optional | Override the `proton-drive` binary name or path (default: `proton-drive`). Useful for non-standard installations. |
+
+---
+
 ## Troubleshooting
+
+**"PROTON_DRIVE_SYNC_PATH is not set"**  
+Add `"PROTON_DRIVE_SYNC_PATH": "/absolute/path/to/your/Proton Drive"` to your Claude Desktop MCP config env block. The path must point to the root folder that the Proton Drive desktop app syncs to.
 
 **"proton-drive CLI not found"**  
 Download from [proton.me/download/drive/cli](https://proton.me/download/drive/cli/index.html) and ensure the binary is in your `PATH`. Verify with `which proton-drive`.

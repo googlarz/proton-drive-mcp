@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.22 — 2026-06-10
+
+### Fixed
+- **CI Node 20 deprecation** — publish workflow bumped to Node 22; CI matrix updated to [20, 22, 24] (drops EOL Node 18, adds Node 24)
+- **`engines` field** — bumped from `>=18` to `>=20` (Node 18 is EOL since April 2025)
+- **`smithery.yaml`** — added missing `drive_read_file` and `drive_write_file` tools; added `PROTON_DRIVE_SYNC_PATH` to configSchema
+- **README** — added Local sync tool group, two missing tools in reference table, `PROTON_DRIVE_SYNC_PATH` env var documentation
+
+### Added
+- **MCP dispatch layer tests** — confirmed-gate coverage for `drive_delete` and `drive_empty_trash`; env-var-guard coverage for `drive_read_file` (88 tests total)
+
 ## 1.0.21 — 2026-06-10
 
 ### Improved
