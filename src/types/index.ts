@@ -47,8 +47,3 @@ export interface DriveVersion {
   sdk: string;
 }
 
-export interface CliResult<T = unknown> {
-  ok: boolean;
-  data?: T;
-  error?: string;
-}

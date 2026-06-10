@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.3 — 2026-06-10
+
+### Fixed
+- CLI error handler now surfaces `DriveParseError` as "Parse error: ..." (was "Error: Error: ...")
+- CLI catch-all for plain `Error` instances now prints `err.message` directly (was `String(err)` → "Error: Error: message")
+- Removed unused `CliResult<T>` type from `src/types/index.ts`
+- Removed stray double blank line in `src/cli.ts`
+
 ## 1.0.2 — 2026-06-10
 
 ### Fixed

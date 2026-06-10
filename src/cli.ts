@@ -27,7 +27,7 @@
  */
 
 import { DriveService } from "./services/drive.js";
-import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError } from "./utils/errors.js";
+import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./utils/errors.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
 
 const drive = new DriveService();
@@ -87,8 +87,6 @@ async function run() {
     usage();
     return;
   }
-
-
 
   switch (cmd) {
     case "auth":
@@ -206,6 +204,10 @@ run().catch((err) => {
   } else if (err instanceof DriveCliError) {
     console.error(`CLI error: ${err.message}`);
     if (err.stderr) console.error(err.stderr);
+  } else if (err instanceof DriveParseError) {
+    console.error(`Parse error: ${err.message}`);
+  } else if (err instanceof Error) {
+    console.error(err.message);
   } else {
     console.error("Error:", String(err));
   }
