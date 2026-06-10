@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.7 — 2026-06-10
+
+### Fixed
+- `validatePath` now rejects values starting with `-`, preventing a flag-injection scenario where an LLM could pass a value like `--skip-thumbnails` as a path and alter CLI behavior
+- `drive_mkdir` success message now uses the validated path string instead of the raw `a.path` input
+
 ## 1.0.6 — 2026-06-10
 
 ### Fixed

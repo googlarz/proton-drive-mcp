@@ -48,6 +48,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function validatePath(path: unknown): string {
   const p = String(path ?? "").trim();
   if (!p) throw new Error("path must not be empty");
+  if (p.startsWith("-")) throw new Error(`path must not start with '-': ${p}`);
   return p;
 }
 
@@ -347,9 +348,11 @@ async function main() {
         case "drive_list":
           return ok(await drive.list(validatePath(a.path)));
 
-        case "drive_mkdir":
-          await drive.mkdir(validatePath(a.path));
-          return ok({ message: `Folder created: ${a.path}` });
+        case "drive_mkdir": {
+          const mkdirPath = validatePath(a.path);
+          await drive.mkdir(mkdirPath);
+          return ok({ message: `Folder created: ${mkdirPath}` });
+        }
 
         case "drive_upload": {
           const cs = (a.conflictStrategy as string) ?? "skip";
