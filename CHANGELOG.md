@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.6 — 2026-06-10
+
+### Fixed
+- `drive_share_invite` MCP handler now validates `role` at runtime (viewer/editor/admin), consistent with the CLI companion and the `conflictStrategy` guard added in v1.0.4
+- Removed `.d.ts`, `.d.ts.map`, and `.js.map` files from the published package — this is a CLI tool, not a library; declaration files and source maps have no value for consumers (package shrinks from ~50 kB to ~50 kB unpacked, ~22 kB to ~14 kB packed)
+
+### Changed
+- CI workflow: removed redundant `Build` step — `npm test` already calls `npm run build` internally, so the explicit step was building twice
+- Publish workflow: added version-tag match check — fails the publish job if `package.json` version doesn't match the pushed git tag, preventing accidental version drift
+
 ## 1.0.5 — 2026-06-10
 
 ### Fixed

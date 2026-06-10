@@ -387,13 +387,17 @@ async function main() {
 
         case "drive_share_invite": {
           const email = validateEmail(a.email);
+          const role = (a.role as string) ?? "viewer";
+          if (!["viewer", "editor", "admin"].includes(role)) {
+            throw new Error("role must be viewer, editor, or admin");
+          }
           await drive.shareInvite(
             validatePath(a.path),
             email,
-            (a.role as "viewer" | "editor" | "admin") ?? "viewer",
+            role as "viewer" | "editor" | "admin",
             typeof a.message === "string" ? a.message : undefined
           );
-          return ok({ message: `Invited ${email} as ${a.role}.` });
+          return ok({ message: `Invited ${email} as ${role}.` });
         }
 
         case "drive_share_revoke":

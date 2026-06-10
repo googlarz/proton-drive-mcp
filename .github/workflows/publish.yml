@@ -22,8 +22,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build
+      - name: Verify version matches tag
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          TAG=${GITHUB_REF_NAME#v}
+          [ "$PKG" = "$TAG" ] || (echo "package.json version ($PKG) does not match tag ($TAG)" && exit 1)
 
       - name: Run tests
         run: npm test
