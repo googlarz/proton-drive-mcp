@@ -90,6 +90,23 @@ function print(data: unknown) {
 }
 
 async function run() {
+  // Strip --json from positional parsing
+  const positional = args.filter((a) => a !== "--json");
+  const [cmd, sub, ...rest] = positional;
+
+  // Invoked with no arguments: start the MCP server.
+  // This supports Glama/Docker environments that run `node dist/cli.js` with no args.
+  if (!cmd) {
+    const { main } = await import("./index.js");
+    await main();
+    return;
+  }
+
+  if (cmd === "--help" || cmd === "-h") {
+    usage();
+    return;
+  }
+
   const cliCheck = await checkCliAvailable();
   if (!cliCheck.available) {
     const msg = cliCheck.reason === "not_executable"
@@ -97,15 +114,6 @@ async function run() {
       : "Error: proton-drive CLI not found in PATH.\nDownload from https://proton.me/download/drive/cli/index.html";
     console.error(msg);
     process.exit(1);
-  }
-
-  // Strip --json from positional parsing
-  const positional = args.filter((a) => a !== "--json");
-  const [cmd, sub, ...rest] = positional;
-
-  if (!cmd || cmd === "--help" || cmd === "-h") {
-    usage();
-    return;
   }
 
   switch (cmd) {

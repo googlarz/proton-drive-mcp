@@ -307,7 +307,7 @@ const TOOLS = [
   },
 ] as const;
 
-async function main() {
+export async function main() {
   // Warn if the CLI is missing but don't exit — the server must start so MCP
   // hosts can introspect tools. Individual tool calls will return a clear error.
   const cliCheck = await checkCliAvailable();
