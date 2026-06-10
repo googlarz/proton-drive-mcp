@@ -28,8 +28,8 @@ export class DriveNotAuthenticatedError extends Error {
 }
 
 export class DriveParseError extends Error {
-  constructor(raw: string) {
-    super(`Failed to parse CLI output as JSON. Raw output: ${raw.slice(0, 200)}`);
+  constructor(message: string) {
+    super(message);
     this.name = "DriveParseError";
   }
 }

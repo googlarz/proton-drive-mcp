@@ -3,9 +3,11 @@ import { describe, it, beforeEach } from "node:test";
 import { DriveService } from "../dist/services/drive.js";
 import {
   DriveCliError,
+  DriveCliNotFoundError,
   DriveNotAuthenticatedError,
   DriveParseError,
 } from "../dist/utils/errors.js";
+import { validatePath, validateEmail, validateMessage } from "../dist/utils/validation.js";
 
 // ─── Test runner factory ──────────────────────────────────────────────────────
 function makeRunner() {
@@ -359,5 +361,101 @@ describe("error handling", () => {
     const drive = new DriveService(t.runner);
     t.setError(new DriveNotAuthenticatedError());
     await assert.rejects(() => drive.authStatus(), { name: "DriveNotAuthenticatedError" });
+  });
+
+  it("propagates DriveCliNotFoundError", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setError(new DriveCliNotFoundError());
+    await assert.rejects(() => drive.authStatus(), { name: "DriveCliNotFoundError" });
+  });
+});
+
+// ─── validatePath ─────────────────────────────────────────────────────────────
+describe("validatePath", () => {
+  it("returns the path unchanged when valid", () => {
+    assert.equal(validatePath("/my-files/report.pdf"), "/my-files/report.pdf");
+  });
+
+  it("trims whitespace", () => {
+    assert.equal(validatePath("  /my-files  "), "/my-files");
+  });
+
+  it("throws on empty string", () => {
+    assert.throws(() => validatePath(""), /must not be empty/);
+  });
+
+  it("throws on null", () => {
+    assert.throws(() => validatePath(null), /must not be empty/);
+  });
+
+  it("throws on undefined", () => {
+    assert.throws(() => validatePath(undefined), /must not be empty/);
+  });
+
+  it("throws on leading dash (flag injection)", () => {
+    assert.throws(() => validatePath("--skip-thumbnails"), /must not start with '-'/);
+  });
+
+  it("throws on path containing '..' (traversal)", () => {
+    assert.throws(() => validatePath("/my-files/../../../etc/passwd"), /must not contain '\.\.'/);
+  });
+
+  it("throws on path containing control characters", () => {
+    assert.throws(() => validatePath("/my-files/\x00evil"), /control characters/);
+  });
+
+  it("accepts paths with spaces", () => {
+    assert.equal(validatePath("/my files/sub dir"), "/my files/sub dir");
+  });
+
+  it("accepts unicode paths", () => {
+    assert.equal(validatePath("/földer/ñame.pdf"), "/földer/ñame.pdf");
+  });
+});
+
+// ─── validateEmail ────────────────────────────────────────────────────────────
+describe("validateEmail", () => {
+  it("returns the email unchanged when valid", () => {
+    assert.equal(validateEmail("user@example.com"), "user@example.com");
+  });
+
+  it("trims whitespace", () => {
+    assert.equal(validateEmail("  user@example.com  "), "user@example.com");
+  });
+
+  it("throws on invalid format — no @", () => {
+    assert.throws(() => validateEmail("notanemail"), /invalid email/);
+  });
+
+  it("throws on invalid format — no domain", () => {
+    assert.throws(() => validateEmail("user@"), /invalid email/);
+  });
+
+  it("throws on leading dash (flag injection)", () => {
+    assert.throws(() => validateEmail("-role admin"), /must not start with '-'/);
+  });
+
+  it("throws on empty string", () => {
+    assert.throws(() => validateEmail(""), /invalid email/);
+  });
+});
+
+// ─── validateMessage ──────────────────────────────────────────────────────────
+describe("validateMessage", () => {
+  it("returns the message unchanged when valid", () => {
+    assert.equal(validateMessage("Please review"), "Please review");
+  });
+
+  it("returns empty string for empty input", () => {
+    assert.equal(validateMessage(""), "");
+  });
+
+  it("throws on leading dash (flag injection)", () => {
+    assert.throws(() => validateMessage("--role admin"), /must not start with '-'/);
+  });
+
+  it("accepts messages with special characters", () => {
+    assert.equal(validateMessage("Hello, world! 🎉"), "Hello, world! 🎉");
   });
 });

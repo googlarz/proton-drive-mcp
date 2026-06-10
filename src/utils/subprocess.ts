@@ -24,23 +24,28 @@ export async function runDrive(args: string[]): Promise<unknown> {
     const { stdout, stderr } = await execFileAsync(
       CLI_BINARY,
       [...args, "--json"],
-      { timeout: timeoutFor(args) }
+      { timeout: timeoutFor(args), maxBuffer: 50 * 1024 * 1024, killSignal: "SIGKILL" }
     );
 
-    if (stderr && stderr.trim()) {
-      const lower = stderr.toLowerCase();
-      if (lower.includes("not authenticated") || lower.includes("not logged in")) {
-        throw new DriveNotAuthenticatedError();
-      }
-    }
-
     const raw = stdout.trim();
-    if (!raw) return null;
+
+    // Only check stderr for auth errors when stdout is empty. If the CLI wrote
+    // valid JSON, we honour it even when warnings appear on stderr.
+    if (!raw) {
+      if (stderr && stderr.trim()) {
+        const lower = stderr.toLowerCase();
+        if (lower.includes("not authenticated") || lower.includes("not logged in")) {
+          throw new DriveNotAuthenticatedError();
+        }
+      }
+      return null;
+    }
 
     try {
       return JSON.parse(raw);
     } catch {
-      throw new DriveParseError(raw);
+      process.stderr.write(`[proton-drive-mcp] parse error: ${raw.slice(0, 500)}\n`);
+      throw new DriveParseError("Failed to parse CLI output as JSON");
     }
   } catch (err) {
     if (

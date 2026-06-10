@@ -17,6 +17,7 @@ import {
   DriveNotAuthenticatedError,
   DriveParseError,
 } from "./utils/errors.js";
+import { validatePath, validateEmail, validateMessage } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
 
 const require = createRequire(import.meta.url);
@@ -41,29 +42,6 @@ function fail(message: string): ToolResult {
     content: [{ type: "text", text: message }],
     isError: true,
   };
-}
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-function validatePath(path: unknown): string {
-  const p = String(path ?? "").trim();
-  if (!p) throw new Error("path must not be empty");
-  if (p.startsWith("-")) throw new Error(`path must not start with '-': ${p}`);
-  if (/[\x00-\x1f]/.test(p)) throw new Error("path contains control characters");
-  return p;
-}
-
-function validateMessage(message: unknown): string {
-  const m = String(message ?? "").trim();
-  if (m.startsWith("-")) throw new Error(`message must not start with '-': ${m}`);
-  return m;
-}
-
-function validateEmail(email: unknown): string {
-  const e = String(email ?? "").trim();
-  if (e.startsWith("-")) throw new Error(`email must not start with '-': ${e}`);
-  if (!EMAIL_RE.test(e)) throw new Error(`invalid email address: ${e}`);
-  return e;
 }
 
 function handleError(err: unknown): ToolResult {

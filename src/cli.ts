@@ -29,6 +29,7 @@
 import { DriveService } from "./services/drive.js";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./utils/errors.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
+import { validatePath, validateEmail } from "./utils/validation.js";
 
 const drive = new DriveService();
 const args = process.argv.slice(2);
@@ -59,6 +60,17 @@ Commands:
 Flags:
   --json                                   Machine-readable JSON output (one line)
 `);
+}
+
+function requirePath(value: string | undefined, usage: string): string {
+  if (!value) { console.error(`Usage: ${usage}`); process.exit(1); }
+  try { return validatePath(value); }
+  catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); }
+}
+
+function requireEmail(value: string): string {
+  try { return validateEmail(value); }
+  catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); }
 }
 
 function getFlag(flag: string): string | undefined {
@@ -111,13 +123,12 @@ async function run() {
       break;
 
     case "list":
-      if (!sub) { console.error("Usage: list <path>"); process.exit(1); }
-      print(await drive.list(sub));
+      print(await drive.list(requirePath(sub, "list <path>")));
       break;
 
     case "upload": {
-      const [local, remote] = [sub, rest[0]];
-      if (!local || !remote) { console.error("Usage: upload <local> <remote>"); process.exit(1); }
+      const local = requirePath(sub, "upload <local> <remote>");
+      const remote = requirePath(rest[0], "upload <local> <remote>");
       const conflictRaw = getFlag("--conflict") ?? "skip";
       if (!["skip", "overwrite", "rename"].includes(conflictRaw)) {
         console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip, overwrite, or rename.`);
@@ -129,59 +140,55 @@ async function run() {
     }
 
     case "download": {
-      const [remote, local] = [sub, rest[0]];
-      if (!remote || !local) { console.error("Usage: download <remote> <local>"); process.exit(1); }
+      const remote = requirePath(sub, "download <remote> <local>");
+      const local = requirePath(rest[0], "download <remote> <local>");
       print(await drive.download(remote, local));
       break;
     }
 
     case "move": {
-      const [src, dst] = [sub, rest[0]];
-      if (!src || !dst) { console.error("Usage: move <src> <dst>"); process.exit(1); }
+      const src = requirePath(sub, "move <src> <dst>");
+      const dst = requirePath(rest[0], "move <src> <dst>");
       await drive.move(src, dst);
       console.log("Moved.");
       break;
     }
 
     case "mkdir":
-      if (!sub) { console.error("Usage: mkdir <path>"); process.exit(1); }
-      await drive.mkdir(sub);
+      await drive.mkdir(requirePath(sub, "mkdir <path>"));
       console.log("Folder created.");
       break;
 
     case "delete":
-      if (!sub) { console.error("Usage: delete <path>"); process.exit(1); }
-      await drive.delete(sub);
+      await drive.delete(requirePath(sub, "delete <path>"));
       console.log("Deleted.");
       break;
 
     case "share":
       if (sub === "status") {
-        const path = rest[0];
-        if (!path) { console.error("Usage: share status <path>"); process.exit(1); }
-        print(await drive.shareStatus(path));
+        print(await drive.shareStatus(requirePath(rest[0], "share status <path>")));
       } else if (sub === "invite") {
-        const [path, email, role] = rest;
-        if (!path || !email || !role) {
+        const [rawPath, rawEmail, role] = rest;
+        if (!rawPath || !rawEmail || !role) {
           console.error("Usage: share invite <path> <email> <role>");
-          process.exit(1);
-        }
-        if (email.startsWith("-")) {
-          console.error(`Invalid email: ${email}`);
           process.exit(1);
         }
         if (!["viewer", "editor", "admin"].includes(role)) {
           console.error(`Invalid role: ${role}. Must be viewer, editor, or admin.`);
           process.exit(1);
         }
+        const invitePath = requirePath(rawPath, "share invite <path> <email> <role>");
+        const inviteEmail = requireEmail(rawEmail);
         const message = getFlag("--message");
-        await drive.shareInvite(path, email, role as "viewer" | "editor" | "admin", message);
-        console.log(`Invited ${email} as ${role}.`);
+        await drive.shareInvite(invitePath, inviteEmail, role as "viewer" | "editor" | "admin", message);
+        console.log(`Invited ${inviteEmail} as ${role}.`);
       } else if (sub === "revoke") {
-        const [path, email] = rest;
-        if (!path || !email) { console.error("Usage: share revoke <path> <email>"); process.exit(1); }
-        await drive.shareRevoke(path, email);
-        console.log(`Revoked access for ${email}.`);
+        const [rawPath, rawEmail] = rest;
+        if (!rawPath || !rawEmail) { console.error("Usage: share revoke <path> <email>"); process.exit(1); }
+        const revokePath = requirePath(rawPath, "share revoke <path> <email>");
+        const revokeEmail = requireEmail(rawEmail);
+        await drive.shareRevoke(revokePath, revokeEmail);
+        console.log(`Revoked access for ${revokeEmail}.`);
       } else {
         console.error(`Unknown share subcommand: ${sub}`);
         process.exit(1);
@@ -195,7 +202,7 @@ async function run() {
       } else if (sub === "list" || sub === "ls") {
         print(await drive.listTrash());
       } else if (sub) {
-        await drive.trash(sub);
+        await drive.trash(requirePath(sub, "trash <path>"));
         console.log("Moved to trash.");
       } else {
         console.error("Usage: trash <path> | trash list | trash empty");
@@ -204,8 +211,7 @@ async function run() {
       break;
 
     case "restore":
-      if (!sub) { console.error("Usage: restore <path>"); process.exit(1); }
-      await drive.restore(sub);
+      await drive.restore(requirePath(sub, "restore <path>"));
       console.log("Restored.");
       break;
 
