@@ -72,9 +72,12 @@ export async function runDrive(args: string[]): Promise<unknown> {
   }
 }
 
+// Returns false only when the binary is not installed (ENOENT). Any other
+// error (non-zero exit, auth required, etc.) still returns true — the binary
+// is present and real errors will surface on the first actual tool call.
 export async function checkCliAvailable(): Promise<boolean> {
   try {
-    await execFileAsync(CLI_BINARY, ["version"], { timeout: 5_000 });
+    await execFileAsync(CLI_BINARY, ["version", "--json"], { timeout: 5_000 });
     return true;
   } catch (e) {
     const err = e as NodeJS.ErrnoException;

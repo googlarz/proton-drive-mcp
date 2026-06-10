@@ -248,11 +248,10 @@ describe("shareInvite", () => {
     const drive = new DriveService(t.runner);
     t.setResult(null);
     await drive.shareInvite("/my-files/Reports", "alice@pm.me", "viewer", "Please review");
-    const call = t.lastCall();
-    assert.ok(call.includes("--message"));
-    assert.ok(call.includes("Please review"));
-    // path should still be last
-    assert.equal(call[call.length - 1], "/my-files/Reports");
+    assert.deepEqual(t.lastCall(), [
+      "sharing", "invite", "--message", "Please review",
+      "--user", "alice@pm.me", "--role", "viewer", "/my-files/Reports",
+    ]);
   });
 });
 

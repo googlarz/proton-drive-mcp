@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.5 — 2026-06-10
+
+### Fixed
+- **Logger MCP mode detection** — `isMcp` was evaluated at module import time (before `main()` set the env var), causing `logger.info` to write to stdout in MCP mode and corrupt JSON-RPC framing. Now evaluated lazily on each call.
+- `drive_upload` MCP handler now validates `conflictStrategy` at runtime (schema restriction alone is insufficient for misbehaving clients)
+- `shareInvite` test now uses `deepEqual` to assert exact argument order, catching any future splice regression
+- `checkCliAvailable` now passes `--json` to `proton-drive version` for consistency with all other subprocess calls; added a comment explaining the ENOENT-only semantics
+
 ## 1.0.4 — 2026-06-10
 
 ### Fixed

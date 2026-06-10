@@ -351,14 +351,19 @@ async function main() {
           await drive.mkdir(validatePath(a.path));
           return ok({ message: `Folder created: ${a.path}` });
 
-        case "drive_upload":
+        case "drive_upload": {
+          const cs = (a.conflictStrategy as string) ?? "skip";
+          if (!["skip", "overwrite", "rename"].includes(cs)) {
+            throw new Error(`conflictStrategy must be skip, overwrite, or rename`);
+          }
           return ok(
             await drive.upload(
               validatePath(a.localPath),
               validatePath(a.remotePath),
-              (a.conflictStrategy as "skip" | "overwrite" | "rename") ?? "skip"
+              cs as "skip" | "overwrite" | "rename"
             )
           );
+        }
 
         case "drive_download":
           return ok(await drive.download(validatePath(a.remotePath), validatePath(a.localPath)));
