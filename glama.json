@@ -1,0 +1,9 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/glama.json",
+  "name": "proton-drive-mcp",
+  "description": "Claude Desktop MCP and CLI for Proton Drive. List, upload, download, share, and manage end-to-end encrypted files.",
+  "icon": "https://proton.me/favicon.ico",
+  "categories": ["storage", "productivity", "privacy"],
+  "license": "MIT",
+  "repository": "https://github.com/googlarz/proton-drive-mcp"
+}

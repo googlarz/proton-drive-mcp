@@ -1,0 +1,54 @@
+export type DriveFileType = "file" | "folder";
+
+export interface DriveFile {
+  name: string;
+  path: string;
+  type: DriveFileType;
+  size?: number;
+  modifiedAt?: string;
+  mimeType?: string;
+}
+
+export interface ShareStatus {
+  path: string;
+  isShared: boolean;
+  members: ShareMember[];
+  shareUrl?: string;
+}
+
+export interface ShareMember {
+  email: string;
+  role: ShareRole;
+  addedAt?: string;
+}
+
+export type ShareRole = "viewer" | "editor" | "admin";
+
+export interface UploadResult {
+  path: string;
+  uploaded: number;
+  skipped: number;
+  failed: number;
+}
+
+export interface DownloadResult {
+  path: string;
+  localPath: string;
+  downloaded: number;
+}
+
+export interface AuthStatus {
+  authenticated: boolean;
+  email?: string;
+}
+
+export interface DriveVersion {
+  cli: string;
+  sdk: string;
+}
+
+export interface CliResult<T = unknown> {
+  ok: boolean;
+  data?: T;
+  error?: string;
+}

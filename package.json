@@ -1,0 +1,71 @@
+{
+  "name": "proton-drive-mcp",
+  "version": "1.0.0",
+  "description": "Proton Drive MCP — Claude Desktop MCP and CLI for Proton Drive. List, upload, download, share, and manage files with end-to-end encryption.",
+  "type": "module",
+  "packageManager": "npm@10.9.3",
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "proton-drive-mcp": "dist/index.js",
+    "proton-drive-cli": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "cli": "npm run build && node dist/cli.js",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "ci": "npm run lint && npm test",
+    "pack:check": "npm pack --dry-run",
+    "release:check": "npm run lint && npm test && npm run pack:check"
+  },
+  "keywords": [
+    "proton",
+    "proton-drive",
+    "mcp",
+    "cloud-storage",
+    "encryption",
+    "claude",
+    "ai",
+    "automation",
+    "typescript"
+  ],
+  "author": {
+    "name": "googlarz",
+    "url": "https://github.com/googlarz"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/googlarz/proton-drive-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/googlarz/proton-drive-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/googlarz/proton-drive-mcp/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE",
+    "glama.json"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
