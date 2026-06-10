@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.21 — 2026-06-10
+
+### Improved
+- **Package description** rewritten across package.json, glama.json, smithery.yaml, and README — stronger hook, clearer value proposition
+
 ## 1.0.20 — 2026-06-10
 
 ### Improved

@@ -1,9 +1,9 @@
 name: proton-drive-mcp
 displayName: Proton Drive MCP
 description: >
-  Claude Desktop MCP and companion CLI for Proton Drive.
-  List, upload, download, share, and manage end-to-end encrypted files
-  without credential exposure — auth handled by the official Proton Drive CLI.
+  MCP server and CLI that gives Claude full access to Proton Drive —
+  upload, download, share, and manage your end-to-end encrypted files
+  without leaving the conversation.
 license: MIT
 homepage: https://github.com/googlarz/proton-drive-mcp
 repository: https://github.com/googlarz/proton-drive-mcp

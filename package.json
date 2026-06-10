@@ -1,7 +1,7 @@
 {
   "name": "proton-drive-mcp",
-  "version": "1.0.20",
-  "description": "Proton Drive MCP — Claude Desktop MCP and CLI for Proton Drive. List, upload, download, share, and manage files with end-to-end encryption.",
+  "version": "1.0.21",
+  "description": "MCP server and CLI that gives Claude full access to Proton Drive — upload, download, share, and manage your end-to-end encrypted files without leaving the conversation.",
   "type": "module",
   "main": "dist/index.js",
   "exports": {

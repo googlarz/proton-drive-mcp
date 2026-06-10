@@ -4,7 +4,7 @@
  | |_) | |_) | | | || || | | |  \| | | | | | |_) || | \ \ / /|  _|  
  |  __/|  _ <| |_| || || |_| | |\  | | |_| |  _ < | |  \ V / | |___ 
  |_|   |_| \_\\___/ |_| \___/|_| \_| |____/|_| \_\___|  \_/  |_____|
-  MCP  ·  CLI + Claude Desktop MCP for Proton Drive
+  MCP server and CLI · Full Proton Drive control for Claude
 ```
 
 <div align="center">
