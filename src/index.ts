@@ -308,13 +308,14 @@ const TOOLS = [
 ] as const;
 
 async function main() {
+  // Warn if the CLI is missing but don't exit — the server must start so MCP
+  // hosts can introspect tools. Individual tool calls will return a clear error.
   const cliCheck = await checkCliAvailable();
   if (!cliCheck.available) {
     const msg = cliCheck.reason === "not_executable"
       ? "proton-drive CLI found but not executable. Run: chmod +x $(which proton-drive)"
       : "proton-drive CLI not found. Download from https://proton.me/download/drive/cli/index.html";
     logger.error(msg);
-    process.exit(1);
   }
 
   const drive = new DriveService();
