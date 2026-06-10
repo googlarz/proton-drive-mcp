@@ -39,4 +39,8 @@ startCommand:
         type: string
         description: "Absolute path to the root of your local Proton Drive sync folder. Required only for drive_read_file and drive_write_file. Example: /Users/you/Proton Drive"
   commandFunction: |-
-    (_config) => ({ command: "npx", args: ["-y", "proton-drive-mcp"] })
+    (config) => ({
+      command: "npx",
+      args: ["-y", "proton-drive-mcp"],
+      env: config.PROTON_DRIVE_SYNC_PATH ? { PROTON_DRIVE_SYNC_PATH: config.PROTON_DRIVE_SYNC_PATH } : {}
+    })

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.23 — 2026-06-10
+
+### Fixed
+- **README** — "14 operations" corrected to 18; Node.js requirement updated to 20+ in text and badge
+- **`smithery.yaml`** — `commandFunction` now forwards `PROTON_DRIVE_SYNC_PATH` env var from config to the process
+
 ## 1.0.22 — 2026-06-10
 
 ### Fixed

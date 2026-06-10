@@ -12,7 +12,7 @@
 [![npm version](https://img.shields.io/npm/v/proton-drive-mcp?color=%236d4aff&label=npm)](https://www.npmjs.com/package/proton-drive-mcp)
 [![CI](https://github.com/googlarz/proton-drive-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/googlarz/proton-drive-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node.js 18+](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
+[![Node.js 20+](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet)](https://modelcontextprotocol.io)
 [![GitHub stars](https://img.shields.io/github/stars/googlarz/proton-drive-mcp?style=social)](https://github.com/googlarz/proton-drive-mcp)
@@ -29,7 +29,7 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive: list f
 ## What you get
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
-- **Full CLI** — same 14 operations, scriptable and pipeable, works in cron and shell scripts
+- **Full CLI** — same 18 operations, scriptable and pipeable, works in cron and shell scripts
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
 - **Shell injection safe** — all CLI calls use `execFile` with discrete argument arrays, never string interpolation
 - **Privacy-native** — end-to-end encryption is handled by Proton's own CLI; this server is just a thin MCP wrapper
@@ -58,7 +58,7 @@ proton-drive auth login
 
 This opens a browser for Proton's standard sign-in flow. Credentials are stored in your OS keychain — not on disk, not in config files.
 
-**3. Node.js 18 or later** — `node --version` to check.
+**3. Node.js 20 or later** — `node --version` to check.
 
 ---
 
