@@ -439,6 +439,10 @@ describe("validateEmail", () => {
   it("throws on empty string", () => {
     assert.throws(() => validateEmail(""), /invalid email/);
   });
+
+  it("throws on control characters", () => {
+    assert.throws(() => validateEmail("user\x00@example.com"), /control characters/);
+  });
 });
 
 // ─── validateMessage ──────────────────────────────────────────────────────────

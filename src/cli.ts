@@ -29,7 +29,7 @@
 import { DriveService } from "./services/drive.js";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./utils/errors.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
-import { validatePath, validateEmail } from "./utils/validation.js";
+import { validatePath, validateEmail, validateMessage } from "./utils/validation.js";
 
 const drive = new DriveService();
 const args = process.argv.slice(2);
@@ -179,7 +179,8 @@ async function run() {
         }
         const invitePath = requirePath(rawPath, "share invite <path> <email> <role>");
         const inviteEmail = requireEmail(rawEmail);
-        const message = getFlag("--message");
+        const rawMessage = getFlag("--message");
+        const message = rawMessage !== undefined ? validateMessage(rawMessage) : undefined;
         await drive.shareInvite(invitePath, inviteEmail, role as "viewer" | "editor" | "admin", message);
         console.log(`Invited ${inviteEmail} as ${role}.`);
       } else if (sub === "revoke") {

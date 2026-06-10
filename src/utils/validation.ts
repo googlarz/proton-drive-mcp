@@ -18,6 +18,7 @@ export function validateMessage(message: unknown): string {
 export function validateEmail(email: unknown): string {
   const e = String(email ?? "").trim();
   if (e.startsWith("-")) throw new Error(`email must not start with '-': ${e}`);
+  if (/[\x00-\x1f]/.test(e)) throw new Error("email contains control characters");
   if (!EMAIL_RE.test(e)) throw new Error(`invalid email address: ${e}`);
   return e;
 }

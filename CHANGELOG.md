@@ -6,6 +6,8 @@
 - **Path traversal guard** — `validatePath` now rejects paths containing `..` segments (e.g. `/my-files/../../etc/passwd`); previously only leading dashes and control characters were blocked
 - **CLI path validation** — all path arguments in the CLI companion are now validated through `validatePath` (flag-injection check, control-char check, traversal check) before reaching `DriveService`; previously CLI args were passed raw
 - **CLI email validation** — `share invite` and `share revoke` now run `validateEmail` (full format + leading-dash check) on the email argument; previously only a leading-dash check was applied
+- **CLI `--message` validation** — `share invite` now validates the `--message` flag value through `validateMessage` before passing to `DriveService`; consistent with MCP handler
+- **`validateEmail` control characters** — email validation now rejects values containing `\x00–\x1f`, consistent with `validatePath`
 - **`DriveParseError` no longer leaks raw CLI output** — the error message shown to MCP clients is now the generic `"Failed to parse CLI output as JSON"`; the raw bytes are written to stderr for diagnostics
 - **Subprocess auth check ordering** — stderr is now only checked for "not authenticated" when stdout is empty; previously a CLI warning on stderr could cause a valid JSON response to be discarded
 - **`maxBuffer`** — `execFileAsync` now sets `maxBuffer: 50MB`; previously the 1MB default caused an unhandled `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` error on large directory listings
@@ -13,7 +15,7 @@
 
 ### Added
 - `src/utils/validation.ts` — shared validation module; `validatePath`, `validateEmail`, `validateMessage` are now in one place, used by both the MCP server and the CLI companion
-- Tests: `validatePath` (10 cases), `validateEmail` (6 cases), `validateMessage` (4 cases), `DriveCliNotFoundError` propagation — 52 tests total
+- Tests: `validatePath` (10 cases), `validateEmail` (7 cases — including control chars), `validateMessage` (4 cases), `DriveCliNotFoundError` propagation — 53 tests total
 
 ## 1.0.9 — 2026-06-10
 
