@@ -113,7 +113,12 @@ async function run() {
     case "upload": {
       const [local, remote] = [sub, rest[0]];
       if (!local || !remote) { console.error("Usage: upload <local> <remote>"); process.exit(1); }
-      const conflict = (getFlag("--conflict") as "skip" | "overwrite" | "rename") ?? "skip";
+      const conflictRaw = getFlag("--conflict") ?? "skip";
+      if (!["skip", "overwrite", "rename"].includes(conflictRaw)) {
+        console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip, overwrite, or rename.`);
+        process.exit(1);
+      }
+      const conflict = conflictRaw as "skip" | "overwrite" | "rename";
       print(await drive.upload(local, remote, conflict));
       break;
     }
@@ -154,6 +159,10 @@ async function run() {
         const [path, email, role] = rest;
         if (!path || !email || !role) {
           console.error("Usage: share invite <path> <email> <role>");
+          process.exit(1);
+        }
+        if (!["viewer", "editor", "admin"].includes(role)) {
+          console.error(`Invalid role: ${role}. Must be viewer, editor, or admin.`);
           process.exit(1);
         }
         const message = getFlag("--message");

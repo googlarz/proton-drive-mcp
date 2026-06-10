@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.4 — 2026-06-10
+
+### Fixed
+- Timeout errors now surface as "CLI process timed out after Xs" instead of the generic "Command failed" message
+- `--conflict` flag in CLI `upload` command now validates the value (skip/overwrite/rename) before calling the service
+- `role` argument in CLI `share invite` command now validates the value (viewer/editor/admin) before calling the service
+
+### Added
+- Tests for `drive_version` covering both standard `{ cli, sdk }` response and the `{ version }` fallback shape (28 tests total)
+
 ## 1.0.3 — 2026-06-10
 
 ### Fixed

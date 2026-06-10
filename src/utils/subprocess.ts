@@ -51,13 +51,18 @@ export async function runDrive(args: string[]): Promise<unknown> {
       throw err;
     }
 
-    const e = err as NodeJS.ErrnoException;
+    const e = err as NodeJS.ErrnoException & { killed?: boolean; stderr?: string };
 
     if (e.code === "ENOENT") {
       throw new DriveCliNotFoundError();
     }
 
-    const stderr = (e as { stderr?: string }).stderr ?? "";
+    if (e.killed === true) {
+      const secs = timeoutFor(args) / 1000;
+      throw new DriveCliError(`CLI process timed out after ${secs}s`, "");
+    }
+
+    const stderr = e.stderr ?? "";
     const lower = stderr.toLowerCase();
     if (lower.includes("not authenticated") || lower.includes("not logged in")) {
       throw new DriveNotAuthenticatedError();

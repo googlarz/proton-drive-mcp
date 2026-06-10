@@ -68,6 +68,27 @@ describe("authLogout", () => {
   });
 });
 
+describe("version", () => {
+  it("returns cli and sdk from standard response", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ cli: "1.2.3", sdk: "4.5.6" });
+    const v = await drive.version();
+    assert.equal(v.cli, "1.2.3");
+    assert.equal(v.sdk, "4.5.6");
+    assert.deepEqual(t.lastCall(), ["version"]);
+  });
+
+  it("falls back to version key when cli key is absent", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ version: "2.0.0" });
+    const v = await drive.version();
+    assert.equal(v.cli, "2.0.0");
+    assert.equal(v.sdk, "unknown");
+  });
+});
+
 // ─── Filesystem ───────────────────────────────────────────────────────────────
 describe("list", () => {
   it("returns parsed file list", async () => {
