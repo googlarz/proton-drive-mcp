@@ -143,6 +143,16 @@ describe("download", () => {
   });
 });
 
+describe("mkdir", () => {
+  it("calls filesystem mkdir", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await drive.mkdir("/my-files/NewFolder");
+    assert.deepEqual(t.lastCall(), ["filesystem", "mkdir", "/my-files/NewFolder"]);
+  });
+});
+
 describe("move", () => {
   it("calls filesystem move", async () => {
     const t = makeRunner();
@@ -238,6 +248,28 @@ describe("shareRevoke", () => {
 });
 
 // ─── Trash ────────────────────────────────────────────────────────────────────
+describe("listTrash", () => {
+  it("returns parsed trash list", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([
+      { name: "old.pdf", path: "/trash/old.pdf", type: "file", size: 512 },
+    ]);
+    const items = await drive.listTrash();
+    assert.equal(items.length, 1);
+    assert.equal(items[0].name, "old.pdf");
+    assert.deepEqual(t.lastCall(), ["trash", "list"]);
+  });
+
+  it("returns empty array when trash is empty", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([]);
+    const items = await drive.listTrash();
+    assert.deepEqual(items, []);
+  });
+});
+
 describe("trash", () => {
   it("calls trash with path", async () => {
     const t = makeRunner();

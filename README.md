@@ -156,6 +156,8 @@ proton-drive-cli version              # CLI and SDK version
 proton-drive-cli list /my-files
 proton-drive-cli list /my-files/Reports
 
+proton-drive-cli mkdir /my-files/NewFolder
+
 proton-drive-cli upload ./report.pdf /my-files/Reports
 proton-drive-cli upload ./dist /my-files/Releases --conflict overwrite
 
@@ -164,6 +166,9 @@ proton-drive-cli download /my-files/Reports ./local/Reports
 
 proton-drive-cli move /my-files/old-name.pdf /my-files/new-name.pdf
 proton-drive-cli delete /my-files/obsolete-draft.pdf
+
+# Machine-readable output (pipe-friendly)
+proton-drive-cli list /my-files --json | jq '.[].name'
 ```
 
 ### Sharing
@@ -179,6 +184,7 @@ proton-drive-cli share revoke /my-files/Reports alice@pm.me
 
 ```bash
 proton-drive-cli trash /my-files/old-draft.pdf   # move to trash
+proton-drive-cli trash list                       # see what's in trash
 proton-drive-cli restore /my-files/old-draft.pdf # restore from trash
 proton-drive-cli trash empty                      # permanently delete all trashed items
 ```
@@ -207,13 +213,13 @@ proton-drive-cli share status /my-files/Projects
 `drive_auth_status` · `drive_auth_logout` · `drive_version`
 
 ### Filesystem
-`drive_list` · `drive_upload` · `drive_download` · `drive_move` · `drive_delete`
+`drive_list` · `drive_mkdir` · `drive_upload` · `drive_download` · `drive_move` · `drive_delete`
 
 ### Sharing
 `drive_share_status` · `drive_share_invite` · `drive_share_revoke`
 
 ### Trash
-`drive_trash` · `drive_restore` · `drive_empty_trash`
+`drive_list_trash` · `drive_trash` · `drive_restore` · `drive_empty_trash`
 
 ---
 
@@ -225,16 +231,20 @@ proton-drive-cli share status /my-files/Projects
 | `drive_auth_logout` | Log out (clear session) | — |
 | `drive_version` | CLI and SDK version info | — |
 | `drive_list` | List files and folders at a path | `path` |
+| `drive_mkdir` | Create a new empty folder | `path` |
 | `drive_upload` | Upload local file or folder | `localPath`, `remotePath`, `conflictStrategy` (skip/overwrite/rename) |
 | `drive_download` | Download to local path | `remotePath`, `localPath` |
 | `drive_move` | Move or rename | `sourcePath`, `destinationPath` |
-| `drive_delete` | Permanently delete | `path` |
+| `drive_delete` | Permanently delete ⚠️ | `path`, `confirmed: true` |
+| `drive_list_trash` | List items currently in trash | — |
 | `drive_share_status` | Get sharing members and URL | `path` |
 | `drive_share_invite` | Invite a user | `path`, `email`, `role` (viewer/editor/admin), `message?` |
 | `drive_share_revoke` | Revoke access | `path`, `email` |
 | `drive_trash` | Move to trash | `path` |
 | `drive_restore` | Restore from trash | `path` |
-| `drive_empty_trash` | Permanently delete all trash | — |
+| `drive_empty_trash` | Permanently delete all trash ⚠️ | `confirmed: true` |
+
+> ⚠️ **Destructive tools** require `confirmed: true`. Claude will always use `drive_list_trash` first and ask you before calling `drive_empty_trash`.
 
 ---
 

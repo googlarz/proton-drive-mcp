@@ -1,6 +1,6 @@
 {
   "name": "proton-drive-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Proton Drive MCP — Claude Desktop MCP and CLI for Proton Drive. List, upload, download, share, and manage files with end-to-end encryption.",
   "type": "module",
   "packageManager": "npm@10.9.3",
@@ -64,7 +64,8 @@
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
-    "glama.json"
+    "glama.json",
+    "smithery.yaml"
   ],
   "publishConfig": {
     "access": "public"

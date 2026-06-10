@@ -9,6 +9,7 @@
  *   auth logout
  *   version
  *   list <remote-path>
+ *   mkdir <remote-path>
  *   upload <local-path> <remote-path> [--conflict skip|overwrite|rename]
  *   download <remote-path> <local-path>
  *   move <src> <dst>
@@ -17,15 +18,21 @@
  *   share invite <path> <email> <role> [--message "..."]
  *   share revoke <path> <email>
  *   trash <path>
- *   restore <path>
+ *   trash list
  *   trash empty
+ *   restore <path>
+ *
+ * Global flags:
+ *   --json   Machine-readable JSON output
  */
 
 import { DriveService } from "./services/drive.js";
-import { DriveCliNotFoundError, DriveNotAuthenticatedError } from "./utils/errors.js";
+import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError } from "./utils/errors.js";
+import { checkCliAvailable } from "./utils/subprocess.js";
 
 const drive = new DriveService();
 const args = process.argv.slice(2);
+const jsonMode = args.includes("--json");
 
 function usage() {
   console.log(`
@@ -36,16 +43,21 @@ Commands:
   auth logout                              Log out
   version                                  Show CLI/SDK version
   list <path>                              List files at path
-  upload <local> <remote> [--conflict X]  Upload file/folder
+  mkdir <path>                             Create a new folder
+  upload <local> <remote> [--conflict X]  Upload file/folder (skip/overwrite/rename)
   download <remote> <local>               Download file/folder
   move <src> <dst>                         Move/rename
-  delete <path>                            Delete file/folder
+  delete <path>                            Delete file/folder permanently
   share status <path>                      Show sharing info
   share invite <path> <email> <role>       Invite user (viewer/editor/admin)
   share revoke <path> <email>              Revoke access
   trash <path>                             Move to trash
+  trash list                               List trash contents
+  trash empty                              Permanently delete all trash
   restore <path>                           Restore from trash
-  trash empty                              Empty trash
+
+Flags:
+  --json                                   Machine-readable JSON output (one line)
 `);
 }
 
@@ -55,16 +67,28 @@ function getFlag(flag: string): string | undefined {
 }
 
 function print(data: unknown) {
-  console.log(JSON.stringify(data, null, 2));
+  console.log(jsonMode ? JSON.stringify(data) : JSON.stringify(data, null, 2));
 }
 
 async function run() {
-  const [cmd, sub, ...rest] = args;
+  if (!(await checkCliAvailable())) {
+    console.error(
+      "Error: proton-drive CLI not found in PATH.\n" +
+      "Download from https://proton.me/download/drive/cli/index.html"
+    );
+    process.exit(1);
+  }
+
+  // Strip --json from positional parsing
+  const positional = args.filter((a) => a !== "--json");
+  const [cmd, sub, ...rest] = positional;
 
   if (!cmd || cmd === "--help" || cmd === "-h") {
     usage();
     return;
   }
+
+
 
   switch (cmd) {
     case "auth":
@@ -111,6 +135,12 @@ async function run() {
       break;
     }
 
+    case "mkdir":
+      if (!sub) { console.error("Usage: mkdir <path>"); process.exit(1); }
+      await drive.mkdir(sub);
+      console.log("Folder created.");
+      break;
+
     case "delete":
       if (!sub) { console.error("Usage: delete <path>"); process.exit(1); }
       await drive.delete(sub);
@@ -146,11 +176,13 @@ async function run() {
       if (sub === "empty") {
         await drive.emptyTrash();
         console.log("Trash emptied.");
+      } else if (sub === "list" || sub === "ls") {
+        print(await drive.listTrash());
       } else if (sub) {
         await drive.trash(sub);
         console.log("Moved to trash.");
       } else {
-        console.error("Usage: trash <path> | trash empty");
+        console.error("Usage: trash <path> | trash list | trash empty");
         process.exit(1);
       }
       break;
@@ -171,6 +203,9 @@ async function run() {
 run().catch((err) => {
   if (err instanceof DriveCliNotFoundError || err instanceof DriveNotAuthenticatedError) {
     console.error(err.message);
+  } else if (err instanceof DriveCliError) {
+    console.error(`CLI error: ${err.message}`);
+    if (err.stderr) console.error(err.stderr);
   } else {
     console.error("Error:", String(err));
   }

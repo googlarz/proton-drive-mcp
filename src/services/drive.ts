@@ -87,6 +87,10 @@ export class DriveService {
     };
   }
 
+  async mkdir(remotePath: string): Promise<void> {
+    await this.run(["filesystem", "mkdir", remotePath]);
+  }
+
   async move(remoteSrc: string, remoteDst: string): Promise<void> {
     await this.run(["filesystem", "move", remoteSrc, remoteDst]);
   }
@@ -130,6 +134,19 @@ export class DriveService {
   }
 
   // Trash
+  async listTrash(): Promise<DriveFile[]> {
+    const result = await this.run(["trash", "list"]);
+    const items = Array.isArray(result) ? result : [];
+    return items.map((item: Record<string, unknown>) => ({
+      name: String(item.name ?? ""),
+      path: String(item.path ?? ""),
+      type: item.type === "folder" ? "folder" : "file",
+      size: typeof item.size === "number" ? item.size : undefined,
+      modifiedAt: typeof item.modifiedAt === "string" ? item.modifiedAt : undefined,
+      mimeType: typeof item.mimeType === "string" ? item.mimeType : undefined,
+    }));
+  }
+
   async trash(remotePath: string): Promise<void> {
     await this.run(["trash", remotePath]);
   }

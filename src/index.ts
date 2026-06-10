@@ -24,8 +24,6 @@ const VERSION = pkg.version ?? "1.0.0";
 
 process.env["PROTON_DRIVE_MCP"] = "1";
 
-const drive = new DriveService();
-
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
@@ -42,6 +40,20 @@ function fail(message: string): ToolResult {
     content: [{ type: "text", text: message }],
     isError: true,
   };
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function validatePath(path: unknown): string {
+  const p = String(path ?? "").trim();
+  if (!p) throw new Error("path must not be empty");
+  return p;
+}
+
+function validateEmail(email: unknown): string {
+  const e = String(email ?? "").trim();
+  if (!EMAIL_RE.test(e)) throw new Error(`invalid email address: ${e}`);
+  return e;
 }
 
 function handleError(err: unknown): ToolResult {
@@ -126,6 +138,20 @@ const TOOLS = [
     },
   },
   {
+    name: "drive_mkdir",
+    description: "Create a new empty folder on Proton Drive.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Remote Drive path for the new folder. E.g. /my-files/NewFolder",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
     name: "drive_move",
     description: "Move or rename a file or folder on Proton Drive.",
     inputSchema: {
@@ -145,7 +171,9 @@ const TOOLS = [
   },
   {
     name: "drive_delete",
-    description: "Permanently delete a file or folder from Proton Drive.",
+    description:
+      "Permanently delete a file or folder from Proton Drive. " +
+      "Requires confirmed=true — always ask the user before calling this.",
     inputSchema: {
       type: "object",
       properties: {
@@ -153,8 +181,12 @@ const TOOLS = [
           type: "string",
           description: "Remote Drive path to delete.",
         },
+        confirmed: {
+          type: "boolean",
+          description: "Must be true. Confirms the user has acknowledged this is permanent.",
+        },
       },
-      required: ["path"],
+      required: ["path", "confirmed"],
     },
   },
   // Sharing
@@ -171,6 +203,11 @@ const TOOLS = [
       },
       required: ["path"],
     },
+  },
+  {
+    name: "drive_list_trash",
+    description: "List files and folders currently in the Proton Drive trash.",
+    inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
     name: "drive_share_invite",
@@ -248,8 +285,19 @@ const TOOLS = [
   },
   {
     name: "drive_empty_trash",
-    description: "Permanently delete all items in the Proton Drive trash.",
-    inputSchema: { type: "object", properties: {}, required: [] },
+    description:
+      "Permanently delete ALL items in the Proton Drive trash. " +
+      "Requires confirmed=true — always show the trash contents (drive_list_trash) and ask the user before calling this.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        confirmed: {
+          type: "boolean",
+          description: "Must be true. Confirms the user has acknowledged this is permanent and irreversible.",
+        },
+      },
+      required: ["confirmed"],
+    },
   },
 ] as const;
 
@@ -261,6 +309,8 @@ async function main() {
     );
     process.exit(1);
   }
+
+  const drive = new DriveService();
 
   const server = new Server(
     { name: "proton-drive-mcp", version: VERSION },
@@ -292,53 +342,71 @@ async function main() {
           return ok(await drive.version());
 
         case "drive_list":
-          return ok(await drive.list(String(a.path)));
+          return ok(await drive.list(validatePath(a.path)));
+
+        case "drive_mkdir":
+          await drive.mkdir(validatePath(a.path));
+          return ok({ message: `Folder created: ${a.path}` });
 
         case "drive_upload":
           return ok(
             await drive.upload(
-              String(a.localPath),
-              String(a.remotePath),
+              validatePath(a.localPath),
+              validatePath(a.remotePath),
               (a.conflictStrategy as "skip" | "overwrite" | "rename") ?? "skip"
             )
           );
 
         case "drive_download":
-          return ok(await drive.download(String(a.remotePath), String(a.localPath)));
+          return ok(await drive.download(validatePath(a.remotePath), validatePath(a.localPath)));
 
         case "drive_move":
-          await drive.move(String(a.sourcePath), String(a.destinationPath));
+          await drive.move(validatePath(a.sourcePath), validatePath(a.destinationPath));
           return ok({ message: "Moved successfully." });
 
         case "drive_delete":
-          await drive.delete(String(a.path));
+          if (a.confirmed !== true) {
+            return fail("drive_delete requires confirmed=true. Ask the user to confirm before deleting.");
+          }
+          await drive.delete(validatePath(a.path));
           return ok({ message: "Deleted successfully." });
 
-        case "drive_share_status":
-          return ok(await drive.shareStatus(String(a.path)));
+        case "drive_list_trash":
+          return ok(await drive.listTrash());
 
-        case "drive_share_invite":
+        case "drive_share_status":
+          return ok(await drive.shareStatus(validatePath(a.path)));
+
+        case "drive_share_invite": {
+          const email = validateEmail(a.email);
           await drive.shareInvite(
-            String(a.path),
-            String(a.email),
+            validatePath(a.path),
+            email,
             (a.role as "viewer" | "editor" | "admin") ?? "viewer",
             typeof a.message === "string" ? a.message : undefined
           );
-          return ok({ message: `Invited ${a.email} as ${a.role}.` });
+          return ok({ message: `Invited ${email} as ${a.role}.` });
+        }
 
         case "drive_share_revoke":
-          await drive.shareRevoke(String(a.path), String(a.email));
+          await drive.shareRevoke(validatePath(a.path), validateEmail(a.email));
           return ok({ message: `Revoked access for ${a.email}.` });
 
         case "drive_trash":
-          await drive.trash(String(a.path));
+          await drive.trash(validatePath(a.path));
           return ok({ message: "Moved to trash." });
 
         case "drive_restore":
-          await drive.restore(String(a.path));
+          await drive.restore(validatePath(a.path));
           return ok({ message: "Restored from trash." });
 
         case "drive_empty_trash":
+          if (a.confirmed !== true) {
+            return fail(
+              "drive_empty_trash requires confirmed=true. " +
+              "Use drive_list_trash first to show the user what will be deleted, then ask for confirmation."
+            );
+          }
           await drive.emptyTrash();
           return ok({ message: "Trash emptied." });
 
