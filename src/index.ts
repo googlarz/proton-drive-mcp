@@ -17,7 +17,7 @@ import {
   DriveNotAuthenticatedError,
   DriveParseError,
 } from "./utils/errors.js";
-import { validatePath, validateEmail, validateMessage } from "./utils/validation.js";
+import { validatePath, validateLocalPath, validateEmail, validateMessage } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
 
 const require = createRequire(import.meta.url);
@@ -44,13 +44,17 @@ function fail(message: string): ToolResult {
   };
 }
 
+function truncate(s: string, max = 500): string {
+  return s.length > max ? s.slice(0, max) + "…" : s;
+}
+
 function handleError(err: unknown): ToolResult {
   if (err instanceof DriveCliNotFoundError) return fail(err.message);
   if (err instanceof DriveNotAuthenticatedError) return fail(err.message);
-  if (err instanceof DriveCliError) return fail(`CLI error: ${err.message}`);
+  if (err instanceof DriveCliError) return fail(`CLI error: ${truncate(err.message)}`);
   if (err instanceof DriveParseError) return fail(`Parse error: ${err.message}`);
-  if (err instanceof Error) return fail(err.message);
-  return fail(`Unexpected error: ${String(err)}`);
+  if (err instanceof Error) return fail(truncate(err.message));
+  return fail(`Unexpected error: ${truncate(String(err))}`);
 }
 
 const TOOLS = [
@@ -58,17 +62,17 @@ const TOOLS = [
   {
     name: "drive_auth_status",
     description: "Check whether the Proton Drive CLI is authenticated.",
-    inputSchema: { type: "object", properties: {}, required: [] },
+    inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
   },
   {
     name: "drive_auth_logout",
     description: "Log out of Proton Drive (clears stored session).",
-    inputSchema: { type: "object", properties: {}, required: [] },
+    inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
   },
   {
     name: "drive_version",
     description: "Get Proton Drive CLI and SDK version information.",
-    inputSchema: { type: "object", properties: {}, required: [] },
+    inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
   },
   // Filesystem
   {
@@ -84,6 +88,7 @@ const TOOLS = [
         },
       },
       required: ["path"],
+      additionalProperties: false,
     },
   },
   {
@@ -107,6 +112,7 @@ const TOOLS = [
         },
       },
       required: ["localPath", "remotePath"],
+      additionalProperties: false,
     },
   },
   {
@@ -125,6 +131,7 @@ const TOOLS = [
         },
       },
       required: ["remotePath", "localPath"],
+      additionalProperties: false,
     },
   },
   {
@@ -139,6 +146,7 @@ const TOOLS = [
         },
       },
       required: ["path"],
+      additionalProperties: false,
     },
   },
   {
@@ -157,6 +165,7 @@ const TOOLS = [
         },
       },
       required: ["sourcePath", "destinationPath"],
+      additionalProperties: false,
     },
   },
   {
@@ -177,6 +186,7 @@ const TOOLS = [
         },
       },
       required: ["path", "confirmed"],
+      additionalProperties: false,
     },
   },
   // Sharing
@@ -192,12 +202,13 @@ const TOOLS = [
         },
       },
       required: ["path"],
+      additionalProperties: false,
     },
   },
   {
     name: "drive_list_trash",
     description: "List files and folders currently in the Proton Drive trash.",
-    inputSchema: { type: "object", properties: {}, required: [] },
+    inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
   },
   {
     name: "drive_share_invite",
@@ -224,6 +235,7 @@ const TOOLS = [
         },
       },
       required: ["path", "email", "role"],
+      additionalProperties: false,
     },
   },
   {
@@ -242,6 +254,7 @@ const TOOLS = [
         },
       },
       required: ["path", "email"],
+      additionalProperties: false,
     },
   },
   // Trash
@@ -257,6 +270,7 @@ const TOOLS = [
         },
       },
       required: ["path"],
+      additionalProperties: false,
     },
   },
   {
@@ -271,6 +285,7 @@ const TOOLS = [
         },
       },
       required: ["path"],
+      additionalProperties: false,
     },
   },
   {
@@ -287,16 +302,18 @@ const TOOLS = [
         },
       },
       required: ["confirmed"],
+      additionalProperties: false,
     },
   },
 ] as const;
 
 async function main() {
-  const cliAvailable = await checkCliAvailable();
-  if (!cliAvailable) {
-    logger.error(
-      "proton-drive CLI not found. Download from https://proton.me/download/drive/cli/index.html"
-    );
+  const cliCheck = await checkCliAvailable();
+  if (!cliCheck.available) {
+    const msg = cliCheck.reason === "not_executable"
+      ? "proton-drive CLI found but not executable. Run: chmod +x $(which proton-drive)"
+      : "proton-drive CLI not found. Download from https://proton.me/download/drive/cli/index.html";
+    logger.error(msg);
     process.exit(1);
   }
 
@@ -343,19 +360,21 @@ async function main() {
         case "drive_upload": {
           const cs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
           if (!["skip", "overwrite", "rename"].includes(cs)) {
-            throw new Error(`conflictStrategy must be skip, overwrite, or rename`);
+            return fail(`conflictStrategy must be skip, overwrite, or rename`);
           }
-          return ok(
-            await drive.upload(
-              validatePath(a.localPath),
-              validatePath(a.remotePath),
-              cs as "skip" | "overwrite" | "rename"
-            )
+          const uploadResult = await drive.upload(
+            validateLocalPath(a.localPath),
+            validatePath(a.remotePath),
+            cs as "skip" | "overwrite" | "rename"
           );
+          if (uploadResult.failed > 0) {
+            return fail(`Upload completed with ${uploadResult.failed} failed file(s). uploaded=${uploadResult.uploaded} skipped=${uploadResult.skipped}`);
+          }
+          return ok(uploadResult);
         }
 
         case "drive_download":
-          return ok(await drive.download(validatePath(a.remotePath), validatePath(a.localPath)));
+          return ok(await drive.download(validatePath(a.remotePath), validateLocalPath(a.localPath)));
 
         case "drive_move": {
           const moveSrc = validatePath(a.sourcePath);
@@ -381,9 +400,12 @@ async function main() {
 
         case "drive_share_invite": {
           const email = validateEmail(a.email);
-          const role = typeof a.role === "string" ? a.role : "viewer";
+          if (typeof a.role !== "string") {
+            return fail("role must be a string: viewer, editor, or admin");
+          }
+          const role = a.role;
           if (!["viewer", "editor", "admin"].includes(role)) {
-            throw new Error("role must be viewer, editor, or admin");
+            return fail("role must be viewer, editor, or admin");
           }
           const inviteMsg = typeof a.message === "string" ? validateMessage(a.message) : undefined;
           await drive.shareInvite(

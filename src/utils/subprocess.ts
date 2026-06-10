@@ -44,7 +44,7 @@ export async function runDrive(args: string[]): Promise<unknown> {
     try {
       return JSON.parse(raw);
     } catch {
-      process.stderr.write(`[proton-drive-mcp] parse error: ${raw.slice(0, 500)}\n`);
+      try { process.stderr.write(`[proton-drive-mcp] parse error: ${raw.slice(0, 500)}\n`); } catch { /* ignore EPIPE */ }
       throw new DriveParseError("Failed to parse CLI output as JSON");
     }
   } catch (err) {
@@ -62,9 +62,13 @@ export async function runDrive(args: string[]): Promise<unknown> {
       throw new DriveCliNotFoundError();
     }
 
-    if (e.killed === true || e.code === "ETIMEDOUT" || e.signal != null) {
+    if (e.killed === true || e.code === "ETIMEDOUT") {
       const secs = timeoutFor(args) / 1000;
       throw new DriveCliError(`CLI process timed out after ${secs}s`, "");
+    }
+
+    if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+      throw new DriveCliError("CLI output exceeded buffer limit (50 MB)", "");
     }
 
     const stderr = e.stderr ?? "";
@@ -77,15 +81,17 @@ export async function runDrive(args: string[]): Promise<unknown> {
   }
 }
 
-// Returns false only when the binary is not installed (ENOENT). Any other
-// error (non-zero exit, auth required, etc.) still returns true — the binary
+// Returns false only when the binary is not installed (ENOENT) or not executable (EACCES).
+// Any other error (non-zero exit, auth required, etc.) still returns true — the binary
 // is present and real errors will surface on the first actual tool call.
-export async function checkCliAvailable(): Promise<boolean> {
+export async function checkCliAvailable(): Promise<{ available: boolean; reason?: string }> {
   try {
     await execFileAsync(CLI_BINARY, ["version", "--json"], { timeout: 5_000 });
-    return true;
+    return { available: true };
   } catch (e) {
     const err = e as NodeJS.ErrnoException;
-    return err.code !== "ENOENT";
+    if (err.code === "ENOENT") return { available: false, reason: "not_found" };
+    if (err.code === "EACCES") return { available: false, reason: "not_executable" };
+    return { available: true };
   }
 }

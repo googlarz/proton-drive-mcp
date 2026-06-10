@@ -5,5 +5,23 @@
   "icon": "https://proton.me/favicon.ico",
   "categories": ["storage", "productivity", "privacy"],
   "license": "MIT",
-  "repository": "https://github.com/googlarz/proton-drive-mcp"
+  "repository": "https://github.com/googlarz/proton-drive-mcp",
+  "tools": [
+    { "name": "drive_auth_status", "description": "Check whether the Proton Drive CLI is authenticated." },
+    { "name": "drive_auth_logout", "description": "Log out of Proton Drive (clears stored session)." },
+    { "name": "drive_version", "description": "Get Proton Drive CLI and SDK version information." },
+    { "name": "drive_list", "description": "List files and folders at a Proton Drive path." },
+    { "name": "drive_upload", "description": "Upload a local file or folder to Proton Drive." },
+    { "name": "drive_download", "description": "Download a file or folder from Proton Drive to a local path." },
+    { "name": "drive_mkdir", "description": "Create a new empty folder on Proton Drive." },
+    { "name": "drive_move", "description": "Move or rename a file or folder on Proton Drive." },
+    { "name": "drive_delete", "description": "Permanently delete a file or folder from Proton Drive." },
+    { "name": "drive_share_status", "description": "Get sharing status and member list for a Proton Drive path." },
+    { "name": "drive_share_invite", "description": "Invite someone to access a Proton Drive file or folder." },
+    { "name": "drive_share_revoke", "description": "Remove someone's access to a Proton Drive file or folder." },
+    { "name": "drive_trash", "description": "Move a file or folder to trash on Proton Drive." },
+    { "name": "drive_restore", "description": "Restore a file or folder from trash on Proton Drive." },
+    { "name": "drive_list_trash", "description": "List files and folders currently in the Proton Drive trash." },
+    { "name": "drive_empty_trash", "description": "Permanently delete ALL items in the Proton Drive trash." }
+  ]
 }

@@ -7,7 +7,8 @@ import {
   DriveNotAuthenticatedError,
   DriveParseError,
 } from "../dist/utils/errors.js";
-import { validatePath, validateEmail, validateMessage } from "../dist/utils/validation.js";
+import { validatePath, validateLocalPath, validateEmail, validateMessage } from "../dist/utils/validation.js";
+import { checkCliAvailable } from "../dist/utils/subprocess.js";
 
 // ─── Test runner factory ──────────────────────────────────────────────────────
 function makeRunner() {
@@ -99,6 +100,22 @@ describe("version", () => {
     assert.equal(v.cli, "2.0.0");
     assert.equal(v.sdk, "unknown");
   });
+
+  it("returns unknown for both when result is empty object", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({});
+    const v = await drive.version();
+    assert.equal(v.cli, "unknown");
+    assert.equal(v.sdk, "unknown");
+  });
+
+  it("throws DriveParseError when CLI returns null", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await assert.rejects(() => drive.version(), { name: "DriveParseError" });
+  });
 });
 
 // ─── Filesystem ───────────────────────────────────────────────────────────────
@@ -167,6 +184,14 @@ describe("upload", () => {
     const result = await drive.upload("/a", "/b");
     assert.equal(result.uploaded, 0);
     assert.equal(result.failed, 0);
+  });
+
+  it("reports failed count in result", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ uploaded: 0, skipped: 0, failed: 2 });
+    const result = await drive.upload("/a", "/b");
+    assert.equal(result.failed, 2);
   });
 });
 
@@ -250,6 +275,21 @@ describe("shareStatus", () => {
     assert.equal(status.isShared, false);
     assert.equal(status.members.length, 0);
   });
+
+  it("throws DriveParseError when CLI returns null", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await assert.rejects(() => drive.shareStatus("/my-files/Reports"), { name: "DriveParseError" });
+  });
+
+  it("coerces unknown role to viewer", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ isShared: true, members: [{ email: "x@pm.me", role: "superadmin" }] });
+    const status = await drive.shareStatus("/my-files/Reports");
+    assert.equal(status.members[0].role, "viewer");
+  });
 });
 
 describe("shareInvite", () => {
@@ -272,6 +312,16 @@ describe("shareInvite", () => {
       "sharing", "invite", "--message", "Please review",
       "--user", "alice@pm.me", "--role", "viewer", "/my-files/Reports",
     ]);
+  });
+});
+
+describe("shareInvite role validation (service layer)", () => {
+  it("passes role string verbatim to CLI args", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await drive.shareInvite("/my-files/Reports", "alice@pm.me", "admin");
+    assert.ok(t.lastCall().includes("admin"), "role should appear in CLI args");
   });
 });
 
@@ -347,6 +397,20 @@ describe("emptyTrash", () => {
   });
 });
 
+// ─── checkCliAvailable ────────────────────────────────────────────────────────
+describe("checkCliAvailable", () => {
+  it("returns object with boolean available field", async () => {
+    const result = await checkCliAvailable();
+    assert.ok(typeof result.available === "boolean", "available should be boolean");
+    if (!result.available) {
+      assert.ok(result.reason === "not_found" || result.reason === "not_executable",
+        "reason should be not_found or not_executable when available is false");
+    } else {
+      assert.equal(result.reason, undefined, "reason should be undefined when available is true");
+    }
+  });
+});
+
 // ─── Error propagation ────────────────────────────────────────────────────────
 describe("error handling", () => {
   it("propagates DriveCliError", async () => {
@@ -398,7 +462,11 @@ describe("validatePath", () => {
   });
 
   it("throws on path containing '..' (traversal)", () => {
-    assert.throws(() => validatePath("/my-files/../../../etc/passwd"), /must not contain '\.\.'/);
+    assert.throws(() => validatePath("/my-files/../../../etc/passwd"), /must not contain/);
+  });
+
+  it("throws on single-dot segment", () => {
+    assert.throws(() => validatePath("/my-files/./secret"), /must not contain/);
   });
 
   it("throws on path containing control characters", () => {
@@ -415,6 +483,33 @@ describe("validatePath", () => {
 
   it("throws on DEL character (\\x7f)", () => {
     assert.throws(() => validatePath("/my-files/\x7fhidden"), /control characters/);
+  });
+
+  it("allows filenames with '..' that are not traversal segments (e.g. v2..3)", () => {
+    assert.equal(validatePath("/my-files/v2..3.tar.gz"), "/my-files/v2..3.tar.gz");
+  });
+
+  it("throws on traversal segment '..'", () => {
+    assert.throws(() => validatePath("/my-files/../etc/passwd"), /must not contain/);
+  });
+});
+
+// ─── validateLocalPath ────────────────────────────────────────────────────────
+describe("validateLocalPath", () => {
+  it("accepts absolute path", () => {
+    assert.equal(validateLocalPath("/Users/alice/file.pdf"), "/Users/alice/file.pdf");
+  });
+
+  it("throws on relative path", () => {
+    assert.throws(() => validateLocalPath("relative/path"), /must be absolute/);
+  });
+
+  it("throws on traversal segment", () => {
+    assert.throws(() => validateLocalPath("/home/../etc/passwd"), /must not contain/);
+  });
+
+  it("throws on empty path", () => {
+    assert.throws(() => validateLocalPath(""), /must not be empty/);
   });
 });
 

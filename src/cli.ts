@@ -29,7 +29,7 @@
 import { DriveService } from "./services/drive.js";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./utils/errors.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
-import { validatePath, validateEmail, validateMessage } from "./utils/validation.js";
+import { validatePath, validateLocalPath, validateEmail, validateMessage } from "./utils/validation.js";
 
 const drive = new DriveService();
 const args = process.argv.slice(2);
@@ -66,6 +66,7 @@ function requirePath(value: string | undefined, usage: string): string {
   if (!value) { console.error(`Usage: ${usage}`); process.exit(1); }
   try { return validatePath(value); }
   catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); }
+  return "" as never; // unreachable; process.exit(1) above always terminates
 }
 
 function requireEmail(value: string): string {
@@ -89,11 +90,12 @@ function print(data: unknown) {
 }
 
 async function run() {
-  if (!(await checkCliAvailable())) {
-    console.error(
-      "Error: proton-drive CLI not found in PATH.\n" +
-      "Download from https://proton.me/download/drive/cli/index.html"
-    );
+  const cliCheck = await checkCliAvailable();
+  if (!cliCheck.available) {
+    const msg = cliCheck.reason === "not_executable"
+      ? "Error: proton-drive CLI found but not executable.\nRun: chmod +x $(which proton-drive)"
+      : "Error: proton-drive CLI not found in PATH.\nDownload from https://proton.me/download/drive/cli/index.html";
+    console.error(msg);
     process.exit(1);
   }
 
@@ -128,7 +130,11 @@ async function run() {
       break;
 
     case "upload": {
-      const local = requirePath(sub, "upload <local> <remote>");
+      const rawLocal = sub;
+      if (!rawLocal) { console.error("Usage: upload <local> <remote>"); process.exit(1); }
+      let local: string;
+      try { local = validateLocalPath(rawLocal); }
+      catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
       const remote = requirePath(rest[0], "upload <local> <remote>");
       const conflictRaw = getFlag("--conflict") ?? "skip";
       if (!["skip", "overwrite", "rename"].includes(conflictRaw)) {
@@ -142,7 +148,11 @@ async function run() {
 
     case "download": {
       const remote = requirePath(sub, "download <remote> <local>");
-      const local = requirePath(rest[0], "download <remote> <local>");
+      const rawLocal2 = rest[0];
+      if (!rawLocal2) { console.error("Usage: download <remote> <local>"); process.exit(1); return; }
+      let local: string;
+      try { local = validateLocalPath(rawLocal2); }
+      catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
       print(await drive.download(remote, local));
       break;
     }
@@ -160,10 +170,16 @@ async function run() {
       console.log("Folder created.");
       break;
 
-    case "delete":
-      await drive.delete(requirePath(sub, "delete <path>"));
-      console.log("Deleted.");
+    case "delete": {
+      const delPath = requirePath(sub, "delete <path> --confirm");
+      if (!args.includes("--confirm")) {
+        console.error(`This will permanently delete: ${delPath}\nPass --confirm to proceed.`);
+        process.exit(1);
+      }
+      await drive.delete(delPath);
+      console.log(`Deleted: ${delPath}`);
       break;
+    }
 
     case "share":
       if (sub === "status") {
@@ -199,6 +215,10 @@ async function run() {
 
     case "trash":
       if (sub === "empty") {
+        if (!args.includes("--confirm")) {
+          console.error("This will permanently delete ALL trash contents.\nPass --confirm to proceed.");
+          process.exit(1);
+        }
         await drive.emptyTrash();
         console.log("Trash emptied.");
       } else if (sub === "list" || sub === "ls") {

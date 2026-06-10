@@ -1,3 +1,5 @@
+import { isAbsolute } from "node:path";
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // Control chars: 0x00-0x1F, DEL (0x7F), Unicode separators U+2028 and U+2029.
@@ -8,7 +10,7 @@ export function validatePath(path: unknown): string {
   if (!p) throw new Error("path must not be empty");
   if (p.startsWith("-")) throw new Error(`path must not start with '-': ${p}`);
   if (CONTROL_RE.test(p)) throw new Error("path contains control characters");
-  if (p.includes("..")) throw new Error(`path must not contain '..' segments: ${p}`);
+  if (p.split("/").some((seg) => seg === ".." || seg === ".")) throw new Error(`path must not contain '.' or '..' segments: ${p}`);
   return p;
 }
 
@@ -18,6 +20,12 @@ export function validateMessage(message: unknown): string {
   if (CONTROL_RE.test(m)) throw new Error("message contains control characters");
   if (m.length > 2000) throw new Error("message must be 2000 characters or fewer");
   return m;
+}
+
+export function validateLocalPath(path: unknown): string {
+  const p = validatePath(path);
+  if (!isAbsolute(p)) throw new Error(`local path must be absolute: ${p}`);
+  return p;
 }
 
 export function validateEmail(email: unknown): string {

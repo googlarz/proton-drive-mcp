@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.13 — 2026-06-10
+
+### Fixed
+- **`shareStatus()` null guard** — now throws `DriveParseError` when CLI returns empty output (was silently casting `null` to `Record`)
+- **`shareStatus()` unsafe role cast** — member roles are now validated against `["viewer","editor","admin"]` and coerced to `"viewer"` for unknown values; was an unchecked `as ShareRole` cast
+- **`upload()` / `download()` null coercion** — changed `result as Record` to `(result ?? {}) as Record` so zero counters are returned rather than a TypeError when CLI produces no output
+- **`validatePath` single-dot segments** — `"."` segments (e.g. `/my-files/./secret`) are now rejected alongside `".."` traversal segments
+- **`validateLocalPath`** — new exported function requiring local filesystem paths to be absolute; used by `drive_upload` and `drive_download` in both MCP and CLI, preventing relative-path exfiltration of arbitrary local files
+- **`checkCliAvailable` EACCES** — binary exists but is not executable now returns `{ available: false, reason: "not_executable" }` with a `chmod` hint, instead of masquerading as "not found"
+- **Timeout signal check** — removed `typeof e.signal === "string"` from timeout detection; only `e.killed === true` and `e.code === "ETIMEDOUT"` trigger the timeout error, preventing SIGHUP/SIGPIPE from being misclassified as timeouts
+- **`ERR_CHILD_PROCESS_STDIO_MAXBUFFER`** — explicitly caught and surfaced as a human-readable error instead of an opaque Node exception
+- **`process.stderr.write` EPIPE** — wrapped in try/catch to prevent an unhandled EPIPE if the parent process closes stderr
+- **CLI `delete` / `trash empty` confirmation** — both now require `--confirm` flag, matching the MCP server's `confirmed=true` safety contract; previously CLI had no friction and would delete immediately
+- **CLI `requirePath` unreachable return** — added `return "" as never` sentinel, matching `requireEmail`
+- **`conflictStrategy` validation error** — changed from `throw new Error(...)` to `return fail(...)` for consistency with other validation paths
+- **`drive_upload` failed-file detection** — MCP handler now returns `isError: true` when `failed > 0`; previously all upload results returned success regardless of failure count
+- **Error message truncation** — `handleError` now truncates messages to 500 chars before forwarding to MCP clients, preventing unbounded response sizes
+- **`additionalProperties: false`** — added to all 16 tool `inputSchema` objects to signal to schema-validating MCP hosts that extra fields are rejected
+
+### Added
+- Tests: `version()` null→DriveParseError, `version()` empty object fallback, `shareStatus()` null→DriveParseError, `shareStatus()` unknown role coercion, `validatePath` single-dot segment, `validateLocalPath` suite (4 tests), `checkCliAvailable` return shape, upload `failed` count — 70 tests total
+
 ## 1.0.12 — 2026-06-10
 
 ### Fixed

@@ -18,6 +18,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/googlarz/proton-drive-mcp?style=social)](https://github.com/googlarz/proton-drive-mcp)
 [![Last commit](https://img.shields.io/github/last-commit/googlarz/proton-drive-mcp?color=brightgreen&label=last%20commit)](https://github.com/googlarz/proton-drive-mcp/commits/main)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](https://github.com/googlarz/proton-drive-mcp)
+[![proton-drive-mcp MCP server](https://glama.ai/mcp/servers/googlarz/proton-drive-mcp/badges/score.svg)](https://glama.ai/mcp/servers/googlarz/proton-drive-mcp)
 
 </div>
 

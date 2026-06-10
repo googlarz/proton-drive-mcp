@@ -36,10 +36,11 @@ export class DriveService {
 
   async version(): Promise<DriveVersion> {
     const result = await this.run(["version"]);
+    if (result === null) throw new DriveParseError("version command returned no output");
     const r = result as Record<string, unknown>;
     return {
-      cli: typeof r?.cli === "string" ? r.cli : String(r?.version ?? "unknown"),
-      sdk: typeof r?.sdk === "string" ? r.sdk : "unknown",
+      cli: typeof r.cli === "string" ? r.cli : String(r.version ?? "unknown"),
+      sdk: typeof r.sdk === "string" ? r.sdk : "unknown",
     };
   }
 
@@ -72,7 +73,7 @@ export class DriveService {
       conflictStrategy,
       "--skip-thumbnails",
     ]);
-    const r = result as Record<string, unknown>;
+    const r = (result ?? {}) as Record<string, unknown>;
     return {
       path: remotePath,
       uploaded: typeof r?.uploaded === "number" ? r.uploaded : 0,
@@ -83,7 +84,7 @@ export class DriveService {
 
   async download(remotePath: string, localPath: string): Promise<DownloadResult> {
     const result = await this.run(["filesystem", "download", remotePath, localPath]);
-    const r = result as Record<string, unknown>;
+    const r = (result ?? {}) as Record<string, unknown>;
     return {
       path: remotePath,
       localPath,
@@ -106,11 +107,13 @@ export class DriveService {
   // Sharing
   async shareStatus(remotePath: string): Promise<ShareStatus> {
     const result = await this.run(["sharing", "status", remotePath]);
+    if (result === null) throw new DriveParseError("sharing status returned empty response");
     const r = result as Record<string, unknown>;
+    const VALID_ROLES = new Set(["viewer", "editor", "admin"]);
     const members = Array.isArray(r?.members)
       ? (r.members as Record<string, unknown>[]).map((m) => ({
           email: String(m.email ?? ""),
-          role: (m.role ?? "viewer") as ShareRole,
+          role: (VALID_ROLES.has(String(m.role)) ? String(m.role) : "viewer") as ShareRole,
           addedAt: typeof m.addedAt === "string" ? m.addedAt : undefined,
         }))
       : [];
