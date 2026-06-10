@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.20 — 2026-06-10
+
+### Improved
+- **`drive_share_status` / `drive_share_revoke` parameter descriptions** — added format examples and constraints to improve Parameters score from 3/5
+
 ## 1.0.19 — 2026-06-10
 
 ### Fixed

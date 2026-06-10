@@ -254,7 +254,7 @@ const TOOLS = [
       properties: {
         path: {
           type: "string",
-          description: "Absolute remote Drive path to inspect (must start with '/').",
+          description: "Absolute remote Drive path to inspect (must start with '/'). E.g. /my-files/project or /my-files/report.pdf. Must be an existing file or folder on Proton Drive.",
         },
       },
       required: ["path"],
@@ -320,11 +320,11 @@ const TOOLS = [
       properties: {
         path: {
           type: "string",
-          description: "Absolute remote Drive path (must start with '/').",
+          description: "Absolute remote Drive path of the shared file or folder (must start with '/'). E.g. /my-files/project. Must match the path used when the invitation was sent.",
         },
         email: {
           type: "string",
-          description: "Email address of the person whose access to revoke.",
+          description: "Email address of the member to remove. Must exactly match the address shown by drive_share_status — use drive_share_status first to confirm. E.g. alice@example.com.",
         },
       },
       required: ["path", "email"],
