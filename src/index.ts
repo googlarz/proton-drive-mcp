@@ -381,7 +381,7 @@ async function main() {
 
         case "drive_share_invite": {
           const email = validateEmail(a.email);
-          const role = (a.role as string) ?? "viewer";
+          const role = typeof a.role === "string" ? a.role : "viewer";
           if (!["viewer", "editor", "admin"].includes(role)) {
             throw new Error("role must be viewer, editor, or admin");
           }

@@ -71,6 +71,7 @@ function requirePath(value: string | undefined, usage: string): string {
 function requireEmail(value: string): string {
   try { return validateEmail(value); }
   catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); }
+  return "" as never; // unreachable; process.exit(1) above always terminates
 }
 
 function getFlag(flag: string): string | undefined {

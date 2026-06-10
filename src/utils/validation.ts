@@ -1,7 +1,7 @@
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// ASCII control chars (0x00-0x1F), DEL (0x7F), Unicode line/paragraph separators (U+2028, U+2029)
-const CONTROL_RE = new RegExp("[\x00-\x1f\x7f  ]");
+// Control chars: 0x00-0x1F, DEL (0x7F), Unicode separators U+2028 and U+2029.
+const CONTROL_RE = new RegExp("[\\x00-\\x1f\\x7f\\u2028\\u2029]");
 
 export function validatePath(path: unknown): string {
   const p = String(path ?? "").trim();

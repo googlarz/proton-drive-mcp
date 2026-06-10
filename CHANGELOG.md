@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.12 — 2026-06-10
+
+### Fixed
+- **`role` type guard** — `drive_share_invite` MCP handler now uses `typeof a.role === "string"` instead of `as string` cast, consistent with `conflictStrategy` fix in v1.0.11
+- **`requireEmail` TypeScript** — added explicit unreachable return annotation to satisfy strict TypeScript configurations
+- **`CONTROL_RE` source encoding** — regex now uses ` `/` ` escape sequences in the `RegExp` constructor string instead of literal Unicode characters, preventing silent stripping by editors or formatters
+
 ## 1.0.11 — 2026-06-10
 
 ### Fixed
