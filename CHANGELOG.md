@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.17 — 2026-06-10
+
+### Added
+- **`drive_read_file`** — read text content of a file directly from the local Proton Drive sync folder (`PROTON_DRIVE_SYNC_PATH`); 1 MB limit, binary-file detection, path traversal guard
+- **`drive_write_file`** — write text content to a file in the local Proton Drive sync folder; creates parent directories automatically
+
+### Improved
+- **Tool descriptions** — all tools now include explicit "Requires authentication" flags, "Do not use when..." alternatives, and failure cause lists to improve Glama TDQS Behavior and Usage Guidelines scores
+- **MCP annotations forwarded** — `ListToolsRequestSchema` handler now includes `annotations` (`readOnlyHint`, `destructiveHint`, etc.) in its response so MCP clients receive the full tool metadata
+
 ## 1.0.16 — 2026-06-10
 
 ### Improved

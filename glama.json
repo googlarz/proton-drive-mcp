@@ -22,6 +22,8 @@
     { "name": "drive_trash", "description": "Move a file or folder to trash on Proton Drive." },
     { "name": "drive_restore", "description": "Restore a file or folder from trash on Proton Drive." },
     { "name": "drive_list_trash", "description": "List files and folders currently in the Proton Drive trash." },
-    { "name": "drive_empty_trash", "description": "Permanently delete ALL items in the Proton Drive trash." }
+    { "name": "drive_empty_trash", "description": "Permanently delete ALL items in the Proton Drive trash." },
+    { "name": "drive_read_file", "description": "Read the text contents of a file from the local Proton Drive sync folder (requires PROTON_DRIVE_SYNC_PATH)." },
+    { "name": "drive_write_file", "description": "Write text content to a file in the local Proton Drive sync folder (requires PROTON_DRIVE_SYNC_PATH)." }
   ]
 }

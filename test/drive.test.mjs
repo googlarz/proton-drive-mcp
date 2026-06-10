@@ -590,3 +590,59 @@ describe("validateMessage", () => {
     assert.equal(validateMessage("a".repeat(2000)).length, 2000);
   });
 });
+
+// ─── syncfs utilities ─────────────────────────────────────────────────────────
+import { resolveSyncPath, readSyncFile, writeSyncFile } from "../dist/utils/syncfs.js";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+describe("resolveSyncPath", () => {
+  it("resolves a normal path within the sync root", () => {
+    const root = "/sync";
+    assert.equal(resolveSyncPath(root, "/notes.txt"), "/sync/notes.txt");
+  });
+
+  it("resolves a nested path", () => {
+    const root = "/sync";
+    assert.equal(resolveSyncPath(root, "/a/b/c.md"), "/sync/a/b/c.md");
+  });
+
+  it("throws on path traversal", () => {
+    assert.throws(() => resolveSyncPath("/sync", "/../etc/passwd"), /outside sync root/);
+  });
+
+  it("throws on encoded traversal", () => {
+    assert.throws(() => resolveSyncPath("/sync", "/my-files/../../etc"), /outside sync root/);
+  });
+});
+
+describe("readSyncFile / writeSyncFile", () => {
+  let tmpDir;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "syncfs-test-"));
+  });
+
+  it("writes and reads back a text file", async () => {
+    await writeSyncFile(tmpDir, "/hello.txt", "hello world");
+    const content = await readSyncFile(tmpDir, "/hello.txt");
+    assert.equal(content, "hello world");
+  });
+
+  it("creates parent directories when writing", async () => {
+    await writeSyncFile(tmpDir, "/a/b/c.txt", "nested");
+    const content = await readSyncFile(tmpDir, "/a/b/c.txt");
+    assert.equal(content, "nested");
+  });
+
+  it("throws on missing file", async () => {
+    await assert.rejects(() => readSyncFile(tmpDir, "/nonexistent.txt"), /ENOENT/);
+  });
+
+  it("throws on binary file (null byte)", async () => {
+    const binPath = join(tmpDir, "binary.bin");
+    await writeFile(binPath, Buffer.from([0x00, 0x01, 0x02]));
+    await assert.rejects(() => readSyncFile(tmpDir, "/binary.bin"), /binary file/);
+  });
+});

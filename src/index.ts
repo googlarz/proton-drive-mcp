@@ -19,6 +19,7 @@ import {
 } from "./utils/errors.js";
 import { validateRemotePath, validateLocalPath, validateEmail, validateMessage } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
+import { getSyncRoot, readSyncFile, writeSyncFile } from "./utils/syncfs.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version?: string };
@@ -64,8 +65,8 @@ const TOOLS = [
     description:
       "Check whether the Proton Drive CLI has an active authenticated session. " +
       "Returns {authenticated: boolean, email?: string}. " +
-      "Use before any file operation when you need to confirm the session is valid — all other drive_* tools require authentication. " +
-      "Does not require network access if the session token is already cached locally.",
+      "Use before any file operation when you need to confirm the session is valid — all other drive_* tools (except drive_version) require authentication. " +
+      "Does not make a network call if the session token is already cached locally.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
   },
@@ -73,18 +74,19 @@ const TOOLS = [
     name: "drive_auth_logout",
     description:
       "Clear the stored Proton Drive session from the OS keychain. " +
-      "After logout, all file and sharing operations will fail until the user runs `proton-drive auth login` again. " +
-      "Prefer this on shared machines where the session should not persist. " +
-      "Idempotent — safe to call even if already logged out.",
+      "After logout all file and sharing operations will fail until the user runs `proton-drive auth login` again. " +
+      "Use on shared machines to prevent session persistence. " +
+      "Do not call during an active workflow — it will break all subsequent drive_* calls. " +
+      "Idempotent: safe to call even if already logged out.",
     annotations: { destructiveHint: true, idempotentHint: true },
     inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
   },
   {
     name: "drive_version",
     description:
-      "Return the proton-drive CLI version and SDK version as {cli: string, sdk: string}. " +
-      "Use to confirm the correct binary is installed or to debug compatibility issues. " +
-      "Does not require authentication.",
+      "Return the installed proton-drive CLI version and SDK version as {cli: string, sdk: string}. " +
+      "Does not require authentication — use to confirm the correct binary is in PATH before other operations, or to diagnose compatibility issues. " +
+      "Do not use to check auth state; use drive_auth_status instead.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
   },
@@ -92,11 +94,11 @@ const TOOLS = [
   {
     name: "drive_list",
     description:
-      "List the immediate contents of a Proton Drive folder. " +
+      "List the immediate children of a Proton Drive folder. Requires authentication. " +
       "Returns [{name, path, type ('file'|'folder'), size?, modifiedAt?, mimeType?}]. " +
-      "Not recursive — lists one directory level only. " +
-      "Use before drive_upload to verify the destination folder exists, or before drive_download to confirm the file path. " +
-      "To list trash contents, use drive_list_trash instead.",
+      "Not recursive — one directory level only. " +
+      "Use before drive_upload to confirm the destination exists, or before drive_download to verify the remote path. " +
+      "Do not use to list trash — use drive_list_trash instead.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: "object",
@@ -113,11 +115,12 @@ const TOOLS = [
   {
     name: "drive_upload",
     description:
-      "Upload a local file or folder to Proton Drive. " +
-      "For folders, uploads all contents recursively. " +
-      "Returns {uploaded, skipped, failed} counts — the call fails if failed > 0. " +
-      "Use drive_mkdir first if the destination folder does not exist. " +
-      "To download from Drive instead, use drive_download.",
+      "Upload a local file or folder to Proton Drive with end-to-end encryption. Requires authentication. " +
+      "For folders, uploads recursively and preserves directory structure. " +
+      "Returns {uploaded, skipped, failed} counts — fails the call if failed > 0 (common causes: quota exceeded, destination path not found, permission denied). " +
+      "conflictStrategy defaults to 'skip' — only use 'overwrite' with explicit user confirmation since it permanently replaces the remote file. " +
+      "Do not use to move files already on Drive (use drive_move) or to write text content directly (use drive_write_file if PROTON_DRIVE_SYNC_PATH is set). " +
+      "Ensure destination folder exists first with drive_list; create it with drive_mkdir if needed.",
     annotations: { openWorldHint: true },
     inputSchema: {
       type: "object",
@@ -134,10 +137,9 @@ const TOOLS = [
           type: "string",
           enum: ["skip", "overwrite", "rename"],
           description:
-            "What to do when a remote file with the same name already exists. " +
-            "'skip' leaves the existing file unchanged (default). " +
-            "'overwrite' replaces it permanently. " +
-            "'rename' uploads as a uniquely named copy.",
+            "'skip' leaves existing remote files unchanged (default). " +
+            "'overwrite' permanently replaces the remote file — confirm with user first. " +
+            "'rename' uploads with a unique name to avoid conflicts.",
         },
       },
       required: ["localPath", "remotePath"],
@@ -147,22 +149,23 @@ const TOOLS = [
   {
     name: "drive_download",
     description:
-      "Download a file or folder from Proton Drive to the local filesystem. " +
-      "For folders, downloads all contents recursively. " +
-      "Overwrites existing local files at localPath without warning — verify the destination before calling. " +
+      "Download a file or folder from Proton Drive to the local filesystem. Requires authentication. " +
+      "For folders, downloads recursively. " +
+      "Silently overwrites any existing local file at localPath — verify the destination before calling. " +
+      "Fails if the local parent directory does not exist. " +
       "Returns {downloaded} count. " +
-      "To upload to Drive instead, use drive_upload.",
+      "Do not use to move files within Drive (use drive_move) or to read a small text file's contents (use drive_read_file if PROTON_DRIVE_SYNC_PATH is set).",
     annotations: { openWorldHint: true },
     inputSchema: {
       type: "object",
       properties: {
         remotePath: {
           type: "string",
-          description: "Absolute remote Drive path of the file or folder to download (must start with '/'). E.g. /my-files/report.pdf",
+          description: "Absolute remote Drive path to download (must start with '/'). E.g. /my-files/report.pdf",
         },
         localPath: {
           type: "string",
-          description: "Absolute local filesystem destination path (must start with '/'). Parent directory must already exist.",
+          description: "Absolute local destination path (must start with '/'). Parent directory must already exist.",
         },
       },
       required: ["remotePath", "localPath"],
@@ -172,9 +175,10 @@ const TOOLS = [
   {
     name: "drive_mkdir",
     description:
-      "Create a new empty folder on Proton Drive. " +
-      "Fails if the folder already exists — use drive_list first to check. " +
-      "Does not create intermediate parent directories; the parent folder must already exist.",
+      "Create a new empty folder on Proton Drive. Requires authentication. " +
+      "Fails if the folder already exists or if the parent folder does not exist — use drive_list to check first. " +
+      "Does not create intermediate directories; create each level separately. " +
+      "Do not use to upload files (use drive_upload) or to create nested folder trees in one call.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -191,10 +195,11 @@ const TOOLS = [
   {
     name: "drive_move",
     description:
-      "Move or rename a file or folder on Proton Drive. " +
-      "To rename without moving, keep the same parent and change only the name (e.g. /my-files/old.pdf → /my-files/new.pdf). " +
-      "To move, change the parent folder. " +
-      "The destination parent folder must exist. Fails if destinationPath is already occupied.",
+      "Move or rename a file or folder on Proton Drive. Requires authentication. " +
+      "To rename: keep the same parent, change only the filename (e.g. /my-files/old.pdf → /my-files/new.pdf). " +
+      "To move: provide a different parent folder. " +
+      "Fails if destinationPath is already occupied or if its parent folder does not exist. " +
+      "Do not use to copy a file (no copy operation exists — upload again instead) or to download to local storage (use drive_download).",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -205,7 +210,7 @@ const TOOLS = [
         },
         destinationPath: {
           type: "string",
-          description: "Absolute remote path of the new location (must start with '/'). Parent folder must exist.",
+          description: "Absolute remote destination path (must start with '/'). Parent folder must exist.",
         },
       },
       required: ["sourcePath", "destinationPath"],
@@ -215,9 +220,9 @@ const TOOLS = [
   {
     name: "drive_delete",
     description:
-      "Permanently delete a file or folder from Proton Drive — no trash step, no recovery. " +
-      "Requires confirmed=true; always show the path to the user and get explicit confirmation before calling. " +
-      "To delete reversibly (recoverable via drive_restore), use drive_trash instead.",
+      "Permanently delete a file or folder from Proton Drive — no trash step, no recovery possible. Requires authentication. " +
+      "Requires confirmed=true; always show the exact path to the user and get explicit confirmation before calling. " +
+      "Do not use when reversible deletion is acceptable — use drive_trash instead so the item can be recovered with drive_restore.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -239,16 +244,17 @@ const TOOLS = [
   {
     name: "drive_share_status",
     description:
-      "Return the sharing status of a Proton Drive path: {isShared, members: [{email, role, addedAt?}], shareUrl?}. " +
-      "Use before drive_share_invite to see who already has access, or before drive_share_revoke to confirm the member's email. " +
-      "Read-only — does not modify sharing.",
+      "Return the current sharing state of a Proton Drive path. Requires authentication. " +
+      "Returns {isShared: boolean, members: [{email, role, addedAt?}], shareUrl?}. " +
+      "Always call this before drive_share_invite (to avoid duplicate invitations) and before drive_share_revoke (to confirm the member email). " +
+      "Do not call this to modify sharing — it is read-only.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: "object",
       properties: {
         path: {
           type: "string",
-          description: "Absolute remote Drive path to check sharing for (must start with '/').",
+          description: "Absolute remote Drive path to inspect (must start with '/').",
         },
       },
       required: ["path"],
@@ -258,19 +264,20 @@ const TOOLS = [
   {
     name: "drive_list_trash",
     description:
-      "List all files and folders currently in the Proton Drive trash. " +
+      "List all files and folders currently in the Proton Drive trash. Requires authentication. " +
       "Returns [{name, path, type, size?, modifiedAt?}]. " +
-      "Use before drive_restore to find a trashed item's path, or before drive_empty_trash to show the user exactly what will be permanently deleted.",
+      "Use before drive_restore to find a trashed item's exact path, or before drive_empty_trash to show the user what will be permanently deleted. " +
+      "Do not use to list active (non-trashed) files — use drive_list instead.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
   },
   {
     name: "drive_share_invite",
     description:
-      "Invite a person to access a Proton Drive file or folder by email. " +
-      "Sends an email notification to the invitee — always confirm with the user before calling. " +
-      "role controls access: 'viewer' (read-only), 'editor' (read + write), 'admin' (read + write + can reshare). " +
-      "Use drive_share_status first to check if the person already has access. " +
+      "Invite a person to access a Proton Drive file or folder by email. Requires authentication. " +
+      "Immediately sends an email notification to the invitee — always confirm the email address and role with the user before calling. " +
+      "role values: 'viewer' (read-only), 'editor' (read + write), 'admin' (read + write + reshare). " +
+      "Do not call without first running drive_share_status — duplicate invitations may silently overwrite the existing role. " +
       "To remove access, use drive_share_revoke.",
     annotations: { openWorldHint: true },
     inputSchema: {
@@ -288,11 +295,11 @@ const TOOLS = [
           type: "string",
           enum: ["viewer", "editor", "admin"],
           description:
-            "Access level to grant: 'viewer' = read-only, 'editor' = read + write, 'admin' = read + write + reshare.",
+            "'viewer' = read-only, 'editor' = read + write, 'admin' = read + write + reshare.",
         },
         message: {
           type: "string",
-          description: "Optional personal message included in the invitation email (max 2000 characters).",
+          description: "Optional message included in the invitation email (max 2000 characters).",
         },
       },
       required: ["path", "email", "role"],
@@ -302,11 +309,11 @@ const TOOLS = [
   {
     name: "drive_share_revoke",
     description:
-      "Remove a specific person's access to a Proton Drive file or folder. " +
-      "The revoked user is not notified. " +
-      "Use drive_share_status first to confirm the member's email and current role. " +
-      "To revoke all members, call this once per entry returned by drive_share_status. " +
-      "To grant access, use drive_share_invite.",
+      "Remove a specific person's access to a Proton Drive file or folder. Requires authentication. " +
+      "The revoked user receives no notification. " +
+      "Always call drive_share_status first to confirm the email and current role before revoking. " +
+      "To revoke all members, call this once per member listed by drive_share_status. " +
+      "Do not use to modify a role — revoke and re-invite with the new role instead.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -328,10 +335,10 @@ const TOOLS = [
   {
     name: "drive_trash",
     description:
-      "Move a file or folder to the Proton Drive trash. " +
-      "The item disappears from its original path immediately but is not permanently deleted — " +
-      "it can be recovered with drive_restore or listed with drive_list_trash. " +
-      "Prefer this over drive_delete when permanent removal is not explicitly required.",
+      "Move a file or folder to the Proton Drive trash. Requires authentication. " +
+      "The item disappears from its original path immediately but is not permanently deleted — recover it with drive_restore or list it with drive_list_trash. " +
+      "Prefer this over drive_delete whenever permanent removal is not explicitly required by the user. " +
+      "Do not use when the item must be permanently gone immediately — use drive_delete with confirmed=true instead.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -348,16 +355,17 @@ const TOOLS = [
   {
     name: "drive_restore",
     description:
-      "Restore a trashed file or folder back to its original Proton Drive path. " +
-      "Use drive_list_trash first to find the trashed item's path. " +
-      "Fails if the original parent folder no longer exists or if another item with the same name was created there since it was trashed.",
+      "Restore a trashed file or folder back to its original Proton Drive path. Requires authentication. " +
+      "Use drive_list_trash first to find the item's current path in trash. " +
+      "Fails if the original parent folder no longer exists or if a new item with the same name was created at that path since it was trashed. " +
+      "Do not use for items not currently in trash — it will return an error.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
       properties: {
         path: {
           type: "string",
-          description: "Absolute remote Drive path of the item to restore, as shown in drive_list_trash (must start with '/').",
+          description: "Absolute remote Drive path of the item to restore, as shown in drive_list_trash output (must start with '/').",
         },
       },
       required: ["path"],
@@ -367,19 +375,68 @@ const TOOLS = [
   {
     name: "drive_empty_trash",
     description:
-      "Permanently delete ALL items in the Proton Drive trash — irreversible, no recovery. " +
+      "Permanently delete ALL items in the Proton Drive trash — irreversible, no recovery. Requires authentication. " +
       "Requires confirmed=true. " +
-      "Always call drive_list_trash first to show the user exactly what will be deleted, then ask for explicit confirmation before calling this.",
+      "Always call drive_list_trash first to show the user exactly what will be deleted, then ask for explicit confirmation. " +
+      "Do not call if the user only wants to delete specific items — use drive_delete or drive_trash for individual files.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       properties: {
         confirmed: {
           type: "boolean",
-          description: "Must be true. Confirms the user has seen the trash contents and acknowledged this is permanent and irreversible.",
+          description: "Must be true. Confirms the user has reviewed the trash contents and acknowledged this action is permanent and irreversible.",
         },
       },
       required: ["confirmed"],
+      additionalProperties: false,
+    },
+  },
+  // Sync-folder tools (requires PROTON_DRIVE_SYNC_PATH env var)
+  {
+    name: "drive_read_file",
+    description:
+      "Read the text contents of a file from the local Proton Drive sync folder. " +
+      "Requires the PROTON_DRIVE_SYNC_PATH environment variable to point to the root of the synced folder (e.g. /Users/alice/Proton Drive). " +
+      "The Proton Drive desktop app must be running and the file must be synced locally. " +
+      "Limited to text files up to 1 MB — returns an error for binary files or larger files (use drive_download instead). " +
+      "Do not use for files not yet synced locally, binary files, or files over 1 MB — use drive_download instead.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute remote Drive path of the file to read (must start with '/'). Mapped to the local sync folder. E.g. /my-files/notes.txt",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_write_file",
+    description:
+      "Write text content to a file in the local Proton Drive sync folder. Requires authentication. " +
+      "Requires the PROTON_DRIVE_SYNC_PATH environment variable to point to the sync folder root. " +
+      "The Proton Drive desktop app must be running to sync the written file to the cloud. " +
+      "Creates parent directories locally if they do not exist. " +
+      "Overwrites the file if it already exists — confirm with the user before overwriting. " +
+      "Do not use for binary content or files that need to be uploaded without the desktop app running — use drive_upload instead.",
+    annotations: { destructiveHint: false, openWorldHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute remote Drive path of the file to write (must start with '/'). Mapped to the local sync folder. E.g. /my-files/notes.txt",
+        },
+        content: {
+          type: "string",
+          description: "UTF-8 text content to write. The file will be created or overwritten.",
+        },
+      },
+      required: ["path", "content"],
       additionalProperties: false,
     },
   },
@@ -408,6 +465,7 @@ export async function main() {
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
+      annotations: (t as { annotations?: Record<string, boolean> }).annotations,
     })),
   }));
 
@@ -524,6 +582,21 @@ export async function main() {
           }
           await drive.emptyTrash();
           return ok({ message: "Trash emptied." });
+
+        case "drive_read_file": {
+          const syncRoot = getSyncRoot();
+          if (!syncRoot) return fail("PROTON_DRIVE_SYNC_PATH is not set. Set it to the root of your Proton Drive sync folder.");
+          const content = await readSyncFile(syncRoot, validateRemotePath(a.path));
+          return ok({ path: a.path, content });
+        }
+
+        case "drive_write_file": {
+          const syncRoot = getSyncRoot();
+          if (!syncRoot) return fail("PROTON_DRIVE_SYNC_PATH is not set. Set it to the root of your Proton Drive sync folder.");
+          if (typeof a.content !== "string") return fail("content must be a string");
+          await writeSyncFile(syncRoot, validateRemotePath(a.path), a.content);
+          return ok({ message: `Written: ${a.path}` });
+        }
 
         default:
           throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
