@@ -423,7 +423,7 @@ const TOOLS = [
       "Creates parent directories locally if they do not exist. " +
       "Overwrites the file if it already exists — confirm with the user before overwriting. " +
       "Do not use for binary content or files that need to be uploaded without the desktop app running — use drive_upload instead.",
-    annotations: { destructiveHint: false, openWorldHint: true },
+    annotations: { destructiveHint: true, openWorldHint: true },
     inputSchema: {
       type: "object",
       properties: {

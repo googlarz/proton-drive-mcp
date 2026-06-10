@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.19 — 2026-06-10
+
+### Fixed
+- **`drive_write_file` annotation** — changed `destructiveHint` from `false` to `true`; overwriting files is destructive and the contradiction with the description was scoring 1/5 on Glama Behavior
+
 ## 1.0.18 — 2026-06-10
 
 ### Fixed
