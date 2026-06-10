@@ -412,6 +412,10 @@ describe("validatePath", () => {
   it("accepts unicode paths", () => {
     assert.equal(validatePath("/földer/ñame.pdf"), "/földer/ñame.pdf");
   });
+
+  it("throws on DEL character (\\x7f)", () => {
+    assert.throws(() => validatePath("/my-files/\x7fhidden"), /control characters/);
+  });
 });
 
 // ─── validateEmail ────────────────────────────────────────────────────────────
@@ -461,5 +465,17 @@ describe("validateMessage", () => {
 
   it("accepts messages with special characters", () => {
     assert.equal(validateMessage("Hello, world! 🎉"), "Hello, world! 🎉");
+  });
+
+  it("throws on control characters", () => {
+    assert.throws(() => validateMessage("hello\x00world"), /control characters/);
+  });
+
+  it("throws when message exceeds 2000 characters", () => {
+    assert.throws(() => validateMessage("a".repeat(2001)), /2000 characters/);
+  });
+
+  it("accepts message of exactly 2000 characters", () => {
+    assert.equal(validateMessage("a".repeat(2000)).length, 2000);
   });
 });

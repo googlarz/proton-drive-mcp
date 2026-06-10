@@ -341,7 +341,7 @@ async function main() {
         }
 
         case "drive_upload": {
-          const cs = (a.conflictStrategy as string) ?? "skip";
+          const cs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
           if (!["skip", "overwrite", "rename"].includes(cs)) {
             throw new Error(`conflictStrategy must be skip, overwrite, or rename`);
           }

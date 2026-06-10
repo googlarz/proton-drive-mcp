@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.11 — 2026-06-10
+
+### Fixed
+- **`validateMessage` control characters and length** — `validateMessage` now rejects control characters (`\x00-\x1f`, `\x7f`, U+2028, U+2029) and messages exceeding 2000 characters; previously only leading dashes were checked
+- **`validatePath` and `validateEmail` DEL and Unicode separators** — control character check now covers `\x7f` (DEL), U+2028 (LINE SEPARATOR), and U+2029 (PARAGRAPH SEPARATOR) in addition to `\x00-\x1f`
+- **`conflictStrategy` type check** — changed `as string` cast to `typeof ... === "string"` check, consistent with other argument guards
+- **CLI `--message` flag validated** — `share invite` now passes `--message` through `validateMessage` before `DriveService` (was missing; MCP handler already did this)
+
+### Added
+- Tests: `validatePath` DEL char, `validateMessage` control chars + length cap — 57 tests total
+
 ## 1.0.10 — 2026-06-10
 
 ### Fixed
