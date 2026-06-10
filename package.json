@@ -63,6 +63,7 @@
     "dist/**/*",
     "README.md",
     "LICENSE",
+    "CHANGELOG.md",
     "glama.json"
   ],
   "publishConfig": {
