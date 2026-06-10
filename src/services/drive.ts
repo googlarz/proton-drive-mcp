@@ -8,6 +8,7 @@ import type {
   UploadResult,
 } from "../types/index.js";
 import { runDrive as defaultRunDrive } from "../utils/subprocess.js";
+import { DriveParseError } from "../utils/errors.js";
 
 type Runner = (args: string[]) => Promise<unknown>;
 
@@ -21,6 +22,7 @@ export class DriveService {
   // Auth
   async authStatus(): Promise<AuthStatus> {
     const result = await this.run(["auth", "status"]);
+    if (result === null) return { authenticated: false };
     const r = result as Record<string, unknown>;
     return {
       authenticated: Boolean(r?.authenticated ?? r?.loggedIn ?? false),
@@ -44,8 +46,9 @@ export class DriveService {
   // Filesystem
   async list(remotePath: string): Promise<DriveFile[]> {
     const result = await this.run(["filesystem", "list", remotePath]);
-    const items = Array.isArray(result) ? result : [];
-    return items.map((item: Record<string, unknown>) => ({
+    if (result === null) return [];
+    if (!Array.isArray(result)) throw new DriveParseError(`Expected array from list, got: ${JSON.stringify(result).slice(0, 100)}`);
+    return result.map((item: Record<string, unknown>) => ({
       name: String(item.name ?? ""),
       path: String(item.path ?? remotePath),
       type: item.type === "folder" ? "folder" : "file",
@@ -125,9 +128,13 @@ export class DriveService {
     role: ShareRole,
     message?: string
   ): Promise<void> {
-    const args = ["sharing", "invite", "--user", email, "--role", role, remotePath];
-    if (message) args.splice(2, 0, "--message", message);
-    await this.run(args);
+    await this.run([
+      "sharing", "invite",
+      ...(message ? ["--message", message] : []),
+      "--user", email,
+      "--role", role,
+      remotePath,
+    ]);
   }
 
   async shareRevoke(remotePath: string, email: string): Promise<void> {
@@ -137,8 +144,9 @@ export class DriveService {
   // Trash
   async listTrash(): Promise<DriveFile[]> {
     const result = await this.run(["trash", "list"]);
-    const items = Array.isArray(result) ? result : [];
-    return items.map((item: Record<string, unknown>) => ({
+    if (result === null) return [];
+    if (!Array.isArray(result)) throw new DriveParseError(`Expected array from trash list, got: ${JSON.stringify(result).slice(0, 100)}`);
+    return result.map((item: Record<string, unknown>) => ({
       name: String(item.name ?? ""),
       path: String(item.path ?? ""),
       type: item.type === "folder" ? "folder" : "file",

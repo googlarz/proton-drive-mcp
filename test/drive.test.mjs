@@ -4,6 +4,7 @@ import { DriveService } from "../dist/services/drive.js";
 import {
   DriveCliError,
   DriveNotAuthenticatedError,
+  DriveParseError,
 } from "../dist/utils/errors.js";
 
 // ─── Test runner factory ──────────────────────────────────────────────────────
@@ -55,6 +56,15 @@ describe("authStatus", () => {
     t.setResult({ loggedIn: true, email: "alt@pm.me" });
     const status = await drive.authStatus();
     assert.equal(status.authenticated, true);
+    assert.equal(status.email, "alt@pm.me");
+  });
+
+  it("returns authenticated=false when CLI returns null", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    const status = await drive.authStatus();
+    assert.equal(status.authenticated, false);
   });
 });
 
@@ -114,6 +124,13 @@ describe("list", () => {
     const files = await drive.list("/my-files");
     assert.deepEqual(files, []);
   });
+
+  it("throws DriveParseError when CLI returns non-array", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ files: [] });
+    await assert.rejects(() => drive.list("/my-files"), { name: "DriveParseError" });
+  });
 });
 
 describe("upload", () => {
@@ -130,6 +147,7 @@ describe("upload", () => {
     assert.equal(call[3], "/my-files/Reports");
     assert.ok(call.includes("--conflict-strategy"));
     assert.ok(call.includes("skip"));
+    assert.ok(call.includes("--skip-thumbnails"));
   });
 
   it("passes overwrite conflict strategy", async () => {
@@ -287,6 +305,13 @@ describe("listTrash", () => {
     t.setResult([]);
     const items = await drive.listTrash();
     assert.deepEqual(items, []);
+  });
+
+  it("throws DriveParseError when CLI returns non-array", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ count: 0 });
+    await assert.rejects(() => drive.listTrash(), { name: "DriveParseError" });
   });
 });
 

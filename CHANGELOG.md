@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.8 — 2026-06-10
+
+### Fixed
+- **`--message` flag injection** — `validateMessage` now rejects values starting with `-`; an LLM could otherwise pass `--role admin` as a message and inject flags into the `proton-drive sharing invite` call
+- **Timeout detection** — also catches `e.code === "ETIMEDOUT"` and `e.signal != null` in addition to `e.killed === true`; Node may set any of these depending on platform and process behavior
+- **`list()` and `listTrash()` non-array results** — previously silently returned `[]` when the CLI returned an unexpected object shape; now throws `DriveParseError` with a diagnostic snippet
+- **`authStatus()` null result** — when CLI returns empty output now returns `{ authenticated: false }` explicitly rather than relying on optional-chaining fallbacks through a null cast
+- **`shareInvite` splice replaced** — replaced fragile `args.splice(2, 0, "--message", message)` with a declarative spread `[...(message ? ["--message", message] : []), ...]`; equivalent behavior, immune to future arg-order changes
+- **`drive_move` and `drive_delete` success messages** now include the paths operated on (e.g. `"Deleted: /my-files/old.pdf"`, `"Moved: /src → /dst"`)
+- **`validatePath` control characters** — now rejects paths containing `\x00–\x1f`; null bytes are silently truncated by the OS at the syscall boundary
+- **`getFlag` missing value** — `--conflict` or `--message` with no following value (or another flag immediately after) now emits a clear error instead of returning `undefined`
+- **CHANGELOG v1.0.6** — fixed copy-paste error that listed unpacked size as "~50 kB to ~50 kB"
+- **README** — removed overclaim that "Claude will always use `drive_list_trash` first"; this is not enforced by code
+
+### Added
+- `PROTON_DRIVE_BIN` environment variable — overrides the `proton-drive` binary name/path for non-standard installations; documented in README troubleshooting
+- Tests: `authStatus` null result, `authStatus` loggedIn alias now also asserts email forwarding, `list` non-array throws `DriveParseError`, `listTrash` non-array throws `DriveParseError`, upload asserts `--skip-thumbnails` is present in args (31 tests total)
+
 ## 1.0.7 — 2026-06-10
 
 ### Fixed
@@ -10,7 +28,7 @@
 
 ### Fixed
 - `drive_share_invite` MCP handler now validates `role` at runtime (viewer/editor/admin), consistent with the CLI companion and the `conflictStrategy` guard added in v1.0.4
-- Removed `.d.ts`, `.d.ts.map`, and `.js.map` files from the published package — this is a CLI tool, not a library; declaration files and source maps have no value for consumers (package shrinks from ~50 kB to ~50 kB unpacked, ~22 kB to ~14 kB packed)
+- Removed `.d.ts`, `.d.ts.map`, and `.js.map` files from the published package — this is a CLI tool, not a library; declaration files and source maps have no value for consumers (~22 kB → ~14 kB packed)
 
 ### Changed
 - CI workflow: removed redundant `Build` step — `npm test` already calls `npm run build` internally, so the explicit step was building twice

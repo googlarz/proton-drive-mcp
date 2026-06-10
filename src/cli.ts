@@ -63,7 +63,12 @@ Flags:
 
 function getFlag(flag: string): string | undefined {
   const idx = args.indexOf(flag);
-  return idx !== -1 ? args[idx + 1] : undefined;
+  if (idx === -1) return undefined;
+  if (idx + 1 >= args.length || args[idx + 1].startsWith("--")) {
+    console.error(`${flag} requires a value`);
+    process.exit(1);
+  }
+  return args[idx + 1];
 }
 
 function print(data: unknown) {

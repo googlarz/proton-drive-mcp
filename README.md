@@ -244,7 +244,7 @@ proton-drive-cli share status /my-files/Projects
 | `drive_restore` | Restore from trash | `path` |
 | `drive_empty_trash` | Permanently delete all trash ⚠️ | `confirmed: true` |
 
-> ⚠️ **Destructive tools** require `confirmed: true`. Claude will always use `drive_list_trash` first and ask you before calling `drive_empty_trash`.
+> ⚠️ **Destructive tools** require `confirmed: true`. Use `drive_list_trash` first so you know what will be deleted, then pass `confirmed: true` to proceed.
 
 ---
 
@@ -283,6 +283,24 @@ Restart Claude Desktop fully after changing the MCP config. Check **`+` → Conn
 
 **Upload fails on image files**  
 The CLI generates WebP thumbnails by default using Bun's image API. If Bun isn't installed or doesn't support thumbnails on your platform, the MCP passes `--skip-thumbnails` to bypass this. No action needed.
+
+**Custom binary path**  
+If the `proton-drive` binary is installed under a non-standard name or location, set `PROTON_DRIVE_BIN` in your environment:
+```bash
+PROTON_DRIVE_BIN=/usr/local/bin/proton-drive npx proton-drive-mcp
+```
+Or in Claude Desktop config:
+```json
+{
+  "mcpServers": {
+    "proton-drive": {
+      "command": "npx",
+      "args": ["-y", "proton-drive-mcp"],
+      "env": { "PROTON_DRIVE_BIN": "/usr/local/bin/proton-drive" }
+    }
+  }
+}
+```
 
 **Windows PATH issues**  
 Use the full path to the `proton-drive.exe` binary in your Claude Desktop config if `npx` can't find it:

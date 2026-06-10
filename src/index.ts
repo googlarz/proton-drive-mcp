@@ -49,7 +49,14 @@ function validatePath(path: unknown): string {
   const p = String(path ?? "").trim();
   if (!p) throw new Error("path must not be empty");
   if (p.startsWith("-")) throw new Error(`path must not start with '-': ${p}`);
+  if (/[\x00-\x1f]/.test(p)) throw new Error("path contains control characters");
   return p;
+}
+
+function validateMessage(message: unknown): string {
+  const m = String(message ?? "").trim();
+  if (m.startsWith("-")) throw new Error(`message must not start with '-': ${m}`);
+  return m;
 }
 
 function validateEmail(email: unknown): string {
@@ -371,16 +378,21 @@ async function main() {
         case "drive_download":
           return ok(await drive.download(validatePath(a.remotePath), validatePath(a.localPath)));
 
-        case "drive_move":
-          await drive.move(validatePath(a.sourcePath), validatePath(a.destinationPath));
-          return ok({ message: "Moved successfully." });
+        case "drive_move": {
+          const moveSrc = validatePath(a.sourcePath);
+          const moveDst = validatePath(a.destinationPath);
+          await drive.move(moveSrc, moveDst);
+          return ok({ message: `Moved: ${moveSrc} → ${moveDst}` });
+        }
 
-        case "drive_delete":
+        case "drive_delete": {
           if (a.confirmed !== true) {
             return fail("drive_delete requires confirmed=true. Ask the user to confirm before deleting.");
           }
-          await drive.delete(validatePath(a.path));
-          return ok({ message: "Deleted successfully." });
+          const deletePath = validatePath(a.path);
+          await drive.delete(deletePath);
+          return ok({ message: `Deleted: ${deletePath}` });
+        }
 
         case "drive_list_trash":
           return ok(await drive.listTrash());
@@ -394,11 +406,12 @@ async function main() {
           if (!["viewer", "editor", "admin"].includes(role)) {
             throw new Error("role must be viewer, editor, or admin");
           }
+          const inviteMsg = typeof a.message === "string" ? validateMessage(a.message) : undefined;
           await drive.shareInvite(
             validatePath(a.path),
             email,
             role as "viewer" | "editor" | "admin",
-            typeof a.message === "string" ? a.message : undefined
+            inviteMsg
           );
           return ok({ message: `Invited ${email} as ${role}.` });
         }

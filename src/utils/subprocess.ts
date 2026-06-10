@@ -4,7 +4,7 @@ import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, Drive
 
 const execFileAsync = promisify(execFile);
 
-const CLI_BINARY = "proton-drive";
+const CLI_BINARY = process.env["PROTON_DRIVE_BIN"] ?? "proton-drive";
 const DEFAULT_TIMEOUT_MS = 60_000;
 // Upload and download transfer actual file bytes — use a much longer timeout.
 const TRANSFER_TIMEOUT_MS = 30 * 60_000; // 30 minutes
@@ -51,13 +51,13 @@ export async function runDrive(args: string[]): Promise<unknown> {
       throw err;
     }
 
-    const e = err as NodeJS.ErrnoException & { killed?: boolean; stderr?: string };
+    const e = err as NodeJS.ErrnoException & { killed?: boolean; stderr?: string; signal?: string };
 
     if (e.code === "ENOENT") {
       throw new DriveCliNotFoundError();
     }
 
-    if (e.killed === true) {
+    if (e.killed === true || e.code === "ETIMEDOUT" || e.signal != null) {
       const secs = timeoutFor(args) / 1000;
       throw new DriveCliError(`CLI process timed out after ${secs}s`, "");
     }
