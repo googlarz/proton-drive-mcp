@@ -1,6 +1,6 @@
 {
   "name": "proton-drive-mcp",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "Proton Drive MCP — Claude Desktop MCP and CLI for Proton Drive. List, upload, download, share, and manage files with end-to-end encryption.",
   "type": "module",
   "main": "dist/index.js",
@@ -17,7 +17,9 @@
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "cli": "npm run build && node dist/cli.js",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "test": "npm run build && node --test test/drive.test.mjs",
+    "test:integration": "npm run build && node --test test/integration.test.mjs",
+    "test:all": "npm run build && node --test test/*.test.mjs",
     "lint": "tsc --noEmit",
     "clean": "rm -rf dist",
     "ci": "npm run lint && npm test",

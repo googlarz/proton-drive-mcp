@@ -237,7 +237,7 @@ describe("delete", () => {
     const drive = new DriveService(t.runner);
     t.setResult(null);
     await drive.delete("/my-files/old.pdf");
-    assert.deepEqual(t.lastCall(), ["filesystem", "delete", "/my-files/old.pdf"]);
+    assert.deepEqual(t.lastCall(), ["filesystem", "delete", "--confirm", "/my-files/old.pdf"]);
   });
 });
 
@@ -393,7 +393,7 @@ describe("emptyTrash", () => {
     const drive = new DriveService(t.runner);
     t.setResult(null);
     await drive.emptyTrash();
-    assert.deepEqual(t.lastCall(), ["trash", "empty"]);
+    assert.deepEqual(t.lastCall(), ["trash", "empty", "--confirm"]);
   });
 });
 

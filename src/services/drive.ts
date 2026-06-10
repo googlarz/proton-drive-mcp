@@ -101,7 +101,7 @@ export class DriveService {
   }
 
   async delete(remotePath: string): Promise<void> {
-    await this.run(["filesystem", "delete", remotePath]);
+    await this.run(["filesystem", "delete", "--confirm", remotePath]);
   }
 
   // Sharing
@@ -168,6 +168,6 @@ export class DriveService {
   }
 
   async emptyTrash(): Promise<void> {
-    await this.run(["trash", "empty"]);
+    await this.run(["trash", "empty", "--confirm"]);
   }
 }

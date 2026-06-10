@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.15 — 2026-06-10
+
+### Fixed
+- **`delete()` missing `--confirm` flag** — `filesystem delete` requires `--confirm`; was silently failing or prompting interactively when the underlying CLI enforces confirmation
+- **`emptyTrash()` missing `--confirm` flag** — same issue for `trash empty`
+
+### Added
+- **Integration test suite** (`test/integration.test.mjs`) — 20 tests that run against the real `proton-drive` binary; all skip gracefully when CLI is not in PATH; verify every command group exists (`filesystem`, `sharing`, `trash restore`, etc.) so wrong command strings are caught at the CLI level, not just by mocked runners
+- **`npm run test:integration`** — runs integration tests only
+- **`npm run test:all`** — runs both unit and integration suites
+
 ## 1.0.14 — 2026-06-10
 
 ### Fixed
