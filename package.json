@@ -64,7 +64,8 @@
     "LICENSE",
     "CHANGELOG.md",
     "glama.json",
-    "smithery.yaml"
+    "smithery.yaml",
+    "Dockerfile"
   ],
   "publishConfig": {
     "access": "public"
