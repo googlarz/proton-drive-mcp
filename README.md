@@ -24,12 +24,13 @@
 
 ---
 
-Give Claude Desktop (or any MCP client) full access to your Proton Drive: list folders, upload and download files, invite collaborators, manage sharing, and handle trash — all with end-to-end encryption intact. The same capabilities are available as a full CLI for scripting, backups, and cron.
+Give Claude Desktop (or any MCP client) full access to your Proton Drive and Proton Photos: list folders, upload and download files, invite collaborators, manage sharing, handle trash, and manage photo albums — all with end-to-end encryption intact. The same capabilities are available as a full CLI for scripting, backups, and cron.
 
 ## What you get
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
-- **Full CLI** — same 23 operations, scriptable and pipeable, works in cron and shell scripts
+- **Proton Photos album management** — list albums, create/delete albums, add and remove photos
+- **Full CLI** — same 29 operations, scriptable and pipeable, works in cron and shell scripts
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
 - **Shell injection safe** — all CLI calls use `execFile` with discrete argument arrays, never string interpolation
 - **Privacy-native** — end-to-end encryption is handled by Proton's own CLI; this server is just a thin MCP wrapper
@@ -231,6 +232,9 @@ proton-drive-cli share status /my-files/Projects
 ### Invitations
 `drive_list_invitations` · `drive_invitation_accept` · `drive_invitation_reject` · `drive_share_leave`
 
+### Photos
+`photos_list_albums` · `photos_create_album` · `photos_delete_album` · `photos_list_album_photos` · `photos_add_to_album` · `photos_remove_from_album`
+
 ---
 
 ## Tool reference
@@ -260,6 +264,12 @@ proton-drive-cli share status /my-files/Projects
 | `drive_invitation_accept` | Accept a pending invitation | `uid` (from `drive_list_invitations`) |
 | `drive_invitation_reject` | Reject a pending invitation ⚠️ | `uid` (from `drive_list_invitations`) |
 | `drive_share_leave` | Leave a shared folder shared with you ⚠️ | `path` |
+| `photos_list_albums` | List all Proton Photos albums | — |
+| `photos_create_album` | Create a new empty album | `name` |
+| `photos_delete_album` | Delete an album ⚠️ | `albumPath`, `confirmed: true`, `force?`, `save?` |
+| `photos_list_album_photos` | List photos in an album | `albumPath` |
+| `photos_add_to_album` | Add a photo from your library to an album | `albumPath`, `photoPath` |
+| `photos_remove_from_album` | Remove a photo from an album (keeps it in library) ⚠️ | `albumPath`, `photoPath` |
 
 > ⚠️ **Destructive tools** require `confirmed: true`. Use `drive_list_trash` first so you know what will be deleted, then pass `confirmed: true` to proceed.
 

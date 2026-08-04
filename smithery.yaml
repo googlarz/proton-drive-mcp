@@ -35,6 +35,12 @@ tools:
   - drive_invitation_accept
   - drive_invitation_reject
   - drive_share_leave
+  - photos_list_albums
+  - photos_create_album
+  - photos_delete_album
+  - photos_list_album_photos
+  - photos_add_to_album
+  - photos_remove_from_album
 startCommand:
   type: stdio
   configSchema:

@@ -56,6 +56,12 @@ Commands:
   trash list                               List trash contents
   trash empty                              Permanently delete all trash
   restore <path>                           Restore from trash
+  album list                               List all photo albums
+  album create <name>                      Create a new album
+  album delete <path> [--force] [--save]  Delete an album
+  album photos <path>                      List photos in an album
+  album add-photo <album> <photo>          Add a photo to an album
+  album remove-photo <album> <photo>       Remove a photo from an album
 
 Flags:
   --json                                   Machine-readable JSON output (one line)
@@ -272,6 +278,41 @@ async function run() {
         console.log("Invitation rejected.");
       } else {
         console.error("Usage: invitation list | invitation accept <uid> | invitation reject <uid>");
+        process.exit(1);
+      }
+      break;
+
+    case "album":
+      if (sub === "list" || sub === "ls") {
+        print(await drive.listAlbums());
+      } else if (sub === "create") {
+        const albumName = rest[0];
+        if (!albumName) { console.error("Usage: album create <name>"); process.exit(1); }
+        await drive.createAlbum(albumName);
+        console.log(`Album created: ${albumName}`);
+      } else if (sub === "delete") {
+        const albumPath = requirePath(rest[0], "album delete <path> [--force] [--save] --confirm");
+        if (!args.includes("--confirm")) {
+          console.error(`This will delete album: ${albumPath}\nPass --confirm to proceed.`);
+          process.exit(1);
+        }
+        await drive.deleteAlbum(albumPath, args.includes("--force"), args.includes("--save"));
+        console.log(`Album deleted: ${albumPath}`);
+      } else if (sub === "photos") {
+        const albumPath = requirePath(rest[0], "album photos <path>");
+        print(await drive.listAlbumPhotos(albumPath));
+      } else if (sub === "add-photo") {
+        const albumPath = requirePath(rest[0], "album add-photo <album-path> <photo-path>");
+        const photoPath = requirePath(rest[1], "album add-photo <album-path> <photo-path>");
+        await drive.addPhotoToAlbum(albumPath, photoPath);
+        console.log(`Added ${photoPath} to ${albumPath}`);
+      } else if (sub === "remove-photo") {
+        const albumPath = requirePath(rest[0], "album remove-photo <album-path> <photo-path>");
+        const photoPath = requirePath(rest[1], "album remove-photo <album-path> <photo-path>");
+        await drive.removePhotoFromAlbum(albumPath, photoPath);
+        console.log(`Removed ${photoPath} from ${albumPath}`);
+      } else {
+        console.error("Usage: album list | album create <name> | album delete <path> | album photos <path> | album add-photo <album> <photo> | album remove-photo <album> <photo>");
         process.exit(1);
       }
       break;

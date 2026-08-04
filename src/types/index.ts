@@ -56,3 +56,14 @@ export interface DriveInvitation {
   nodeType: DriveFileType;
 }
 
+export interface Album {
+  name: string;
+  photoCount: number;
+  isShared: boolean;
+  creationTime?: string;
+}
+
+export interface AlbumPhoto {
+  nodeUid: string;
+}
+

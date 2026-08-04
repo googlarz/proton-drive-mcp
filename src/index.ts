@@ -488,6 +488,136 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  // Photos / Albums
+  {
+    name: "photos_list_albums",
+    description:
+      "List all photo albums in Proton Photos. Requires authentication. " +
+      "Returns [{name, photoCount, isShared, creationTime?}]. " +
+      "Album paths are /albums/<name> — use the name from this list to build paths for other album tools. " +
+      "Do not use to list regular Drive folders — use drive_list instead.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
+  },
+  {
+    name: "photos_create_album",
+    description:
+      "Create a new empty photo album in Proton Photos. Requires authentication. " +
+      "Pass the album name (not a path) — the album is created at /albums/<name>. " +
+      "Fails if an album with that name already exists.",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Name of the new album. E.g. 'Vacation 2024'. Must be non-empty.",
+        },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "photos_delete_album",
+    description:
+      "Delete a Proton Photos album. Requires authentication and confirmed=true. " +
+      "By default refuses to delete an album that still contains photos — pass force=true to override. " +
+      "By default photos are removed from the album but kept in your timeline — pass save=true to explicitly preserve them in your timeline before deleting. " +
+      "albumPath must start with /albums/. " +
+      "Always show the user the album name and photo count (from photos_list_albums) before calling.",
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        albumPath: {
+          type: "string",
+          description: "Absolute path of the album to delete. Must start with /albums/. E.g. /albums/Vacation 2024",
+        },
+        confirmed: {
+          type: "boolean",
+          description: "Must be true. Confirms the user has acknowledged the deletion.",
+        },
+        force: {
+          type: "boolean",
+          description: "If true, delete even if the album still contains photos. Default false.",
+        },
+        save: {
+          type: "boolean",
+          description: "If true, save album photos to your timeline before deleting. Default false.",
+        },
+      },
+      required: ["albumPath", "confirmed"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "photos_list_album_photos",
+    description:
+      "List the photos in a Proton Photos album. Requires authentication. " +
+      "Returns [{nodeUid}] — photo node UIDs. " +
+      "albumPath must start with /albums/. " +
+      "To add or remove photos, use their Drive path under /photos/ (not the nodeUid).",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        albumPath: {
+          type: "string",
+          description: "Absolute path of the album. Must start with /albums/. E.g. /albums/Vacation 2024",
+        },
+      },
+      required: ["albumPath"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "photos_add_to_album",
+    description:
+      "Add a photo from your Proton Photos library to an album. Requires authentication. " +
+      "albumPath must start with /albums/; photoPath must start with /photos/. " +
+      "The photo must already exist in your library — this does not upload new photos. " +
+      "Use photos_list_albums to find album paths.",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        albumPath: {
+          type: "string",
+          description: "Absolute path of the album. Must start with /albums/. E.g. /albums/Vacation 2024",
+        },
+        photoPath: {
+          type: "string",
+          description: "Absolute path of the photo in your library. Must start with /photos/. E.g. /photos/IMG_001.jpg",
+        },
+      },
+      required: ["albumPath", "photoPath"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "photos_remove_from_album",
+    description:
+      "Remove a photo from a Proton Photos album without deleting it from your library. Requires authentication. " +
+      "albumPath must start with /albums/; photoPath must start with /photos/. " +
+      "The photo is removed from the album only — it stays in your timeline.",
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        albumPath: {
+          type: "string",
+          description: "Absolute path of the album. Must start with /albums/. E.g. /albums/Vacation 2024",
+        },
+        photoPath: {
+          type: "string",
+          description: "Absolute path of the photo in the album. Must start with /photos/. E.g. /photos/IMG_001.jpg",
+        },
+      },
+      required: ["albumPath", "photoPath"],
+      additionalProperties: false,
+    },
+  },
   // Sync-folder tools (requires PROTON_DRIVE_SYNC_PATH env var)
   {
     name: "drive_read_file",
@@ -705,6 +835,47 @@ export async function main() {
           const leavePath = validateRemotePath(a.path);
           await drive.shareLeave(leavePath);
           return ok({ message: `Left shared folder: ${leavePath}` });
+        }
+
+        case "photos_list_albums":
+          return ok(await drive.listAlbums());
+
+        case "photos_create_album": {
+          if (typeof a.name !== "string" || !a.name.trim()) return fail("name must be a non-empty string");
+          await drive.createAlbum(a.name.trim());
+          return ok({ message: `Album created: ${a.name.trim()}` });
+        }
+
+        case "photos_delete_album": {
+          if (a.confirmed !== true) return fail("photos_delete_album requires confirmed=true. Show the user the album name and photo count first.");
+          const albumDelPath = validateRemotePath(a.albumPath);
+          if (!albumDelPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
+          await drive.deleteAlbum(albumDelPath, a.force === true, a.save === true);
+          return ok({ message: `Album deleted: ${albumDelPath}` });
+        }
+
+        case "photos_list_album_photos": {
+          const albumListPath = validateRemotePath(a.albumPath);
+          if (!albumListPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
+          return ok(await drive.listAlbumPhotos(albumListPath));
+        }
+
+        case "photos_add_to_album": {
+          const addAlbumPath = validateRemotePath(a.albumPath);
+          const addPhotoPath = validateRemotePath(a.photoPath);
+          if (!addAlbumPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
+          if (!addPhotoPath.startsWith("/photos/")) return fail("photoPath must start with /photos/");
+          await drive.addPhotoToAlbum(addAlbumPath, addPhotoPath);
+          return ok({ message: `Added ${addPhotoPath} to ${addAlbumPath}` });
+        }
+
+        case "photos_remove_from_album": {
+          const remAlbumPath = validateRemotePath(a.albumPath);
+          const remPhotoPath = validateRemotePath(a.photoPath);
+          if (!remAlbumPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
+          if (!remPhotoPath.startsWith("/photos/")) return fail("photoPath must start with /photos/");
+          await drive.removePhotoFromAlbum(remAlbumPath, remPhotoPath);
+          return ok({ message: `Removed ${remPhotoPath} from ${remAlbumPath}` });
         }
 
         case "drive_read_file": {

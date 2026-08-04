@@ -102,6 +102,30 @@
     {
       "name": "drive_share_leave",
       "description": "Leave a Proton Drive folder that was shared with you by another user."
+    },
+    {
+      "name": "photos_list_albums",
+      "description": "List all photo albums in Proton Photos."
+    },
+    {
+      "name": "photos_create_album",
+      "description": "Create a new empty photo album in Proton Photos."
+    },
+    {
+      "name": "photos_delete_album",
+      "description": "Delete a Proton Photos album."
+    },
+    {
+      "name": "photos_list_album_photos",
+      "description": "List the photos in a Proton Photos album."
+    },
+    {
+      "name": "photos_add_to_album",
+      "description": "Add a photo from your Proton Photos library to an album."
+    },
+    {
+      "name": "photos_remove_from_album",
+      "description": "Remove a photo from a Proton Photos album."
     }
   ]
 }

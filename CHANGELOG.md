@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.25 — 2026-08-04
+
+### Added
+- **`photos_list_albums`** — list all Proton Photos albums (`album list`); returns name, photoCount, isShared, creationTime
+- **`photos_create_album`** — create a new empty album by name (`album create <name>`)
+- **`photos_delete_album`** — delete an album with optional `--force` (delete even if non-empty) and `--save` (preserve photos in timeline) flags; requires `confirmed: true`
+- **`photos_list_album_photos`** — list photos in an album by path; returns nodeUids (`album photos <albumPath>`)
+- **`photos_add_to_album`** — add a photo from your library to an album (`album add-photo <albumPath> <photoPath>`)
+- **`photos_remove_from_album`** — remove a photo from an album without deleting it from your library (`album remove-photo <albumPath> <photoPath>`)
+- All 6 tools also available as CLI subcommands: `album list/create/delete/photos/add-photo/remove-photo`
+- Album paths use `/albums/<name>` prefix; photo paths use `/photos/<filename>` prefix
+
 ## 1.0.24 — 2026-08-04
 
 ### Added

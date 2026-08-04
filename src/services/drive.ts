@@ -1,4 +1,6 @@
 import type {
+  Album,
+  AlbumPhoto,
   AuthStatus,
   DownloadResult,
   DriveFile,
@@ -205,5 +207,46 @@ export class DriveService {
 
   async shareLeave(remotePath: string): Promise<void> {
     await this.run(["sharing", "leave", remotePath]);
+  }
+
+  // Photos / Albums
+  async listAlbums(): Promise<Album[]> {
+    const result = await this.run(["album", "list"]);
+    if (result === null) return [];
+    if (!Array.isArray(result)) throw new DriveParseError(`Expected array from album list, got: ${JSON.stringify(result).slice(0, 100)}`);
+    return result.map((item: Record<string, unknown>) => ({
+      name: String(item.name ?? ""),
+      photoCount: typeof item.photoCount === "number" ? item.photoCount : 0,
+      isShared: Boolean(item.isShared ?? false),
+      creationTime: typeof item.creationTime === "string" ? item.creationTime : undefined,
+    }));
+  }
+
+  async createAlbum(name: string): Promise<void> {
+    await this.run(["album", "create", name]);
+  }
+
+  async deleteAlbum(albumPath: string, force: boolean, save: boolean): Promise<void> {
+    const args = ["album", "delete", albumPath];
+    if (force) args.push("--force");
+    if (save) args.push("--save");
+    await this.run(args);
+  }
+
+  async listAlbumPhotos(albumPath: string): Promise<AlbumPhoto[]> {
+    const result = await this.run(["album", "photos", albumPath]);
+    if (result === null) return [];
+    if (!Array.isArray(result)) throw new DriveParseError(`Expected array from album photos, got: ${JSON.stringify(result).slice(0, 100)}`);
+    return result.map((item: Record<string, unknown>) => ({
+      nodeUid: String(item.nodeUid ?? item.uid ?? ""),
+    }));
+  }
+
+  async addPhotoToAlbum(albumPath: string, photoPath: string): Promise<void> {
+    await this.run(["album", "add-photo", albumPath, photoPath]);
+  }
+
+  async removePhotoFromAlbum(albumPath: string, photoPath: string): Promise<void> {
+    await this.run(["album", "remove-photo", albumPath, photoPath]);
   }
 }
