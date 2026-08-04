@@ -2,6 +2,7 @@ import type {
   AuthStatus,
   DownloadResult,
   DriveFile,
+  DriveInvitation,
   DriveVersion,
   ShareRole,
   ShareStatus,
@@ -169,5 +170,40 @@ export class DriveService {
 
   async emptyTrash(): Promise<void> {
     await this.run(["trash", "empty", "--confirm"]);
+  }
+
+  async copy(remoteSrc: string, remoteDst: string): Promise<void> {
+    await this.run(["filesystem", "copy", remoteSrc, remoteDst]);
+  }
+
+  async listInvitations(): Promise<DriveInvitation[]> {
+    const result = await this.run(["invitation", "list"]);
+    if (result === null) return [];
+    if (!Array.isArray(result)) throw new DriveParseError(`Expected array from invitation list, got: ${JSON.stringify(result).slice(0, 100)}`);
+    return result.map((item: Record<string, unknown>) => {
+      const node = (item.node ?? {}) as Record<string, unknown>;
+      const nameVal = (node.name ?? {}) as Record<string, unknown>;
+      const nodeName = typeof nameVal.value === "string" ? nameVal.value : String(node.name ?? "");
+      return {
+        uid: String(item.uid ?? ""),
+        role: (["viewer", "editor", "admin"].includes(String(item.role)) ? String(item.role) : "viewer") as ShareRole,
+        invitedByEmail: String(item.addedByEmail ?? ""),
+        invitedAt: typeof item.invitationTime === "string" ? item.invitationTime : undefined,
+        nodeName,
+        nodeType: node.type === "folder" ? "folder" : "file",
+      };
+    });
+  }
+
+  async invitationAccept(uid: string): Promise<void> {
+    await this.run(["invitation", "accept", uid]);
+  }
+
+  async invitationReject(uid: string): Promise<void> {
+    await this.run(["invitation", "reject", uid]);
+  }
+
+  async shareLeave(remotePath: string): Promise<void> {
+    await this.run(["sharing", "leave", remotePath]);
   }
 }

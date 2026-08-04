@@ -30,6 +30,11 @@ tools:
   - drive_empty_trash
   - drive_read_file
   - drive_write_file
+  - drive_copy
+  - drive_list_invitations
+  - drive_invitation_accept
+  - drive_invitation_reject
+  - drive_share_leave
 startCommand:
   type: stdio
   configSchema:

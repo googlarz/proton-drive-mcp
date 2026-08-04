@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.24 — 2026-08-04
+
+### Added
+- **`drive_copy`** — copy a file or folder to another Drive location without removing the original (`filesystem copy`)
+- **`drive_list_invitations`** — list all pending sharing invitations received from other users (`invitation list`); returns uid, role, sender, and node info
+- **`drive_invitation_accept`** — accept a pending invitation by uid (`invitation accept`)
+- **`drive_invitation_reject`** — reject a pending invitation by uid (`invitation reject`)
+- **`drive_share_leave`** — leave a shared folder that was shared with you (`sharing leave`)
+- All 5 tools also available as CLI subcommands: `copy`, `invitation list/accept/reject`, `share leave`
+
 ## 1.0.23 — 2026-06-10
 
 ### Fixed

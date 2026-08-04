@@ -47,3 +47,12 @@ export interface DriveVersion {
   sdk: string;
 }
 
+export interface DriveInvitation {
+  uid: string;
+  role: ShareRole;
+  invitedByEmail: string;
+  invitedAt?: string;
+  nodeName: string;
+  nodeType: DriveFileType;
+}
+

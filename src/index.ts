@@ -392,6 +392,102 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  // Copy
+  {
+    name: "drive_copy",
+    description:
+      "Copy a file or folder to another location on Proton Drive. Requires authentication. " +
+      "The original is preserved — this is not a move. " +
+      "Use drive_move when you want to relocate without keeping the original. " +
+      "Do not use to duplicate large folder trees without user awareness of the storage cost.",
+    annotations: { destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        sourcePath: {
+          type: "string",
+          description: "Absolute remote Drive path of the file or folder to copy (must start with '/'). E.g. /my-files/report.pdf",
+        },
+        destinationPath: {
+          type: "string",
+          description: "Absolute remote Drive path of the target parent folder (must start with '/'). E.g. /my-files/Archive",
+        },
+      },
+      required: ["sourcePath", "destinationPath"],
+      additionalProperties: false,
+    },
+  },
+  // Invitations
+  {
+    name: "drive_list_invitations",
+    description:
+      "List all pending sharing invitations from other Proton Drive users. Requires authentication. " +
+      "Returns [{uid, role, invitedByEmail, invitedAt?, nodeName, nodeType}]. " +
+      "Use the uid from this list to accept or reject with drive_invitation_accept / drive_invitation_reject. " +
+      "Do not use to list members of folders you own — use drive_share_status instead.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
+  },
+  {
+    name: "drive_invitation_accept",
+    description:
+      "Accept a pending Proton Drive sharing invitation. Requires authentication. " +
+      "Get the invitation uid from drive_list_invitations first. " +
+      "The shared folder becomes accessible in your Drive after accepting. " +
+      "Do not guess the uid — always fetch it from drive_list_invitations.",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        uid: {
+          type: "string",
+          description: "Invitation UID from drive_list_invitations output. E.g. 'drive:abc123' or 'photos:xyz456'.",
+        },
+      },
+      required: ["uid"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_invitation_reject",
+    description:
+      "Reject a pending Proton Drive sharing invitation. Requires authentication. " +
+      "Get the invitation uid from drive_list_invitations first. " +
+      "The invitation is permanently declined — the sender is not notified. " +
+      "Do not guess the uid — always fetch it from drive_list_invitations.",
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        uid: {
+          type: "string",
+          description: "Invitation UID from drive_list_invitations output. E.g. 'drive:abc123' or 'photos:xyz456'.",
+        },
+      },
+      required: ["uid"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_share_leave",
+    description:
+      "Leave a Proton Drive folder that was shared with you by another user. Requires authentication. " +
+      "Removes your access to the shared folder — the owner and other members are not affected. " +
+      "To remove someone else's access to your own folder, use drive_share_revoke instead. " +
+      "Do not use on folders you own — use drive_share_revoke to remove individual members.",
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute remote Drive path of the shared folder to leave (must start with '/'). E.g. /shared-with-me/project",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
   // Sync-folder tools (requires PROTON_DRIVE_SYNC_PATH env var)
   {
     name: "drive_read_file",
@@ -582,6 +678,34 @@ export async function main() {
           }
           await drive.emptyTrash();
           return ok({ message: "Trash emptied." });
+
+        case "drive_copy": {
+          const copySrc = validateRemotePath(a.sourcePath);
+          const copyDst = validateRemotePath(a.destinationPath);
+          await drive.copy(copySrc, copyDst);
+          return ok({ message: `Copied: ${copySrc} → ${copyDst}` });
+        }
+
+        case "drive_list_invitations":
+          return ok(await drive.listInvitations());
+
+        case "drive_invitation_accept": {
+          if (typeof a.uid !== "string" || !a.uid) return fail("uid must be a non-empty string");
+          await drive.invitationAccept(a.uid);
+          return ok({ message: "Invitation accepted." });
+        }
+
+        case "drive_invitation_reject": {
+          if (typeof a.uid !== "string" || !a.uid) return fail("uid must be a non-empty string");
+          await drive.invitationReject(a.uid);
+          return ok({ message: "Invitation rejected." });
+        }
+
+        case "drive_share_leave": {
+          const leavePath = validateRemotePath(a.path);
+          await drive.shareLeave(leavePath);
+          return ok({ message: `Left shared folder: ${leavePath}` });
+        }
 
         case "drive_read_file": {
           const syncRoot = getSyncRoot();

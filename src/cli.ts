@@ -215,6 +215,10 @@ async function run() {
         const revokeEmail = requireEmail(rawEmail);
         await drive.shareRevoke(revokePath, revokeEmail);
         console.log(`Revoked access for ${revokeEmail}.`);
+      } else if (sub === "leave") {
+        const leavePath = requirePath(rest[0], "share leave <path>");
+        await drive.shareLeave(leavePath);
+        console.log(`Left shared folder: ${leavePath}`);
       } else {
         console.error(`Unknown share subcommand: ${sub}`);
         process.exit(1);
@@ -243,6 +247,33 @@ async function run() {
     case "restore":
       await drive.restore(requirePath(sub, "restore <path>"));
       console.log("Restored.");
+      break;
+
+    case "copy": {
+      const copySrc = requirePath(sub, "copy <src> <dst>");
+      const copyDst = requirePath(rest[0], "copy <src> <dst>");
+      await drive.copy(copySrc, copyDst);
+      console.log(`Copied: ${copySrc} → ${copyDst}`);
+      break;
+    }
+
+    case "invitation":
+      if (sub === "list" || sub === "ls") {
+        print(await drive.listInvitations());
+      } else if (sub === "accept") {
+        const acceptUid = rest[0];
+        if (!acceptUid) { console.error("Usage: invitation accept <uid>"); process.exit(1); }
+        await drive.invitationAccept(acceptUid);
+        console.log("Invitation accepted.");
+      } else if (sub === "reject") {
+        const rejectUid = rest[0];
+        if (!rejectUid) { console.error("Usage: invitation reject <uid>"); process.exit(1); }
+        await drive.invitationReject(rejectUid);
+        console.log("Invitation rejected.");
+      } else {
+        console.error("Usage: invitation list | invitation accept <uid> | invitation reject <uid>");
+        process.exit(1);
+      }
       break;
 
     default:

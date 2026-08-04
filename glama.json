@@ -82,6 +82,26 @@
     {
       "name": "drive_write_file",
       "description": "Write text content to a file in the local Proton Drive sync folder (requires PROTON_DRIVE_SYNC_PATH)."
+    },
+    {
+      "name": "drive_copy",
+      "description": "Copy a file or folder to another location on Proton Drive without removing the original."
+    },
+    {
+      "name": "drive_list_invitations",
+      "description": "List all pending sharing invitations received from other Proton Drive users."
+    },
+    {
+      "name": "drive_invitation_accept",
+      "description": "Accept a pending Proton Drive sharing invitation by uid."
+    },
+    {
+      "name": "drive_invitation_reject",
+      "description": "Reject a pending Proton Drive sharing invitation by uid."
+    },
+    {
+      "name": "drive_share_leave",
+      "description": "Leave a Proton Drive folder that was shared with you by another user."
     }
   ]
 }

@@ -29,7 +29,7 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive: list f
 ## What you get
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
-- **Full CLI** — same 18 operations, scriptable and pipeable, works in cron and shell scripts
+- **Full CLI** — same 23 operations, scriptable and pipeable, works in cron and shell scripts
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
 - **Shell injection safe** — all CLI calls use `execFile` with discrete argument arrays, never string interpolation
 - **Privacy-native** — end-to-end encryption is handled by Proton's own CLI; this server is just a thin MCP wrapper
@@ -225,6 +225,12 @@ proton-drive-cli share status /my-files/Projects
 ### Local sync (requires `PROTON_DRIVE_SYNC_PATH`)
 `drive_read_file` · `drive_write_file`
 
+### Copy
+`drive_copy`
+
+### Invitations
+`drive_list_invitations` · `drive_invitation_accept` · `drive_invitation_reject` · `drive_share_leave`
+
 ---
 
 ## Tool reference
@@ -249,6 +255,11 @@ proton-drive-cli share status /my-files/Projects
 | `drive_empty_trash` | Permanently delete all trash ⚠️ | `confirmed: true` |
 | `drive_read_file` | Read text file from local sync folder | `path` |
 | `drive_write_file` | Write text file to local sync folder ⚠️ | `path`, `content` |
+| `drive_copy` | Copy file or folder to another Drive location | `sourcePath`, `destinationPath` |
+| `drive_list_invitations` | List pending sharing invitations received | — |
+| `drive_invitation_accept` | Accept a pending invitation | `uid` (from `drive_list_invitations`) |
+| `drive_invitation_reject` | Reject a pending invitation ⚠️ | `uid` (from `drive_list_invitations`) |
+| `drive_share_leave` | Leave a shared folder shared with you ⚠️ | `path` |
 
 > ⚠️ **Destructive tools** require `confirmed: true`. Use `drive_list_trash` first so you know what will be deleted, then pass `confirmed: true` to proceed.
 
