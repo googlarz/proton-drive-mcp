@@ -10,6 +10,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { createRequire } from "node:module";
 import { DriveService } from "./services/drive.js";
+import { isMainModule } from "./utils/isMainModule.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
 import {
   DriveCliNotFoundError,
@@ -907,7 +908,9 @@ export async function main() {
   logger.info(`proton-drive-mcp v${VERSION} running`);
 }
 
-main().catch((err) => {
-  logger.error("Fatal:", err);
-  process.exit(1);
-});
+if (isMainModule(import.meta.url)) {
+  main().catch((err) => {
+    logger.error("Fatal:", err);
+    process.exit(1);
+  });
+}
