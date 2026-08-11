@@ -39,7 +39,6 @@ export interface DownloadResult {
 
 export interface AuthStatus {
   authenticated: boolean;
-  email?: string;
 }
 
 export interface DriveVersion {
@@ -65,5 +64,18 @@ export interface Album {
 
 export interface AlbumPhoto {
   nodeUid: string;
+}
+
+export interface PublicLink {
+  url?: string;
+  role?: ShareRole;
+  expirationTime?: string;
+}
+
+export interface TransferSummary {
+  transferredItems: number;
+  transferredBytes: number;
+  skippedItems: number;
+  failedItems: number;
 }
 

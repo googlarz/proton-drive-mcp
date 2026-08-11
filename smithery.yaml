@@ -41,6 +41,13 @@ tools:
   - photos_list_album_photos
   - photos_add_to_album
   - photos_remove_from_album
+  - drive_share_set_url
+  - drive_share_remove_url
+  - drive_share_remove_all
+  - photos_update_album
+  - photos_list_timeline
+  - photos_download
+  - photos_upload
 startCommand:
   type: stdio
   configSchema:

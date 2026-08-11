@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.0.27 — 2026-08-11
+
+A full audit against the Proton Drive CLI SDK source found that 9 existing tools called CLI commands or flags that don't exist, or had wrong semantics. This release fixes all of them and adds 7 new tools for public links, bulk access removal, album updates, and Photos timeline transfers.
+
+### Fixed (existing tools were broken — none of these worked correctly before)
+- **`drive_auth_status`** — `auth status` doesn't exist in the CLI at all; every call errored. Now probes by resolving `/my-files` and treats a not-authenticated error as the signal. The `email` field is removed — the CLI has no way to query the signed-in account's email.
+- **`drive_version`** — the CLI's `version` command ignores `--json` and always prints plain text; the tool was trying to JSON-parse it and always threw. Now parsed directly from stdout.
+- **`drive_mkdir`** — the CLI has no `mkdir`; it's `filesystem create-folder <parentPath> <name>`. The tool now splits the given path into parent + name automatically.
+- **`drive_move`** — the CLI's `move` only accepts a target *parent folder*; renaming is a separate `rename <path> <newName>` command. The tool still accepts a full destination path (unchanged external interface) but now composes `move`/`rename` correctly under the hood.
+- **`drive_delete`** — passed a `--confirm` flag that doesn't exist, and the CLI only permits deleting items already inside `/trash` or `/photos-trash` (it rejects live paths). Flag removed; description corrected.
+- **`drive_trash` / `drive_restore` / `drive_list_trash` / `drive_empty_trash`** — called a top-level `trash` command group that doesn't exist; trash operations are subcommands of `filesystem` (`filesystem trash`, `filesystem restore`, `filesystem empty-trash`), and listing trash is `filesystem list /trash`. `empty-trash` also had a nonexistent `--confirm` flag, removed.
+- **`drive_share_revoke`** — called `sharing revoke --user`, which doesn't exist; the real command is `sharing remove --email`.
+- **`drive_upload` / `drive_download`** — conflict strategy values were `skip`/`overwrite`/`rename`; the CLI's actual allowed values are `skip`/`replace`/`keep-both`/`merge` (`merge` is upload/folder-only). `drive_download` also gained a `conflictStrategy` parameter it never had.
+
+### Added
+- **`drive_share_set_url`** — create or update a public share link (`sharing set-url`), with optional role, password, and expiration
+- **`drive_share_remove_url`** — remove a public share link (`sharing remove-url`)
+- **`drive_share_remove_all`** — remove every member and pending invitation from a shared path in one call (`sharing remove --everyone`)
+- **`photos_update_album`** — rename an album or change its cover photo (`album update`)
+- **`photos_list_timeline`** — list photos in your full Photos library timeline, not scoped to an album (`photo timeline`)
+- **`photos_download`** — download one or more photos to a local folder (`photo download`)
+- **`photos_upload`** — upload local photos/videos directly into your Photos library (`photo upload`)
+
+### Not implemented
+- `sharing report` (abuse reporting) exists as source in the SDK but is not registered in the CLI's command registry — invoking it would fail with `CommandNotFoundError`. Excluded as dead code, not a gap.
+
 ## 1.0.25 — 2026-08-04
 
 ### Added

@@ -32,42 +32,46 @@ function makeRunner() {
   };
 }
 
+// Raw-text runner mock for version() — the CLI's `version` command ignores
+// --json and always prints plain text.
+function makeRawRunner() {
+  let nextText = "";
+  const calls = [];
+  const rawRunner = async (args) => { calls.push([...args]); return nextText; };
+  return {
+    rawRunner,
+    calls,
+    setText: (t) => { nextText = t; },
+    lastCall: () => calls[calls.length - 1],
+  };
+}
+
 // ─── Auth ─────────────────────────────────────────────────────────────────────
+// There is no `auth status` command in the CLI — authStatus() probes by
+// resolving /my-files and interprets DriveNotAuthenticatedError as logged-out.
 describe("authStatus", () => {
-  it("returns authenticated=true with email", async () => {
+  it("returns authenticated=true when the probe succeeds", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ authenticated: true, email: "user@pm.me" });
+    t.setResult({ uid: "abc" });
     const status = await drive.authStatus();
     assert.equal(status.authenticated, true);
-    assert.equal(status.email, "user@pm.me");
-    assert.deepEqual(t.lastCall(), ["auth", "status"]);
+    assert.deepEqual(t.lastCall(), ["filesystem", "info", "/my-files"]);
   });
 
-  it("returns authenticated=false when not logged in", async () => {
+  it("returns authenticated=false when the probe throws DriveNotAuthenticatedError", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ authenticated: false });
+    t.setError(new DriveNotAuthenticatedError());
     const status = await drive.authStatus();
     assert.equal(status.authenticated, false);
-    assert.equal(status.email, undefined);
   });
 
-  it("handles loggedIn key alias", async () => {
+  it("propagates other errors instead of reporting unauthenticated", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ loggedIn: true, email: "alt@pm.me" });
-    const status = await drive.authStatus();
-    assert.equal(status.authenticated, true);
-    assert.equal(status.email, "alt@pm.me");
-  });
-
-  it("returns authenticated=false when CLI returns null", async () => {
-    const t = makeRunner();
-    const drive = new DriveService(t.runner);
-    t.setResult(null);
-    const status = await drive.authStatus();
-    assert.equal(status.authenticated, false);
+    t.setError(new DriveCliError("quota exceeded", ""));
+    await assert.rejects(() => drive.authStatus(), { name: "DriveCliError" });
   });
 });
 
@@ -82,39 +86,34 @@ describe("authLogout", () => {
 });
 
 describe("version", () => {
-  it("returns cli and sdk from standard response", async () => {
+  it("parses cli and sdk from plain-text output", async () => {
     const t = makeRunner();
-    const drive = new DriveService(t.runner);
-    t.setResult({ cli: "1.2.3", sdk: "4.5.6" });
+    const raw = makeRawRunner();
+    const drive = new DriveService(t.runner, raw.rawRunner);
+    raw.setText("Proton Drive CLI 1.2.3\nProton Drive SDK 4.5.6\nYou are running the latest version.\n");
     const v = await drive.version();
     assert.equal(v.cli, "1.2.3");
     assert.equal(v.sdk, "4.5.6");
-    assert.deepEqual(t.lastCall(), ["version"]);
+    assert.deepEqual(raw.lastCall(), ["version"]);
   });
 
-  it("falls back to version key when cli key is absent", async () => {
+  it("returns unknown for both when output is empty", async () => {
     const t = makeRunner();
-    const drive = new DriveService(t.runner);
-    t.setResult({ version: "2.0.0" });
-    const v = await drive.version();
-    assert.equal(v.cli, "2.0.0");
-    assert.equal(v.sdk, "unknown");
-  });
-
-  it("returns unknown for both when result is empty object", async () => {
-    const t = makeRunner();
-    const drive = new DriveService(t.runner);
-    t.setResult({});
+    const raw = makeRawRunner();
+    const drive = new DriveService(t.runner, raw.rawRunner);
+    raw.setText("");
     const v = await drive.version();
     assert.equal(v.cli, "unknown");
     assert.equal(v.sdk, "unknown");
   });
 
-  it("throws DriveParseError when CLI returns null", async () => {
+  it("does not append --json (the CLI ignores it for this command)", async () => {
     const t = makeRunner();
-    const drive = new DriveService(t.runner);
-    t.setResult(null);
-    await assert.rejects(() => drive.version(), { name: "DriveParseError" });
+    const raw = makeRawRunner();
+    const drive = new DriveService(t.runner, raw.rawRunner);
+    raw.setText("Proton Drive CLI 1.0.0\nProton Drive SDK 1.0.0\n");
+    await drive.version();
+    assert.ok(!raw.lastCall().includes("--json"));
   });
 });
 
@@ -169,12 +168,12 @@ describe("upload", () => {
     assert.ok(call.includes("--skip-thumbnails"));
   });
 
-  it("passes overwrite conflict strategy", async () => {
+  it("passes replace conflict strategy", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult({ uploaded: 1, skipped: 0, failed: 0 });
-    await drive.upload("/local/file.txt", "/my-files", "overwrite");
-    assert.ok(t.lastCall().includes("overwrite"));
+    await drive.upload("/local/file.txt", "/my-files", "replace");
+    assert.ok(t.lastCall().includes("replace"));
   });
 
   it("returns zeros when result is null", async () => {
@@ -196,7 +195,7 @@ describe("upload", () => {
 });
 
 describe("download", () => {
-  it("calls filesystem download and returns localPath", async () => {
+  it("calls filesystem download with default skip conflict strategy and returns localPath", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult({ downloaded: 3 });
@@ -204,40 +203,80 @@ describe("download", () => {
     assert.equal(result.localPath, "/tmp/report.pdf");
     assert.equal(result.downloaded, 3);
     assert.deepEqual(t.lastCall(), [
-      "filesystem", "download", "/my-files/report.pdf", "/tmp/report.pdf",
+      "filesystem", "download", "/my-files/report.pdf", "/tmp/report.pdf", "--conflict-strategy", "skip",
     ]);
+  });
+
+  it("passes a custom conflict strategy", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ downloaded: 1 });
+    await drive.download("/my-files/report.pdf", "/tmp/report.pdf", "replace");
+    assert.ok(t.lastCall().includes("replace"));
   });
 });
 
 describe("mkdir", () => {
-  it("calls filesystem mkdir", async () => {
+  it("splits the path into parent + name and calls filesystem create-folder", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult(null);
     await drive.mkdir("/my-files/NewFolder");
-    assert.deepEqual(t.lastCall(), ["filesystem", "mkdir", "/my-files/NewFolder"]);
+    assert.deepEqual(t.lastCall(), ["filesystem", "create-folder", "/my-files", "NewFolder"]);
+  });
+
+  it("throws when the path has no folder name", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    await assert.rejects(() => drive.mkdir("/"), /must include a folder name/);
   });
 });
 
 describe("move", () => {
-  it("calls filesystem move", async () => {
+  it("uses rename when only the name changes (same parent)", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult(null);
     await drive.move("/my-files/old.pdf", "/my-files/new.pdf");
-    assert.deepEqual(t.lastCall(), [
-      "filesystem", "move", "/my-files/old.pdf", "/my-files/new.pdf",
+    assert.deepEqual(t.lastCall(), ["filesystem", "rename", "/my-files/old.pdf", "new.pdf"]);
+  });
+
+  it("uses move when only the parent changes (same name)", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await drive.move("/my-files/report.pdf", "/my-files/Archive/report.pdf");
+    assert.deepEqual(t.calls, [
+      ["filesystem", "move", "/my-files/report.pdf", "/my-files/Archive"],
     ]);
+  });
+
+  it("moves then renames when both parent and name change", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await drive.move("/my-files/old.pdf", "/my-files/Archive/new.pdf");
+    assert.deepEqual(t.calls, [
+      ["filesystem", "move", "/my-files/old.pdf", "/my-files/Archive"],
+      ["filesystem", "rename", "/my-files/Archive/old.pdf", "new.pdf"],
+    ]);
+  });
+
+  it("is a no-op when source and destination are identical", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    await drive.move("/my-files/same.pdf", "/my-files/same.pdf");
+    assert.equal(t.calls.length, 0);
   });
 });
 
 describe("delete", () => {
-  it("calls filesystem delete", async () => {
+  it("calls filesystem delete without --confirm (no such CLI flag)", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult(null);
-    await drive.delete("/my-files/old.pdf");
-    assert.deepEqual(t.lastCall(), ["filesystem", "delete", "--confirm", "/my-files/old.pdf"]);
+    await drive.delete("/trash/old.pdf");
+    assert.deepEqual(t.lastCall(), ["filesystem", "delete", "/trash/old.pdf"]);
   });
 });
 
@@ -326,20 +365,74 @@ describe("shareInvite role validation (service layer)", () => {
 });
 
 describe("shareRevoke", () => {
-  it("calls sharing revoke with user flag", async () => {
+  it("calls sharing remove with --email (sharing revoke does not exist)", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult(null);
     await drive.shareRevoke("/my-files/Reports", "alice@pm.me");
     assert.deepEqual(t.lastCall(), [
-      "sharing", "revoke", "--user", "alice@pm.me", "/my-files/Reports",
+      "sharing", "remove", "--email", "alice@pm.me", "/my-files/Reports",
     ]);
   });
 });
 
+describe("shareRemove", () => {
+  it("passes multiple emails", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await drive.shareRemove("/my-files/Reports", ["a@pm.me", "b@pm.me"], false);
+    assert.deepEqual(t.lastCall(), [
+      "sharing", "remove", "--email", "a@pm.me", "--email", "b@pm.me", "/my-files/Reports",
+    ]);
+  });
+
+  it("passes --everyone and ignores emails", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await drive.shareRemove("/my-files/Reports", [], true);
+    assert.deepEqual(t.lastCall(), ["sharing", "remove", "--everyone", "/my-files/Reports"]);
+  });
+});
+
+describe("shareSetUrl", () => {
+  it("calls sharing set-url with default role", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ url: "https://drive.proton.me/urls/abc" });
+    const link = await drive.shareSetUrl("/my-files/Reports");
+    assert.deepEqual(t.lastCall(), ["sharing", "set-url", "/my-files/Reports", "--role", "viewer"]);
+    assert.equal(link.url, "https://drive.proton.me/urls/abc");
+  });
+
+  it("passes password and expiration when provided", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({});
+    await drive.shareSetUrl("/my-files/Reports", "editor", "s3cret", "2026-06-06");
+    assert.deepEqual(t.lastCall(), [
+      "sharing", "set-url", "/my-files/Reports", "--role", "editor",
+      "--password", "s3cret", "--expiration", "2026-06-06",
+    ]);
+  });
+});
+
+describe("shareRemoveUrl", () => {
+  it("calls sharing remove-url", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await drive.shareRemoveUrl("/my-files/Reports");
+    assert.deepEqual(t.lastCall(), ["sharing", "remove-url", "/my-files/Reports"]);
+  });
+});
+
 // ─── Trash ────────────────────────────────────────────────────────────────────
+// The CLI has no top-level "trash" group — trash operations are subcommands
+// of "filesystem", and listing trash is just `filesystem list /trash`.
 describe("listTrash", () => {
-  it("returns parsed trash list", async () => {
+  it("returns parsed trash list via filesystem list /trash", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult([
@@ -348,7 +441,7 @@ describe("listTrash", () => {
     const items = await drive.listTrash();
     assert.equal(items.length, 1);
     assert.equal(items[0].name, "old.pdf");
-    assert.deepEqual(t.lastCall(), ["trash", "list"]);
+    assert.deepEqual(t.lastCall(), ["filesystem", "list", "/trash"]);
   });
 
   it("returns empty array when trash is empty", async () => {
@@ -368,32 +461,120 @@ describe("listTrash", () => {
 });
 
 describe("trash", () => {
-  it("calls trash with path", async () => {
+  it("calls filesystem trash with path", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult(null);
     await drive.trash("/my-files/old.pdf");
-    assert.deepEqual(t.lastCall(), ["trash", "/my-files/old.pdf"]);
+    assert.deepEqual(t.lastCall(), ["filesystem", "trash", "/my-files/old.pdf"]);
   });
 });
 
 describe("restore", () => {
-  it("calls restore with path", async () => {
+  it("calls filesystem restore with path", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult(null);
     await drive.restore("/my-files/old.pdf");
-    assert.deepEqual(t.lastCall(), ["trash", "restore", "/my-files/old.pdf"]);
+    assert.deepEqual(t.lastCall(), ["filesystem", "restore", "/my-files/old.pdf"]);
   });
 });
 
 describe("emptyTrash", () => {
-  it("calls trash empty", async () => {
+  it("calls filesystem empty-trash with no flags (CLI has no --confirm)", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult(null);
     await drive.emptyTrash();
-    assert.deepEqual(t.lastCall(), ["trash", "empty", "--confirm"]);
+    assert.deepEqual(t.lastCall(), ["filesystem", "empty-trash"]);
+  });
+});
+
+// ─── Photos ───────────────────────────────────────────────────────────────────
+describe("updateAlbum", () => {
+  it("passes --name when only renaming", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await drive.updateAlbum("/albums/Old", "New Name");
+    assert.deepEqual(t.lastCall(), ["album", "update", "/albums/Old", "--name", "New Name"]);
+  });
+
+  it("passes --cover-photo-uid when only changing the cover", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await drive.updateAlbum("/albums/Old", undefined, "uid-123");
+    assert.deepEqual(t.lastCall(), ["album", "update", "/albums/Old", "--cover-photo-uid", "uid-123"]);
+  });
+
+  it("passes both flags when both are provided", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await drive.updateAlbum("/albums/Old", "New", "uid-123");
+    assert.deepEqual(t.lastCall(), ["album", "update", "/albums/Old", "--name", "New", "--cover-photo-uid", "uid-123"]);
+  });
+});
+
+describe("photoTimeline", () => {
+  it("lists timeline nodeUids without --load-details by default", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([{ nodeUid: "n1" }, { nodeUid: "n2" }]);
+    const photos = await drive.photoTimeline(false);
+    assert.equal(photos.length, 2);
+    assert.deepEqual(t.lastCall(), ["photo", "timeline"]);
+  });
+
+  it("passes --load-details when requested", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([]);
+    await drive.photoTimeline(true);
+    assert.deepEqual(t.lastCall(), ["photo", "timeline", "--load-details"]);
+  });
+
+  it("returns empty array when CLI returns null", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    const photos = await drive.photoTimeline(false);
+    assert.deepEqual(photos, []);
+  });
+});
+
+describe("photoDownload", () => {
+  it("calls photo download with multiple paths and default conflict strategy", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ transferredItems: 2, transferredBytes: 100, skippedItems: 0, failedItems: 0 });
+    const summary = await drive.photoDownload(["/photos/a.jpg", "/photos/b.jpg"], "/tmp/photos");
+    assert.deepEqual(t.lastCall(), [
+      "photo", "download", "/photos/a.jpg", "/photos/b.jpg", "/tmp/photos", "--conflict-strategy", "skip",
+    ]);
+    assert.equal(summary.transferredItems, 2);
+  });
+});
+
+describe("photoUpload", () => {
+  it("calls photo upload with multiple local paths and default conflict strategy", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ transferredItems: 1, transferredBytes: 50, skippedItems: 0, failedItems: 0 });
+    const summary = await drive.photoUpload(["/local/a.jpg"]);
+    assert.deepEqual(t.lastCall(), [
+      "photo", "upload", "/local/a.jpg", "--conflict-strategy", "skip",
+    ]);
+    assert.equal(summary.transferredItems, 1);
+  });
+
+  it("passes keep-both conflict strategy", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({});
+    await drive.photoUpload(["/local/a.jpg"], "keep-both");
+    assert.ok(t.lastCall().includes("keep-both"));
   });
 });
 
@@ -420,11 +601,11 @@ describe("error handling", () => {
     await assert.rejects(() => drive.list("/my-files"), { name: "DriveCliError" });
   });
 
-  it("propagates DriveNotAuthenticatedError", async () => {
+  it("propagates DriveNotAuthenticatedError from a non-authStatus call", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setError(new DriveNotAuthenticatedError());
-    await assert.rejects(() => drive.authStatus(), { name: "DriveNotAuthenticatedError" });
+    await assert.rejects(() => drive.list("/my-files"), { name: "DriveNotAuthenticatedError" });
   });
 
   it("propagates DriveCliNotFoundError", async () => {
@@ -679,8 +860,8 @@ describe("drive_delete confirmed gate", () => {
     const runner = async (args) => { calls.push(args); return null; };
     const drive = new DriveService(runner);
 
-    await drive.delete("/my-files/test.txt");
-    assert.ok(calls[0].includes("--confirm"));
+    await drive.delete("/trash/test.txt");
+    assert.deepEqual(calls[0], ["filesystem", "delete", "/trash/test.txt"]);
   });
 });
 
@@ -691,13 +872,13 @@ describe("drive_empty_trash confirmed gate", () => {
     assert.ok(isBlocked);
   });
 
-  it("passes --confirm to CLI when confirmed=true", async () => {
+  it("calls filesystem empty-trash when confirmed=true", async () => {
     const { DriveService } = await import("../dist/services/drive.js");
     const calls = [];
     const runner = async (args) => { calls.push(args); return null; };
     const drive = new DriveService(runner);
     await drive.emptyTrash();
-    assert.ok(calls[0].includes("--confirm"));
+    assert.deepEqual(calls[0], ["filesystem", "empty-trash"]);
   });
 });
 

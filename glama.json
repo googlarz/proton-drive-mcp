@@ -126,6 +126,34 @@
     {
       "name": "photos_remove_from_album",
       "description": "Remove a photo from a Proton Photos album."
+    },
+    {
+      "name": "drive_share_set_url",
+      "description": "Create or update a public share link for a Proton Drive file or folder."
+    },
+    {
+      "name": "drive_share_remove_url",
+      "description": "Remove the public share link from a Proton Drive file or folder."
+    },
+    {
+      "name": "drive_share_remove_all",
+      "description": "Remove all members and pending invitations from a shared Proton Drive path in one call."
+    },
+    {
+      "name": "photos_update_album",
+      "description": "Rename an album or change its cover photo in Proton Photos."
+    },
+    {
+      "name": "photos_list_timeline",
+      "description": "List photos in your Proton Photos timeline."
+    },
+    {
+      "name": "photos_download",
+      "description": "Download one or more photos from Proton Photos to a local folder."
+    },
+    {
+      "name": "photos_upload",
+      "description": "Upload local photos or videos directly into your Proton Photos library."
     }
   ]
 }

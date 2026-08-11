@@ -9,7 +9,7 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createRequire } from "node:module";
-import { DriveService } from "./services/drive.js";
+import { DriveService, type ConflictStrategy } from "./services/drive.js";
 import { isMainModule } from "./utils/isMainModule.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
 import {
@@ -65,9 +65,9 @@ const TOOLS = [
     name: "drive_auth_status",
     description:
       "Check whether the Proton Drive CLI has an active authenticated session. " +
-      "Returns {authenticated: boolean, email?: string}. " +
+      "Returns {authenticated: boolean}. The underlying CLI has no dedicated status command — this probes by resolving /my-files, which makes a real (lightweight) call. " +
       "Use before any file operation when you need to confirm the session is valid — all other drive_* tools (except drive_version) require authentication. " +
-      "Does not make a network call if the session token is already cached locally.",
+      "Does not expose the signed-in account's email — the CLI provides no way to query it.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
   },
@@ -119,7 +119,7 @@ const TOOLS = [
       "Upload a local file or folder to Proton Drive with end-to-end encryption. Requires authentication. " +
       "For folders, uploads recursively and preserves directory structure. " +
       "Returns {uploaded, skipped, failed} counts — fails the call if failed > 0 (common causes: quota exceeded, destination path not found, permission denied). " +
-      "conflictStrategy defaults to 'skip' — only use 'overwrite' with explicit user confirmation since it permanently replaces the remote file. " +
+      "conflictStrategy defaults to 'skip'. Values: 'skip' (leave existing remote file unchanged), 'replace' (permanently overwrite — confirm with user first), 'keep-both' (upload with a unique name), 'merge' (folders only — merge contents instead of failing). " +
       "Do not use to move files already on Drive (use drive_move) or to write text content directly (use drive_write_file if PROTON_DRIVE_SYNC_PATH is set). " +
       "Ensure destination folder exists first with drive_list; create it with drive_mkdir if needed.",
     annotations: { openWorldHint: true },
@@ -136,11 +136,12 @@ const TOOLS = [
         },
         conflictStrategy: {
           type: "string",
-          enum: ["skip", "overwrite", "rename"],
+          enum: ["skip", "replace", "keep-both", "merge"],
           description:
             "'skip' leaves existing remote files unchanged (default). " +
-            "'overwrite' permanently replaces the remote file — confirm with user first. " +
-            "'rename' uploads with a unique name to avoid conflicts.",
+            "'replace' permanently overwrites the remote file — confirm with user first. " +
+            "'keep-both' uploads with a unique name to avoid conflicts. " +
+            "'merge' merges folder contents instead of failing (folders only).",
         },
       },
       required: ["localPath", "remotePath"],
@@ -152,7 +153,7 @@ const TOOLS = [
     description:
       "Download a file or folder from Proton Drive to the local filesystem. Requires authentication. " +
       "For folders, downloads recursively. " +
-      "Silently overwrites any existing local file at localPath — verify the destination before calling. " +
+      "conflictStrategy defaults to 'skip' — pass 'replace' to overwrite an existing local file, or 'keep-both' to save under a unique name. " +
       "Fails if the local parent directory does not exist. " +
       "Returns {downloaded} count. " +
       "Do not use to move files within Drive (use drive_move) or to read a small text file's contents (use drive_read_file if PROTON_DRIVE_SYNC_PATH is set).",
@@ -167,6 +168,14 @@ const TOOLS = [
         localPath: {
           type: "string",
           description: "Absolute local destination path (must start with '/'). Parent directory must already exist.",
+        },
+        conflictStrategy: {
+          type: "string",
+          enum: ["skip", "replace", "keep-both"],
+          description:
+            "'skip' leaves an existing local file unchanged (default). " +
+            "'replace' overwrites it — confirm with user first. " +
+            "'keep-both' downloads under a unique name.",
         },
       },
       required: ["remotePath", "localPath"],
@@ -200,7 +209,7 @@ const TOOLS = [
       "To rename: keep the same parent, change only the filename (e.g. /my-files/old.pdf → /my-files/new.pdf). " +
       "To move: provide a different parent folder. " +
       "Fails if destinationPath is already occupied or if its parent folder does not exist. " +
-      "Do not use to copy a file (no copy operation exists — upload again instead) or to download to local storage (use drive_download).",
+      "Do not use to copy a file while keeping the original (use drive_copy) or to download to local storage (use drive_download).",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -221,9 +230,10 @@ const TOOLS = [
   {
     name: "drive_delete",
     description:
-      "Permanently delete a file or folder from Proton Drive — no trash step, no recovery possible. Requires authentication. " +
-      "Requires confirmed=true; always show the exact path to the user and get explicit confirmation before calling. " +
-      "Do not use when reversible deletion is acceptable — use drive_trash instead so the item can be recovered with drive_restore.",
+      "Permanently delete a file or folder that is already in the Proton Drive trash — irreversible. Requires authentication. " +
+      "The underlying CLI only allows permanent deletion of items already inside /trash or /photos-trash; it rejects live paths. " +
+      "Use drive_trash first to move a live item into trash, then pass its trash path here — or drive_empty_trash to clear everything at once. " +
+      "Requires confirmed=true; always show the exact path to the user and get explicit confirmation before calling.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -489,6 +499,83 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "drive_share_set_url",
+    description:
+      "Create or update a public share link for a Proton Drive file or folder. Requires authentication. " +
+      "Anyone with the link can access the item at the given role — no invitation or Proton account required. " +
+      "Calling this again on the same path updates the existing link's role/password/expiration rather than creating a duplicate. " +
+      "Returns {url?, role?, expirationTime?} — the exact shape depends on the CLI/SDK response and fields may be absent. " +
+      "The password, if set, is passed as a CLI argument and will appear in shell history/process list on the machine running this server. " +
+      "Do not use for private sharing with specific people — use drive_share_invite instead.",
+    annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute remote Drive path to create a public link for (must start with '/').",
+        },
+        role: {
+          type: "string",
+          enum: ["viewer", "editor"],
+          description: "Access level for anyone with the link. Defaults to 'viewer' if omitted.",
+        },
+        password: {
+          type: "string",
+          description: "Optional custom password required to access the link. Omit for no password.",
+        },
+        expiration: {
+          type: "string",
+          description: "Optional expiration date in ISO format, e.g. '2026-06-06'. Omit for no expiration.",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_share_remove_url",
+    description:
+      "Remove the public share link from a Proton Drive file or folder. Requires authentication. " +
+      "The link stops working immediately — direct member access (from drive_share_invite) is not affected. " +
+      "Do not use to remove a specific person's access — use drive_share_revoke instead.",
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute remote Drive path whose public link should be removed (must start with '/').",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_share_remove_all",
+    description:
+      "Remove access for every member and every pending invitation (Proton and non-Proton) on a shared Proton Drive path, in a single call. Requires authentication and confirmed=true. " +
+      "Use drive_share_status first to show the user who currently has access. " +
+      "For removing one specific person, use drive_share_revoke instead — it is cheaper and less error-prone.",
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute remote Drive path to strip all sharing access from (must start with '/').",
+        },
+        confirmed: {
+          type: "boolean",
+          description: "Must be true. Confirms the user has acknowledged this removes everyone's access at once.",
+        },
+      },
+      required: ["path", "confirmed"],
+      additionalProperties: false,
+    },
+  },
   // Photos / Albums
   {
     name: "photos_list_albums",
@@ -516,6 +603,33 @@ const TOOLS = [
         },
       },
       required: ["name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "photos_update_album",
+    description:
+      "Rename an album or change its cover photo in Proton Photos. Requires authentication. " +
+      "At least one of name or coverPhotoUid must be provided. " +
+      "Use photos_list_album_photos to find a nodeUid to set as the cover.",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        albumPath: {
+          type: "string",
+          description: "Absolute path of the album to update. Must start with /albums/. E.g. /albums/Vacation 2024",
+        },
+        name: {
+          type: "string",
+          description: "New name for the album. Omit to leave unchanged.",
+        },
+        coverPhotoUid: {
+          type: "string",
+          description: "nodeUid (from photos_list_album_photos) of the photo to set as the album cover. Omit to leave unchanged.",
+        },
+      },
+      required: ["albumPath"],
       additionalProperties: false,
     },
   },
@@ -616,6 +730,81 @@ const TOOLS = [
         },
       },
       required: ["albumPath", "photoPath"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "photos_list_timeline",
+    description:
+      "List photos in your Proton Photos timeline (your full photo library, not scoped to an album). Requires authentication. " +
+      "Returns [{nodeUid}] by default — pass loadDetails=true for full node metadata (slower; buffers the whole list in memory first). " +
+      "Use photos_download to download items by path, or photos_add_to_album to add them to an album.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        loadDetails: {
+          type: "boolean",
+          description: "If true, fetch full node metadata for each photo instead of just its nodeUid. Default false.",
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "photos_download",
+    description:
+      "Download one or more photos from Proton Photos (timeline, an album, or shared-with-me) to a local folder. Requires authentication. " +
+      "Multiple timeline photos can share the same filename — with conflictStrategy 'replace' or 'skip' only one copy survives locally; use 'keep-both' to keep all. " +
+      "Fails if any item fails to download. " +
+      "Do not use for regular Drive files — use drive_download instead.",
+    annotations: { openWorldHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        photoPaths: {
+          type: "array",
+          items: { type: "string" },
+          description: "One or more absolute photo paths to download (each must start with '/'). E.g. ['/photos/IMG_001.jpg']",
+        },
+        localFolder: {
+          type: "string",
+          description: "Absolute local destination folder (must start with '/'). Created if it does not exist.",
+        },
+        conflictStrategy: {
+          type: "string",
+          enum: ["skip", "replace", "keep-both"],
+          description: "How to handle local filename collisions. Defaults to 'skip'.",
+        },
+      },
+      required: ["photoPaths", "localFolder"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "photos_upload",
+    description:
+      "Upload one or more local photo or video files directly into your Proton Photos library (My Photos timeline). Requires authentication. " +
+      "Non-photo/video files are silently skipped. Folders are recursed but flattened into My Photos — folder structure is not preserved. " +
+      "Never overwrites — duplicates (matched by name + content hash) resolve to 'keep-both' or 'skip' only. " +
+      "Do not use for regular Drive files — use drive_upload instead.",
+    annotations: { openWorldHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        localPaths: {
+          type: "array",
+          items: { type: "string" },
+          description: "One or more absolute local paths to files or folders to upload (each must start with '/').",
+        },
+        conflictStrategy: {
+          type: "string",
+          enum: ["skip", "keep-both"],
+          description: "How to handle duplicate photos (matched by name + content hash). Defaults to 'skip'.",
+        },
+      },
+      required: ["localPaths"],
       additionalProperties: false,
     },
   },
@@ -723,13 +912,13 @@ export async function main() {
 
         case "drive_upload": {
           const cs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
-          if (!["skip", "overwrite", "rename"].includes(cs)) {
-            return fail(`conflictStrategy must be skip, overwrite, or rename`);
+          if (!["skip", "replace", "keep-both", "merge"].includes(cs)) {
+            return fail(`conflictStrategy must be skip, replace, keep-both, or merge`);
           }
           const uploadResult = await drive.upload(
             validateLocalPath(a.localPath),
             validateRemotePath(a.remotePath),
-            cs as "skip" | "overwrite" | "rename"
+            cs as ConflictStrategy
           );
           if (uploadResult.failed > 0) {
             return fail(`Upload completed with ${uploadResult.failed} failed file(s). uploaded=${uploadResult.uploaded} skipped=${uploadResult.skipped}`);
@@ -737,8 +926,17 @@ export async function main() {
           return ok(uploadResult);
         }
 
-        case "drive_download":
-          return ok(await drive.download(validateRemotePath(a.remotePath), validateLocalPath(a.localPath)));
+        case "drive_download": {
+          const dcs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
+          if (!["skip", "replace", "keep-both"].includes(dcs)) {
+            return fail(`conflictStrategy must be skip, replace, or keep-both`);
+          }
+          return ok(await drive.download(
+            validateRemotePath(a.remotePath),
+            validateLocalPath(a.localPath),
+            dcs as "skip" | "replace" | "keep-both"
+          ));
+        }
 
         case "drive_move": {
           const moveSrc = validateRemotePath(a.sourcePath);
@@ -838,6 +1036,31 @@ export async function main() {
           return ok({ message: `Left shared folder: ${leavePath}` });
         }
 
+        case "drive_share_set_url": {
+          const setUrlPath = validateRemotePath(a.path);
+          const role = typeof a.role === "string" ? a.role : "viewer";
+          if (!["viewer", "editor"].includes(role)) return fail("role must be viewer or editor");
+          const password = typeof a.password === "string" ? a.password : undefined;
+          const expiration = typeof a.expiration === "string" ? a.expiration : undefined;
+          const link = await drive.shareSetUrl(setUrlPath, role as "viewer" | "editor", password, expiration);
+          return ok(link);
+        }
+
+        case "drive_share_remove_url": {
+          const removeUrlPath = validateRemotePath(a.path);
+          await drive.shareRemoveUrl(removeUrlPath);
+          return ok({ message: `Public link removed: ${removeUrlPath}` });
+        }
+
+        case "drive_share_remove_all": {
+          if (a.confirmed !== true) {
+            return fail("drive_share_remove_all requires confirmed=true. Use drive_share_status first to show the user who has access.");
+          }
+          const removeAllPath = validateRemotePath(a.path);
+          await drive.shareRemove(removeAllPath, [], true);
+          return ok({ message: `Removed all access to: ${removeAllPath}` });
+        }
+
         case "photos_list_albums":
           return ok(await drive.listAlbums());
 
@@ -845,6 +1068,16 @@ export async function main() {
           if (typeof a.name !== "string" || !a.name.trim()) return fail("name must be a non-empty string");
           await drive.createAlbum(a.name.trim());
           return ok({ message: `Album created: ${a.name.trim()}` });
+        }
+
+        case "photos_update_album": {
+          const updateAlbumPath = validateRemotePath(a.albumPath);
+          if (!updateAlbumPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
+          const newName = typeof a.name === "string" && a.name.trim() ? a.name.trim() : undefined;
+          const coverPhotoUid = typeof a.coverPhotoUid === "string" && a.coverPhotoUid.trim() ? a.coverPhotoUid.trim() : undefined;
+          if (!newName && !coverPhotoUid) return fail("At least one of name or coverPhotoUid must be provided");
+          await drive.updateAlbum(updateAlbumPath, newName, coverPhotoUid);
+          return ok({ message: `Album updated: ${updateAlbumPath}` });
         }
 
         case "photos_delete_album": {
@@ -877,6 +1110,34 @@ export async function main() {
           if (!remPhotoPath.startsWith("/photos/")) return fail("photoPath must start with /photos/");
           await drive.removePhotoFromAlbum(remAlbumPath, remPhotoPath);
           return ok({ message: `Removed ${remPhotoPath} from ${remAlbumPath}` });
+        }
+
+        case "photos_list_timeline":
+          return ok(await drive.photoTimeline(a.loadDetails === true));
+
+        case "photos_download": {
+          if (!Array.isArray(a.photoPaths) || a.photoPaths.length === 0) return fail("photoPaths must be a non-empty array of strings");
+          const downloadPaths = a.photoPaths.map((p) => validateRemotePath(p));
+          const downloadFolder = validateLocalPath(a.localFolder);
+          const pdcs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
+          if (!["skip", "replace", "keep-both"].includes(pdcs)) return fail("conflictStrategy must be skip, replace, or keep-both");
+          const downloadSummary = await drive.photoDownload(downloadPaths, downloadFolder, pdcs as "skip" | "replace" | "keep-both");
+          if (downloadSummary.failedItems > 0) {
+            return fail(`Download completed with ${downloadSummary.failedItems} failed item(s). transferred=${downloadSummary.transferredItems}`);
+          }
+          return ok(downloadSummary);
+        }
+
+        case "photos_upload": {
+          if (!Array.isArray(a.localPaths) || a.localPaths.length === 0) return fail("localPaths must be a non-empty array of strings");
+          const uploadPaths = a.localPaths.map((p) => validateLocalPath(p));
+          const pucs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
+          if (!["skip", "keep-both"].includes(pucs)) return fail("conflictStrategy must be skip or keep-both");
+          const uploadSummary = await drive.photoUpload(uploadPaths, pucs as "skip" | "keep-both");
+          if (uploadSummary.failedItems > 0) {
+            return fail(`Upload completed with ${uploadSummary.failedItems} failed item(s). transferred=${uploadSummary.transferredItems}`);
+          }
+          return ok(uploadSummary);
         }
 
         case "drive_read_file": {

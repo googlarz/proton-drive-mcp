@@ -1,3 +1,4 @@
+import { posix as posixPath } from "node:path";
 import type {
   Album,
   AlbumPhoto,
@@ -6,44 +7,60 @@ import type {
   DriveFile,
   DriveInvitation,
   DriveVersion,
+  PublicLink,
   ShareRole,
   ShareStatus,
+  TransferSummary,
   UploadResult,
 } from "../types/index.js";
-import { runDrive as defaultRunDrive } from "../utils/subprocess.js";
-import { DriveParseError } from "../utils/errors.js";
+import { runDrive as defaultRunDrive, runDriveRaw as defaultRunDriveRaw } from "../utils/subprocess.js";
+import { DriveNotAuthenticatedError, DriveParseError } from "../utils/errors.js";
 
 type Runner = (args: string[]) => Promise<unknown>;
+type RawRunner = (args: string[]) => Promise<string>;
+
+export type ConflictStrategy = "merge" | "keep-both" | "replace" | "skip";
 
 export class DriveService {
   private readonly run: Runner;
+  private readonly runRaw: RawRunner;
 
-  constructor(runner?: Runner) {
+  constructor(runner?: Runner, rawRunner?: RawRunner) {
     this.run = runner ?? defaultRunDrive;
+    this.runRaw = rawRunner ?? defaultRunDriveRaw;
   }
 
   // Auth
+  //
+  // The CLI has no `auth status` command (it doesn't exist). We probe by
+  // resolving a path every authenticated user has (/my-files) and treating
+  // a DriveNotAuthenticatedError as the signal. Any other error propagates —
+  // it means something unexpected happened, not that the session is invalid.
   async authStatus(): Promise<AuthStatus> {
-    const result = await this.run(["auth", "status"]);
-    if (result === null) return { authenticated: false };
-    const r = result as Record<string, unknown>;
-    return {
-      authenticated: Boolean(r?.authenticated ?? r?.loggedIn ?? false),
-      email: typeof r?.email === "string" ? r.email : undefined,
-    };
+    try {
+      await this.run(["filesystem", "info", "/my-files"]);
+      return { authenticated: true };
+    } catch (err) {
+      if (err instanceof DriveNotAuthenticatedError) return { authenticated: false };
+      throw err;
+    }
   }
 
   async authLogout(): Promise<void> {
     await this.run(["auth", "logout"]);
   }
 
+  // `version` ignores --json entirely and always prints plain text:
+  //   Proton Drive CLI 1.2.3
+  //   Proton Drive SDK 4.5.6
+  //   ...update-check line...
   async version(): Promise<DriveVersion> {
-    const result = await this.run(["version"]);
-    if (result === null) throw new DriveParseError("version command returned no output");
-    const r = result as Record<string, unknown>;
+    const text = await this.runRaw(["version"]);
+    const cliMatch = text.match(/Proton Drive CLI\s+(\S+)/);
+    const sdkMatch = text.match(/Proton Drive SDK\s+(\S+)/);
     return {
-      cli: typeof r.cli === "string" ? r.cli : String(r.version ?? "unknown"),
-      sdk: typeof r.sdk === "string" ? r.sdk : "unknown",
+      cli: cliMatch ? cliMatch[1] : "unknown",
+      sdk: sdkMatch ? sdkMatch[1] : "unknown",
     };
   }
 
@@ -65,7 +82,7 @@ export class DriveService {
   async upload(
     localPath: string,
     remotePath: string,
-    conflictStrategy: "skip" | "overwrite" | "rename" = "skip"
+    conflictStrategy: ConflictStrategy = "skip"
   ): Promise<UploadResult> {
     const result = await this.run([
       "filesystem",
@@ -85,8 +102,15 @@ export class DriveService {
     };
   }
 
-  async download(remotePath: string, localPath: string): Promise<DownloadResult> {
-    const result = await this.run(["filesystem", "download", remotePath, localPath]);
+  async download(
+    remotePath: string,
+    localPath: string,
+    conflictStrategy: Exclude<ConflictStrategy, "merge"> = "skip"
+  ): Promise<DownloadResult> {
+    const result = await this.run([
+      "filesystem", "download", remotePath, localPath,
+      "--conflict-strategy", conflictStrategy,
+    ]);
     const r = (result ?? {}) as Record<string, unknown>;
     return {
       path: remotePath,
@@ -95,16 +119,45 @@ export class DriveService {
     };
   }
 
+  // The CLI has no `mkdir` — it's `create-folder <parentPath> <name>`.
   async mkdir(remotePath: string): Promise<void> {
-    await this.run(["filesystem", "mkdir", remotePath]);
+    const parent = posixPath.dirname(remotePath);
+    const name = posixPath.basename(remotePath);
+    if (!name || parent === remotePath) {
+      throw new Error(`path must include a folder name to create: ${remotePath}`);
+    }
+    await this.run(["filesystem", "create-folder", parent, name]);
   }
 
-  async move(remoteSrc: string, remoteDst: string): Promise<void> {
-    await this.run(["filesystem", "move", remoteSrc, remoteDst]);
+  // The CLI has no single "move to any full path" command — `move` only
+  // accepts a target *parent folder*, and renaming is a separate `rename`
+  // command. We keep the tool's external contract (a full destination path)
+  // by translating into the right combination of the two real commands.
+  async move(sourcePath: string, destinationPath: string): Promise<void> {
+    const srcParent = posixPath.dirname(sourcePath);
+    const srcName = posixPath.basename(sourcePath);
+    const dstParent = posixPath.dirname(destinationPath);
+    const dstName = posixPath.basename(destinationPath);
+
+    if (srcParent === dstParent) {
+      if (srcName === dstName) return;
+      await this.run(["filesystem", "rename", sourcePath, dstName]);
+      return;
+    }
+
+    await this.run(["filesystem", "move", sourcePath, dstParent]);
+
+    if (srcName !== dstName) {
+      const movedPath = posixPath.join(dstParent, srcName);
+      await this.run(["filesystem", "rename", movedPath, dstName]);
+    }
   }
 
+  // `filesystem delete` permanently deletes — but only items already inside
+  // /trash or /photos-trash (the CLI rejects live paths). No --confirm flag
+  // exists on the CLI side; our own confirmed-gate lives in the MCP layer.
   async delete(remotePath: string): Promise<void> {
-    await this.run(["filesystem", "delete", "--confirm", remotePath]);
+    await this.run(["filesystem", "delete", remotePath]);
   }
 
   // Sharing
@@ -143,35 +196,66 @@ export class DriveService {
     ]);
   }
 
+  // `sharing revoke` doesn't exist — it's `sharing remove --email <email>`.
   async shareRevoke(remotePath: string, email: string): Promise<void> {
-    await this.run(["sharing", "revoke", "--user", email, remotePath]);
+    await this.shareRemove(remotePath, [email], false);
+  }
+
+  // General form of remove: specific emails, or --everyone to strip all
+  // members and pending invitations (Proton and non-Proton) in one call.
+  async shareRemove(remotePath: string, emails: string[], everyone: boolean): Promise<void> {
+    const args = ["sharing", "remove"];
+    for (const email of emails) args.push("--email", email);
+    if (everyone) args.push("--everyone");
+    args.push(remotePath);
+    await this.run(args);
+  }
+
+  async shareSetUrl(
+    remotePath: string,
+    role: Exclude<ShareRole, "admin"> = "viewer",
+    password?: string,
+    expiration?: string
+  ): Promise<PublicLink> {
+    const args = ["sharing", "set-url", remotePath, "--role", role];
+    if (password) args.push("--password", password);
+    if (expiration) args.push("--expiration", expiration);
+    const result = await this.run(args);
+    return this.parsePublicLink(result);
+  }
+
+  async shareRemoveUrl(remotePath: string): Promise<void> {
+    await this.run(["sharing", "remove-url", remotePath]);
+  }
+
+  private parsePublicLink(result: unknown): PublicLink {
+    const r = (result ?? {}) as Record<string, unknown>;
+    const urlAccess = (r.urlAccess ?? {}) as Record<string, unknown>;
+    const url = r.url ?? urlAccess.url;
+    const role = r.role ?? urlAccess.role;
+    const expirationTime = r.expirationTime ?? urlAccess.expirationTime;
+    return {
+      url: typeof url === "string" ? url : undefined,
+      role: (["viewer", "editor", "admin"].includes(String(role)) ? role : undefined) as ShareRole | undefined,
+      expirationTime: typeof expirationTime === "string" ? expirationTime : undefined,
+    };
   }
 
   // Trash
   async listTrash(): Promise<DriveFile[]> {
-    const result = await this.run(["trash", "list"]);
-    if (result === null) return [];
-    if (!Array.isArray(result)) throw new DriveParseError(`Expected array from trash list, got: ${JSON.stringify(result).slice(0, 100)}`);
-    return result.map((item: Record<string, unknown>) => ({
-      name: String(item.name ?? ""),
-      path: String(item.path ?? ""),
-      type: item.type === "folder" ? "folder" : "file",
-      size: typeof item.size === "number" ? item.size : undefined,
-      modifiedAt: typeof item.modifiedAt === "string" ? item.modifiedAt : undefined,
-      mimeType: typeof item.mimeType === "string" ? item.mimeType : undefined,
-    }));
+    return this.list("/trash");
   }
 
   async trash(remotePath: string): Promise<void> {
-    await this.run(["trash", remotePath]);
+    await this.run(["filesystem", "trash", remotePath]);
   }
 
   async restore(remotePath: string): Promise<void> {
-    await this.run(["trash", "restore", remotePath]);
+    await this.run(["filesystem", "restore", remotePath]);
   }
 
   async emptyTrash(): Promise<void> {
-    await this.run(["trash", "empty", "--confirm"]);
+    await this.run(["filesystem", "empty-trash"]);
   }
 
   async copy(remoteSrc: string, remoteDst: string): Promise<void> {
@@ -226,6 +310,13 @@ export class DriveService {
     await this.run(["album", "create", name]);
   }
 
+  async updateAlbum(albumPath: string, name?: string, coverPhotoUid?: string): Promise<void> {
+    const args = ["album", "update", albumPath];
+    if (name) args.push("--name", name);
+    if (coverPhotoUid) args.push("--cover-photo-uid", coverPhotoUid);
+    await this.run(args);
+  }
+
   async deleteAlbum(albumPath: string, force: boolean, save: boolean): Promise<void> {
     const args = ["album", "delete", albumPath];
     if (force) args.push("--force");
@@ -248,5 +339,51 @@ export class DriveService {
 
   async removePhotoFromAlbum(albumPath: string, photoPath: string): Promise<void> {
     await this.run(["album", "remove-photo", albumPath, photoPath]);
+  }
+
+  // Photos timeline / library-level transfers (distinct from album-scoped
+  // filesystem-style paths above — these hit the `photo` CLI group).
+  async photoTimeline(loadDetails: boolean): Promise<AlbumPhoto[]> {
+    const args = ["photo", "timeline"];
+    if (loadDetails) args.push("--load-details");
+    const result = await this.run(args);
+    if (result === null) return [];
+    if (!Array.isArray(result)) throw new DriveParseError(`Expected array from photo timeline, got: ${JSON.stringify(result).slice(0, 100)}`);
+    return result.map((item: Record<string, unknown>) => ({
+      nodeUid: String(item.nodeUid ?? item.uid ?? ""),
+    }));
+  }
+
+  async photoDownload(
+    remotePaths: string[],
+    localFolder: string,
+    conflictStrategy: "skip" | "replace" | "keep-both" = "skip"
+  ): Promise<TransferSummary> {
+    const result = await this.run([
+      "photo", "download", ...remotePaths, localFolder,
+      "--conflict-strategy", conflictStrategy,
+    ]);
+    return this.parseTransferSummary(result);
+  }
+
+  async photoUpload(
+    localPaths: string[],
+    conflictStrategy: "skip" | "keep-both" = "skip"
+  ): Promise<TransferSummary> {
+    const result = await this.run([
+      "photo", "upload", ...localPaths,
+      "--conflict-strategy", conflictStrategy,
+    ]);
+    return this.parseTransferSummary(result);
+  }
+
+  private parseTransferSummary(result: unknown): TransferSummary {
+    const r = (result ?? {}) as Record<string, unknown>;
+    return {
+      transferredItems: typeof r.transferredItems === "number" ? r.transferredItems : 0,
+      transferredBytes: typeof r.transferredBytes === "number" ? r.transferredBytes : 0,
+      skippedItems: typeof r.skippedItems === "number" ? r.skippedItems : 0,
+      failedItems: typeof r.failedItems === "number" ? r.failedItems : 0,
+    };
   }
 }

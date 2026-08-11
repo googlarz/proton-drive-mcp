@@ -5,25 +5,7 @@
  * Provides a human-friendly interface to the same DriveService used by the MCP server.
  *
  * Usage: proton-drive-cli <command> [args]
- *   auth status
- *   auth logout
- *   version
- *   list <remote-path>
- *   mkdir <remote-path>
- *   upload <local-path> <remote-path> [--conflict skip|overwrite|rename]
- *   download <remote-path> <local-path>
- *   move <src> <dst>
- *   delete <path>
- *   share status <path>
- *   share invite <path> <email> <role> [--message "..."]
- *   share revoke <path> <email>
- *   trash <path>
- *   trash list
- *   trash empty
- *   restore <path>
- *
- * Global flags:
- *   --json   Machine-readable JSON output
+ * Run with --help (or see usage() below) for the full command list.
  */
 
 import { DriveService } from "./services/drive.js";
@@ -40,28 +22,40 @@ function usage() {
 proton-drive-cli — Proton Drive companion CLI
 
 Commands:
-  auth status                              Check authentication status
+  auth status                              Check authentication status (probes /my-files)
   auth logout                              Log out
   version                                  Show CLI/SDK version
   list <path>                              List files at path
   mkdir <path>                             Create a new folder
-  upload <local> <remote> [--conflict X]  Upload file/folder (skip/overwrite/rename)
-  download <remote> <local>               Download file/folder
+  upload <local> <remote> [--conflict X]  Upload file/folder (skip/replace/keep-both/merge)
+  download <remote> <local> [--conflict X] Download file/folder (skip/replace/keep-both)
   move <src> <dst>                         Move/rename
-  delete <path>                            Delete file/folder permanently
+  delete <path> --confirm                  Delete a file/folder already in trash, permanently
   share status <path>                      Show sharing info
   share invite <path> <email> <role>       Invite user (viewer/editor/admin)
-  share revoke <path> <email>              Revoke access
+  share revoke <path> <email>              Revoke one user's access
+  share remove-all <path> --confirm        Remove everyone's access + pending invitations
+  share set-url <path> [--role] [--password] [--expiration]  Create/update public link
+  share remove-url <path>                  Remove public link
+  share leave <path>                       Leave a folder shared with you
+  copy <src> <dst>                         Copy file/folder
   trash <path>                             Move to trash
   trash list                               List trash contents
-  trash empty                              Permanently delete all trash
+  trash empty --confirm                    Permanently delete all trash
   restore <path>                           Restore from trash
+  invitation list                          List pending invitations
+  invitation accept <uid>                  Accept an invitation
+  invitation reject <uid>                  Reject an invitation
   album list                               List all photo albums
   album create <name>                      Create a new album
-  album delete <path> [--force] [--save]  Delete an album
+  album update <path> [--name] [--cover-photo-uid]  Rename/update album cover
+  album delete <path> --confirm [--force] [--save]  Delete an album
   album photos <path>                      List photos in an album
   album add-photo <album> <photo>          Add a photo to an album
   album remove-photo <album> <photo>       Remove a photo from an album
+  photo timeline [--load-details]          List photos in your timeline
+  photo download <photo>... <local> [--conflict X]  Download photos (skip/replace/keep-both)
+  photo upload <local>... [--conflict X]   Upload photos to your library (skip/keep-both)
 
 Flags:
   --json                                   Machine-readable JSON output (one line)
@@ -151,11 +145,11 @@ async function run() {
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
       const remote = requirePath(rest[0], "upload <local> <remote>");
       const conflictRaw = getFlag("--conflict") ?? "skip";
-      if (!["skip", "overwrite", "rename"].includes(conflictRaw)) {
-        console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip, overwrite, or rename.`);
+      if (!["skip", "replace", "keep-both", "merge"].includes(conflictRaw)) {
+        console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip, replace, keep-both, or merge.`);
         process.exit(1);
       }
-      const conflict = conflictRaw as "skip" | "overwrite" | "rename";
+      const conflict = conflictRaw as "skip" | "replace" | "keep-both" | "merge";
       print(await drive.upload(local, remote, conflict));
       break;
     }
@@ -167,7 +161,12 @@ async function run() {
       let local: string;
       try { local = validateLocalPath(rawLocal2); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
-      print(await drive.download(remote, local));
+      const dConflictRaw = getFlag("--conflict") ?? "skip";
+      if (!["skip", "replace", "keep-both"].includes(dConflictRaw)) {
+        console.error(`Invalid --conflict value: ${dConflictRaw}. Must be skip, replace, or keep-both.`);
+        process.exit(1);
+      }
+      print(await drive.download(remote, local, dConflictRaw as "skip" | "replace" | "keep-both"));
       break;
     }
 
@@ -187,7 +186,7 @@ async function run() {
     case "delete": {
       const delPath = requirePath(sub, "delete <path> --confirm");
       if (!args.includes("--confirm")) {
-        console.error(`This will permanently delete: ${delPath}\nPass --confirm to proceed.`);
+        console.error(`This permanently deletes an item already in trash: ${delPath}\nPass --confirm to proceed.`);
         process.exit(1);
       }
       await drive.delete(delPath);
@@ -221,6 +220,28 @@ async function run() {
         const revokeEmail = requireEmail(rawEmail);
         await drive.shareRevoke(revokePath, revokeEmail);
         console.log(`Revoked access for ${revokeEmail}.`);
+      } else if (sub === "remove-all") {
+        const removeAllPath = requirePath(rest[0], "share remove-all <path> --confirm");
+        if (!args.includes("--confirm")) {
+          console.error(`This removes everyone's access to: ${removeAllPath}\nPass --confirm to proceed.`);
+          process.exit(1);
+        }
+        await drive.shareRemove(removeAllPath, [], true);
+        console.log(`Removed all access to: ${removeAllPath}`);
+      } else if (sub === "set-url") {
+        const setUrlPath = requirePath(rest[0], "share set-url <path> [--role] [--password] [--expiration]");
+        const roleRaw = getFlag("--role") ?? "viewer";
+        if (!["viewer", "editor"].includes(roleRaw)) {
+          console.error(`Invalid --role value: ${roleRaw}. Must be viewer or editor.`);
+          process.exit(1);
+        }
+        const password = getFlag("--password");
+        const expiration = getFlag("--expiration");
+        print(await drive.shareSetUrl(setUrlPath, roleRaw as "viewer" | "editor", password, expiration));
+      } else if (sub === "remove-url") {
+        const removeUrlPath = requirePath(rest[0], "share remove-url <path>");
+        await drive.shareRemoveUrl(removeUrlPath);
+        console.log(`Public link removed: ${removeUrlPath}`);
       } else if (sub === "leave") {
         const leavePath = requirePath(rest[0], "share leave <path>");
         await drive.shareLeave(leavePath);
@@ -290,6 +311,16 @@ async function run() {
         if (!albumName) { console.error("Usage: album create <name>"); process.exit(1); }
         await drive.createAlbum(albumName);
         console.log(`Album created: ${albumName}`);
+      } else if (sub === "update") {
+        const albumPath = requirePath(rest[0], "album update <path> [--name] [--cover-photo-uid]");
+        const newName = getFlag("--name");
+        const coverPhotoUid = getFlag("--cover-photo-uid");
+        if (!newName && !coverPhotoUid) {
+          console.error("Usage: album update <path> [--name <name>] [--cover-photo-uid <uid>] (at least one required)");
+          process.exit(1);
+        }
+        await drive.updateAlbum(albumPath, newName, coverPhotoUid);
+        console.log(`Album updated: ${albumPath}`);
       } else if (sub === "delete") {
         const albumPath = requirePath(rest[0], "album delete <path> [--force] [--save] --confirm");
         if (!args.includes("--confirm")) {
@@ -312,10 +343,51 @@ async function run() {
         await drive.removePhotoFromAlbum(albumPath, photoPath);
         console.log(`Removed ${photoPath} from ${albumPath}`);
       } else {
-        console.error("Usage: album list | album create <name> | album delete <path> | album photos <path> | album add-photo <album> <photo> | album remove-photo <album> <photo>");
+        console.error("Usage: album list | album create <name> | album update <path> | album delete <path> | album photos <path> | album add-photo <album> <photo> | album remove-photo <album> <photo>");
         process.exit(1);
       }
       break;
+
+    case "photo": {
+      // Strip --conflict <value> out of a variadic positional list.
+      const conflictFlagIdx = rest.indexOf("--conflict");
+      const positionals = conflictFlagIdx === -1
+        ? rest
+        : [...rest.slice(0, conflictFlagIdx), ...rest.slice(conflictFlagIdx + 2)];
+      const conflictRaw = getFlag("--conflict") ?? "skip";
+
+      if (sub === "timeline") {
+        print(await drive.photoTimeline(args.includes("--load-details")));
+      } else if (sub === "download") {
+        if (positionals.length < 2) { console.error("Usage: photo download <photo>... <local-folder> [--conflict X]"); process.exit(1); return; }
+        const localFolder = positionals[positionals.length - 1];
+        const photoPaths = positionals.slice(0, -1).map((p) => requirePath(p, "photo download <photo>... <local-folder>"));
+        let localFolderValidated: string;
+        try { localFolderValidated = validateLocalPath(localFolder); }
+        catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
+        if (!["skip", "replace", "keep-both"].includes(conflictRaw)) {
+          console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip, replace, or keep-both.`);
+          process.exit(1);
+        }
+        print(await drive.photoDownload(photoPaths, localFolderValidated, conflictRaw as "skip" | "replace" | "keep-both"));
+      } else if (sub === "upload") {
+        if (positionals.length === 0) { console.error("Usage: photo upload <local>... [--conflict X]"); process.exit(1); return; }
+        const localPaths: string[] = [];
+        for (const p of positionals) {
+          try { localPaths.push(validateLocalPath(p)); }
+          catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
+        }
+        if (!["skip", "keep-both"].includes(conflictRaw)) {
+          console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip or keep-both.`);
+          process.exit(1);
+        }
+        print(await drive.photoUpload(localPaths, conflictRaw as "skip" | "keep-both"));
+      } else {
+        console.error("Usage: photo timeline [--load-details] | photo download <photo>... <local> | photo upload <local>...");
+        process.exit(1);
+      }
+      break;
+    }
 
     default:
       console.error(`Unknown command: ${cmd}`);

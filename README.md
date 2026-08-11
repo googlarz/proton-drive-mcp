@@ -30,7 +30,7 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
 - **Proton Photos album management** — list albums, create/delete albums, add and remove photos
-- **Full CLI** — same 29 operations, scriptable and pipeable, works in cron and shell scripts
+- **Full CLI** — same 36 operations, scriptable and pipeable, works in cron and shell scripts
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
 - **Shell injection safe** — all CLI calls use `execFile` with discrete argument arrays, never string interpolation
 - **Privacy-native** — end-to-end encryption is handled by Proton's own CLI; this server is just a thin MCP wrapper
@@ -147,7 +147,7 @@ proton-drive-cli <command> [args]
 ### Auth & info
 
 ```bash
-proton-drive-cli auth status          # check if authenticated
+proton-drive-cli auth status          # probes /my-files; the CLI has no dedicated status command
 proton-drive-cli auth logout          # log out (clears OS keychain session)
 proton-drive-cli version              # CLI and SDK version
 ```
@@ -161,13 +161,14 @@ proton-drive-cli list /my-files/Reports
 proton-drive-cli mkdir /my-files/NewFolder
 
 proton-drive-cli upload ./report.pdf /my-files/Reports
-proton-drive-cli upload ./dist /my-files/Releases --conflict overwrite
+proton-drive-cli upload ./dist /my-files/Releases --conflict replace
 
 proton-drive-cli download /my-files/report.pdf ./local/report.pdf
-proton-drive-cli download /my-files/Reports ./local/Reports
+proton-drive-cli download /my-files/Reports ./local/Reports --conflict keep-both
 
 proton-drive-cli move /my-files/old-name.pdf /my-files/new-name.pdf
-proton-drive-cli delete /my-files/obsolete-draft.pdf
+proton-drive-cli copy /my-files/report.pdf /my-files/Archive
+proton-drive-cli delete /trash/obsolete-draft.pdf --confirm   # only works on items already in trash
 
 # Machine-readable output (pipe-friendly)
 proton-drive-cli list /my-files --json | jq '.[].name'
@@ -180,22 +181,39 @@ proton-drive-cli share status /my-files/Reports
 proton-drive-cli share invite /my-files/Reports alice@pm.me editor
 proton-drive-cli share invite /my-files/Reports bob@pm.me viewer --message "FYI"
 proton-drive-cli share revoke /my-files/Reports alice@pm.me
+proton-drive-cli share remove-all /my-files/Reports --confirm   # strip every member + pending invite
+
+proton-drive-cli share set-url /my-files/Reports --role viewer --expiration 2026-06-06
+proton-drive-cli share remove-url /my-files/Reports
 ```
 
 ### Trash
 
 ```bash
-proton-drive-cli trash /my-files/old-draft.pdf   # move to trash
-proton-drive-cli trash list                       # see what's in trash
-proton-drive-cli restore /my-files/old-draft.pdf # restore from trash
-proton-drive-cli trash empty                      # permanently delete all trashed items
+proton-drive-cli trash /my-files/old-draft.pdf        # move to trash
+proton-drive-cli trash list                            # see what's in trash
+proton-drive-cli restore /my-files/old-draft.pdf       # restore from trash
+proton-drive-cli trash empty --confirm                  # permanently delete all trashed items
+```
+
+### Photos
+
+```bash
+proton-drive-cli album list
+proton-drive-cli album create "Summer 2026"
+proton-drive-cli album update /albums/Summer2026 --name "Summer Trip"
+proton-drive-cli album add-photo /albums/Summer2026 /photos/IMG_001.jpg
+
+proton-drive-cli photo timeline
+proton-drive-cli photo download /photos/IMG_001.jpg ./local/photos --conflict keep-both
+proton-drive-cli photo upload ./camera-roll --conflict skip
 ```
 
 ### Pipe and script
 
 ```bash
 # Backup build output after CI
-proton-drive-cli upload ./dist /my-files/Releases/$(date +%Y-%m-%d) --conflict rename
+proton-drive-cli upload ./dist /my-files/Releases/$(date +%Y-%m-%d) --conflict keep-both
 
 # Download all contracts for audit
 proton-drive-cli download /my-files/Contracts ./audit/contracts
@@ -218,7 +236,7 @@ proton-drive-cli share status /my-files/Projects
 `drive_list` · `drive_mkdir` · `drive_upload` · `drive_download` · `drive_move` · `drive_delete`
 
 ### Sharing
-`drive_share_status` · `drive_share_invite` · `drive_share_revoke`
+`drive_share_status` · `drive_share_invite` · `drive_share_revoke` · `drive_share_remove_all` · `drive_share_set_url` · `drive_share_remove_url`
 
 ### Trash
 `drive_list_trash` · `drive_trash` · `drive_restore` · `drive_empty_trash`
@@ -233,7 +251,7 @@ proton-drive-cli share status /my-files/Projects
 `drive_list_invitations` · `drive_invitation_accept` · `drive_invitation_reject` · `drive_share_leave`
 
 ### Photos
-`photos_list_albums` · `photos_create_album` · `photos_delete_album` · `photos_list_album_photos` · `photos_add_to_album` · `photos_remove_from_album`
+`photos_list_albums` · `photos_create_album` · `photos_update_album` · `photos_delete_album` · `photos_list_album_photos` · `photos_add_to_album` · `photos_remove_from_album` · `photos_list_timeline` · `photos_download` · `photos_upload`
 
 ---
 
@@ -241,35 +259,42 @@ proton-drive-cli share status /my-files/Projects
 
 | Tool | Description | Key parameters |
 |------|-------------|----------------|
-| `drive_auth_status` | Check if CLI is authenticated | — |
+| `drive_auth_status` | Check if authenticated (probes `/my-files` — no native status command) | — |
 | `drive_auth_logout` | Log out (clear session) | — |
 | `drive_version` | CLI and SDK version info | — |
 | `drive_list` | List files and folders at a path | `path` |
 | `drive_mkdir` | Create a new empty folder | `path` |
-| `drive_upload` | Upload local file or folder | `localPath`, `remotePath`, `conflictStrategy` (skip/overwrite/rename) |
-| `drive_download` | Download to local path | `remotePath`, `localPath` |
-| `drive_move` | Move or rename | `sourcePath`, `destinationPath` |
-| `drive_delete` | Permanently delete ⚠️ | `path`, `confirmed: true` |
+| `drive_upload` | Upload local file or folder | `localPath`, `remotePath`, `conflictStrategy` (skip/replace/keep-both/merge) |
+| `drive_download` | Download to local path | `remotePath`, `localPath`, `conflictStrategy` (skip/replace/keep-both) |
+| `drive_move` | Move and/or rename | `sourcePath`, `destinationPath` |
+| `drive_copy` | Copy file or folder to another Drive location | `sourcePath`, `destinationPath` |
+| `drive_delete` | Permanently delete an item already in trash ⚠️ | `path`, `confirmed: true` |
 | `drive_list_trash` | List items currently in trash | — |
 | `drive_share_status` | Get sharing members and URL | `path` |
 | `drive_share_invite` | Invite a user | `path`, `email`, `role` (viewer/editor/admin), `message?` |
-| `drive_share_revoke` | Revoke access | `path`, `email` |
+| `drive_share_revoke` | Revoke one person's access | `path`, `email` |
+| `drive_share_remove_all` | Remove every member + pending invitation at once ⚠️ | `path`, `confirmed: true` |
+| `drive_share_set_url` | Create/update a public share link | `path`, `role?` (viewer/editor), `password?`, `expiration?` |
+| `drive_share_remove_url` | Remove the public share link ⚠️ | `path` |
 | `drive_trash` | Move to trash | `path` |
 | `drive_restore` | Restore from trash | `path` |
 | `drive_empty_trash` | Permanently delete all trash ⚠️ | `confirmed: true` |
 | `drive_read_file` | Read text file from local sync folder | `path` |
 | `drive_write_file` | Write text file to local sync folder ⚠️ | `path`, `content` |
-| `drive_copy` | Copy file or folder to another Drive location | `sourcePath`, `destinationPath` |
 | `drive_list_invitations` | List pending sharing invitations received | — |
 | `drive_invitation_accept` | Accept a pending invitation | `uid` (from `drive_list_invitations`) |
 | `drive_invitation_reject` | Reject a pending invitation ⚠️ | `uid` (from `drive_list_invitations`) |
 | `drive_share_leave` | Leave a shared folder shared with you ⚠️ | `path` |
 | `photos_list_albums` | List all Proton Photos albums | — |
 | `photos_create_album` | Create a new empty album | `name` |
+| `photos_update_album` | Rename an album or change its cover photo | `albumPath`, `name?`, `coverPhotoUid?` |
 | `photos_delete_album` | Delete an album ⚠️ | `albumPath`, `confirmed: true`, `force?`, `save?` |
 | `photos_list_album_photos` | List photos in an album | `albumPath` |
 | `photos_add_to_album` | Add a photo from your library to an album | `albumPath`, `photoPath` |
 | `photos_remove_from_album` | Remove a photo from an album (keeps it in library) ⚠️ | `albumPath`, `photoPath` |
+| `photos_list_timeline` | List photos in your full library timeline | `loadDetails?` |
+| `photos_download` | Download photos to a local folder | `photoPaths`, `localFolder`, `conflictStrategy?` (skip/replace/keep-both) |
+| `photos_upload` | Upload local files directly into your Photos library | `localPaths`, `conflictStrategy?` (skip/keep-both) |
 
 > ⚠️ **Destructive tools** require `confirmed: true`. Use `drive_list_trash` first so you know what will be deleted, then pass `confirmed: true` to proceed.
 
@@ -291,9 +316,11 @@ proton-drive-cli share status /my-files/Projects
 ## Operational notes
 
 - `drive_upload` passes `--skip-thumbnails` by default. Remove it from the subprocess args if you want WebP preview generation (requires Bun 1.3.14+ installed).
-- `drive_move` and `drive_delete` are best-effort — the Proton Drive CLI documentation does not guarantee these commands exist in v1. If a command returns a CLI error, the MCP tool surfaces it cleanly.
+- `drive_move` accepts a full destination path (parent + new name) for a familiar interface, but the underlying CLI only has separate `move` (change parent) and `rename` (change name) commands — this MCP translates automatically, issuing one or both as needed.
+- `drive_delete` only works on items already in `/trash` or `/photos-trash` — the CLI rejects live paths. Trash an item first with `drive_trash`, or use `drive_empty_trash` to clear everything at once.
+- `drive_auth_status` has no native CLI equivalent — it probes by resolving `/my-files` and reports authenticated based on whether that succeeds.
 - Paths are always Drive-absolute: `/my-files/folder/file.pdf`. Relative paths are not supported.
-- All calls include `--json` automatically — you never need to pass it manually via the CLI wrapper.
+- All calls include `--json` automatically, except `drive_version`, whose underlying CLI command ignores `--json` and always prints plain text — this MCP parses it directly.
 
 ---
 
