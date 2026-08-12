@@ -28,6 +28,17 @@ export function validateMessage(message: unknown): string {
   return m;
 }
 
+// For bare filename/name arguments passed as a positional CLI arg (not a
+// path) — e.g. rename's newName. Guards against flag injection the same way
+// validatePath/validateEmail/validateMessage do.
+export function validateName(name: unknown): string {
+  const n = String(name ?? "").trim();
+  if (!n) throw new Error("name must not be empty");
+  if (n.startsWith("-")) throw new Error(`name must not start with '-': ${n}`);
+  if (CONTROL_RE.test(n)) throw new Error("name contains control characters");
+  return n;
+}
+
 export function validateLocalPath(path: unknown): string {
   const p = validatePath(path);
   if (!isAbsolute(p)) throw new Error(`local path must be absolute: ${p}`);

@@ -11,7 +11,7 @@
 import { DriveService } from "./services/drive.js";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./utils/errors.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
-import { validateRemotePath, validateLocalPath, validateEmail, validateMessage } from "./utils/validation.js";
+import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName } from "./utils/validation.js";
 
 const drive = new DriveService();
 const args = process.argv.slice(2);
@@ -26,10 +26,12 @@ Commands:
   auth logout                              Log out
   version                                  Show CLI/SDK version
   list <path>                              List files at path
+  info <path>                              Show full node metadata for one path
   mkdir <path>                             Create a new folder
   upload <local> <remote> [--conflict X]  Upload file/folder (skip/replace/keep-both/merge)
   download <remote> <local> [--conflict X] Download file/folder (skip/replace/keep-both)
-  move <src> <dst>                         Move/rename
+  rename <path> <new-name>                 Rename in place, no move
+  move <src> <dst>                         Move and/or rename
   delete <path> --confirm                  Delete a file/folder already in trash, permanently
   share status <path>                      Show sharing info
   share invite <path> <email> <role>       Invite user (viewer/editor/admin)
@@ -137,6 +139,10 @@ async function run() {
       print(await drive.list(requirePath(sub, "list <path>")));
       break;
 
+    case "info":
+      print(await drive.info(requirePath(sub, "info <path>")));
+      break;
+
     case "upload": {
       const rawLocal = sub;
       if (!rawLocal) { console.error("Usage: upload <local> <remote>"); process.exit(1); }
@@ -167,6 +173,17 @@ async function run() {
         process.exit(1);
       }
       print(await drive.download(remote, local, dConflictRaw as "skip" | "replace" | "keep-both"));
+      break;
+    }
+
+    case "rename": {
+      const renamePath = requirePath(sub, "rename <path> <new-name>");
+      const rawNewName = rest[0];
+      let newName: string;
+      try { newName = validateName(rawNewName); }
+      catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
+      await drive.rename(renamePath, newName);
+      console.log(`Renamed: ${renamePath} → ${newName}`);
       break;
     }
 

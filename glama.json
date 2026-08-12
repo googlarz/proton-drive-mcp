@@ -154,6 +154,14 @@
     {
       "name": "photos_upload",
       "description": "Upload local photos or videos directly into your Proton Photos library."
+    },
+    {
+      "name": "drive_info",
+      "description": "Get full metadata for a single Proton Drive file or folder, including latest revision details."
+    },
+    {
+      "name": "drive_rename",
+      "description": "Rename a file or folder in place on Proton Drive, without moving it."
     }
   ]
 }

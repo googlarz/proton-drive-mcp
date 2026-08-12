@@ -129,6 +129,20 @@ export class DriveService {
     await this.run(["filesystem", "create-folder", parent, name]);
   }
 
+  // Returns full node metadata (including latest revision details) for a
+  // single file or folder. Shape comes straight from the CLI/SDK and is not
+  // guaranteed — this is a deliberate raw pass-through, unlike list()'s
+  // trimmed DriveFile shape, so callers get everything the CLI exposes.
+  async info(remotePath: string): Promise<unknown> {
+    return this.run(["filesystem", "info", remotePath]);
+  }
+
+  // Renames in place — does not move to a different folder. Returns the
+  // renamed node (raw pass-through, same reasoning as info()).
+  async rename(remotePath: string, newName: string): Promise<unknown> {
+    return this.run(["filesystem", "rename", remotePath, newName]);
+  }
+
   // The CLI has no single "move to any full path" command — `move` only
   // accepts a target *parent folder*, and renaming is a separate `rename`
   // command. We keep the tool's external contract (a full destination path)
@@ -141,7 +155,7 @@ export class DriveService {
 
     if (srcParent === dstParent) {
       if (srcName === dstName) return;
-      await this.run(["filesystem", "rename", sourcePath, dstName]);
+      await this.rename(sourcePath, dstName);
       return;
     }
 
@@ -149,7 +163,7 @@ export class DriveService {
 
     if (srcName !== dstName) {
       const movedPath = posixPath.join(dstParent, srcName);
-      await this.run(["filesystem", "rename", movedPath, dstName]);
+      await this.rename(movedPath, dstName);
     }
   }
 

@@ -48,6 +48,8 @@ tools:
   - photos_list_timeline
   - photos_download
   - photos_upload
+  - drive_info
+  - drive_rename
 startCommand:
   type: stdio
   configSchema:

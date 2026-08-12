@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.28 — 2026-08-11
+
+Closes the last 2 gaps found in the full CLI command audit — every scriptable Proton Drive CLI command now has a matching tool.
+
+### Added
+- **`drive_info`** — full node metadata for a single file/folder, including latest revision details (`filesystem info`). Raw pass-through of the CLI's node object — richer and less trimmed than `drive_list`'s per-item fields.
+- **`drive_rename`** — rename in place without moving to a different folder (`filesystem rename`). `drive_move` already reached this internally when source/destination share a parent; it's now also directly addressable and documented as the cheaper option for pure renames.
+- **`validateName`** utility — guards bare name/filename CLI arguments (not paths) against flag injection, used by `drive_rename`'s `newName`.
+
+### Coverage
+33 commands in the CLI's registry (verified against the `cli/v0.7.0` release tag) minus `auth login` (interactive browser flow, deliberately excluded) = 32 scriptable commands, all now covered 1:1 by a tool.
+
 ## 1.0.27 — 2026-08-11
 
 A full audit against the Proton Drive CLI SDK source found that 9 existing tools called CLI commands or flags that don't exist, or had wrong semantics. This release fixes all of them and adds 7 new tools for public links, bulk access removal, album updates, and Photos timeline transfers.

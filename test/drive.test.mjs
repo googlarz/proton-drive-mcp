@@ -7,7 +7,7 @@ import {
   DriveNotAuthenticatedError,
   DriveParseError,
 } from "../dist/utils/errors.js";
-import { validatePath, validateRemotePath, validateLocalPath, validateEmail, validateMessage } from "../dist/utils/validation.js";
+import { validatePath, validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName } from "../dist/utils/validation.js";
 import { checkCliAvailable } from "../dist/utils/subprocess.js";
 
 // ─── Test runner factory ──────────────────────────────────────────────────────
@@ -151,6 +151,17 @@ describe("list", () => {
   });
 });
 
+describe("info", () => {
+  it("calls filesystem info and returns the raw node object", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ name: "report.pdf", uid: "abc", revision: { size: 1024 } });
+    const node = await drive.info("/my-files/report.pdf");
+    assert.deepEqual(t.lastCall(), ["filesystem", "info", "/my-files/report.pdf"]);
+    assert.equal(node.uid, "abc");
+  });
+});
+
 describe("upload", () => {
   it("uses skip conflict strategy by default", async () => {
     const t = makeRunner();
@@ -229,6 +240,17 @@ describe("mkdir", () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     await assert.rejects(() => drive.mkdir("/"), /must include a folder name/);
+  });
+});
+
+describe("rename", () => {
+  it("calls filesystem rename and returns the raw renamed node", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ name: "new.pdf", uid: "abc" });
+    const node = await drive.rename("/my-files/old.pdf", "new.pdf");
+    assert.deepEqual(t.lastCall(), ["filesystem", "rename", "/my-files/old.pdf", "new.pdf"]);
+    assert.equal(node.name, "new.pdf");
   });
 });
 
@@ -738,6 +760,28 @@ describe("validateEmail", () => {
 
   it("throws on control characters", () => {
     assert.throws(() => validateEmail("user\x00@example.com"), /control characters/);
+  });
+});
+
+describe("validateName", () => {
+  it("returns the name unchanged when valid", () => {
+    assert.equal(validateName("report-v2.pdf"), "report-v2.pdf");
+  });
+
+  it("trims whitespace", () => {
+    assert.equal(validateName("  new name.pdf  "), "new name.pdf");
+  });
+
+  it("throws on empty string", () => {
+    assert.throws(() => validateName(""), /must not be empty/);
+  });
+
+  it("throws on leading dash (flag injection)", () => {
+    assert.throws(() => validateName("--conflict-strategy"), /must not start with '-'/);
+  });
+
+  it("throws on control characters", () => {
+    assert.throws(() => validateName("evil\x00name"), /control characters/);
   });
 });
 

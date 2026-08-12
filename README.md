@@ -30,7 +30,8 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
 - **Proton Photos album management** — list albums, create/delete albums, add and remove photos
-- **Full CLI** — same 36 operations, scriptable and pipeable, works in cron and shell scripts
+- **Full CLI** — same 38 operations, scriptable and pipeable, works in cron and shell scripts
+- **100% CLI coverage** — every scriptable Proton Drive CLI command has a matching tool (verified against the CLI's own source; `auth login` is the one command excluded, since it's an interactive browser flow)
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
 - **Shell injection safe** — all CLI calls use `execFile` with discrete argument arrays, never string interpolation
 - **Privacy-native** — end-to-end encryption is handled by Proton's own CLI; this server is just a thin MCP wrapper
@@ -157,6 +158,7 @@ proton-drive-cli version              # CLI and SDK version
 ```bash
 proton-drive-cli list /my-files
 proton-drive-cli list /my-files/Reports
+proton-drive-cli info /my-files/report.pdf       # full metadata, incl. revision details
 
 proton-drive-cli mkdir /my-files/NewFolder
 
@@ -166,6 +168,7 @@ proton-drive-cli upload ./dist /my-files/Releases --conflict replace
 proton-drive-cli download /my-files/report.pdf ./local/report.pdf
 proton-drive-cli download /my-files/Reports ./local/Reports --conflict keep-both
 
+proton-drive-cli rename /my-files/old-name.pdf new-name.pdf   # in place, no move
 proton-drive-cli move /my-files/old-name.pdf /my-files/new-name.pdf
 proton-drive-cli copy /my-files/report.pdf /my-files/Archive
 proton-drive-cli delete /trash/obsolete-draft.pdf --confirm   # only works on items already in trash
@@ -233,7 +236,7 @@ proton-drive-cli share status /my-files/Projects
 `drive_auth_status` · `drive_auth_logout` · `drive_version`
 
 ### Filesystem
-`drive_list` · `drive_mkdir` · `drive_upload` · `drive_download` · `drive_move` · `drive_delete`
+`drive_list` · `drive_info` · `drive_mkdir` · `drive_upload` · `drive_download` · `drive_rename` · `drive_move` · `drive_delete`
 
 ### Sharing
 `drive_share_status` · `drive_share_invite` · `drive_share_revoke` · `drive_share_remove_all` · `drive_share_set_url` · `drive_share_remove_url`
@@ -263,9 +266,11 @@ proton-drive-cli share status /my-files/Projects
 | `drive_auth_logout` | Log out (clear session) | — |
 | `drive_version` | CLI and SDK version info | — |
 | `drive_list` | List files and folders at a path | `path` |
+| `drive_info` | Get full metadata for one file/folder, including revision details | `path` |
 | `drive_mkdir` | Create a new empty folder | `path` |
 | `drive_upload` | Upload local file or folder | `localPath`, `remotePath`, `conflictStrategy` (skip/replace/keep-both/merge) |
 | `drive_download` | Download to local path | `remotePath`, `localPath`, `conflictStrategy` (skip/replace/keep-both) |
+| `drive_rename` | Rename in place, no move | `path`, `newName` |
 | `drive_move` | Move and/or rename | `sourcePath`, `destinationPath` |
 | `drive_copy` | Copy file or folder to another Drive location | `sourcePath`, `destinationPath` |
 | `drive_delete` | Permanently delete an item already in trash ⚠️ | `path`, `confirmed: true` |

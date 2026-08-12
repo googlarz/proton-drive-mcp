@@ -18,7 +18,7 @@ import {
   DriveNotAuthenticatedError,
   DriveParseError,
 } from "./utils/errors.js";
-import { validateRemotePath, validateLocalPath, validateEmail, validateMessage } from "./utils/validation.js";
+import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
 import { getSyncRoot, readSyncFile, writeSyncFile } from "./utils/syncfs.js";
 
@@ -107,6 +107,26 @@ const TOOLS = [
         path: {
           type: "string",
           description: "Absolute remote Drive path to list (must start with '/'). E.g. /my-files or /my-files/Reports",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_info",
+    description:
+      "Get full metadata for a single Proton Drive file or folder, including latest revision details. Requires authentication. " +
+      "Returns the raw CLI node object — richer than drive_list's trimmed per-item fields, but its exact shape is not guaranteed. " +
+      "Use when you need details drive_list doesn't return (e.g. revision info) for one specific known path. " +
+      "Do not use to enumerate a folder's children — use drive_list instead.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute remote Drive path to inspect (must start with '/'). E.g. /my-files/report.pdf",
         },
       },
       required: ["path"],
@@ -203,10 +223,33 @@ const TOOLS = [
     },
   },
   {
+    name: "drive_rename",
+    description:
+      "Rename a file or folder in place on Proton Drive, without moving it to a different parent folder. Requires authentication. " +
+      "Equivalent to calling drive_move with the same parent and a new filename, but cheaper — one CLI call instead of drive_move's internal composition. " +
+      "Do not use to relocate to a different folder — use drive_move for that (or when unsure which applies).",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute remote path of the file or folder to rename (must start with '/').",
+        },
+        newName: {
+          type: "string",
+          description: "New filename (not a path — just the name, e.g. 'report-v2.pdf').",
+        },
+      },
+      required: ["path", "newName"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "drive_move",
     description:
       "Move or rename a file or folder on Proton Drive. Requires authentication. " +
-      "To rename: keep the same parent, change only the filename (e.g. /my-files/old.pdf → /my-files/new.pdf). " +
+      "To rename: keep the same parent, change only the filename (e.g. /my-files/old.pdf → /my-files/new.pdf) — or use drive_rename directly. " +
       "To move: provide a different parent folder. " +
       "Fails if destinationPath is already occupied or if its parent folder does not exist. " +
       "Do not use to copy a file while keeping the original (use drive_copy) or to download to local storage (use drive_download).",
@@ -904,6 +947,9 @@ export async function main() {
         case "drive_list":
           return ok(await drive.list(validateRemotePath(a.path)));
 
+        case "drive_info":
+          return ok(await drive.info(validateRemotePath(a.path)));
+
         case "drive_mkdir": {
           const mkdirPath = validateRemotePath(a.path);
           await drive.mkdir(mkdirPath);
@@ -936,6 +982,13 @@ export async function main() {
             validateLocalPath(a.localPath),
             dcs as "skip" | "replace" | "keep-both"
           ));
+        }
+
+        case "drive_rename": {
+          const renamePath = validateRemotePath(a.path);
+          const newName = validateName(a.newName);
+          await drive.rename(renamePath, newName);
+          return ok({ message: `Renamed: ${renamePath} → ${newName}` });
         }
 
         case "drive_move": {
