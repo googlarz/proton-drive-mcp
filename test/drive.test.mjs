@@ -162,29 +162,30 @@ describe("info", () => {
   });
 });
 
+// CLI v0.8.0 split the old unified --conflict-strategy into separate
+// --file-conflict-strategy / --folder-conflict-strategy flags with new
+// per-target value sets.
 describe("upload", () => {
-  it("uses skip conflict strategy by default", async () => {
+  it("uses skip for both file and folder conflict strategy by default", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult({ uploaded: 1, skipped: 0, failed: 0 });
     const result = await drive.upload("/local/report.pdf", "/my-files/Reports");
     assert.equal(result.uploaded, 1);
-    const call = t.lastCall();
-    assert.equal(call[0], "filesystem");
-    assert.equal(call[1], "upload");
-    assert.equal(call[2], "/local/report.pdf");
-    assert.equal(call[3], "/my-files/Reports");
-    assert.ok(call.includes("--conflict-strategy"));
-    assert.ok(call.includes("skip"));
-    assert.ok(call.includes("--skip-thumbnails"));
+    assert.deepEqual(t.lastCall(), [
+      "filesystem", "upload", "/local/report.pdf", "/my-files/Reports",
+      "--file-conflict-strategy", "skip", "--folder-conflict-strategy", "skip", "--skip-thumbnails",
+    ]);
   });
 
-  it("passes replace conflict strategy", async () => {
+  it("passes custom file and folder conflict strategies", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult({ uploaded: 1, skipped: 0, failed: 0 });
-    await drive.upload("/local/file.txt", "/my-files", "replace");
-    assert.ok(t.lastCall().includes("replace"));
+    await drive.upload("/local/file.txt", "/my-files", "create-new-revision", "merge");
+    const call = t.lastCall();
+    assert.ok(call.includes("create-new-revision"));
+    assert.ok(call.includes("merge"));
   });
 
   it("returns zeros when result is null", async () => {
@@ -206,7 +207,7 @@ describe("upload", () => {
 });
 
 describe("download", () => {
-  it("calls filesystem download with default skip conflict strategy and returns localPath", async () => {
+  it("calls filesystem download with default skip conflict strategies and returns localPath", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult({ downloaded: 3 });
@@ -214,16 +215,19 @@ describe("download", () => {
     assert.equal(result.localPath, "/tmp/report.pdf");
     assert.equal(result.downloaded, 3);
     assert.deepEqual(t.lastCall(), [
-      "filesystem", "download", "/my-files/report.pdf", "/tmp/report.pdf", "--conflict-strategy", "skip",
+      "filesystem", "download", "/my-files/report.pdf", "/tmp/report.pdf",
+      "--file-conflict-strategy", "skip", "--folder-conflict-strategy", "skip",
     ]);
   });
 
-  it("passes a custom conflict strategy", async () => {
+  it("passes custom file and folder conflict strategies", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult({ downloaded: 1 });
-    await drive.download("/my-files/report.pdf", "/tmp/report.pdf", "replace");
-    assert.ok(t.lastCall().includes("replace"));
+    await drive.download("/my-files/report.pdf", "/tmp/report.pdf", "remove", "merge");
+    const call = t.lastCall();
+    assert.ok(call.includes("remove"));
+    assert.ok(call.includes("merge"));
   });
 });
 
@@ -577,6 +581,14 @@ describe("photoDownload", () => {
     ]);
     assert.equal(summary.transferredItems, 2);
   });
+
+  it("passes remove conflict strategy", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({});
+    await drive.photoDownload(["/photos/a.jpg"], "/tmp/photos", "remove");
+    assert.ok(t.lastCall().includes("remove"));
+  });
 });
 
 describe("photoUpload", () => {
@@ -591,12 +603,12 @@ describe("photoUpload", () => {
     assert.equal(summary.transferredItems, 1);
   });
 
-  it("passes keep-both conflict strategy", async () => {
+  it("passes rename conflict strategy", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult({});
-    await drive.photoUpload(["/local/a.jpg"], "keep-both");
-    assert.ok(t.lastCall().includes("keep-both"));
+    await drive.photoUpload(["/local/a.jpg"], "rename");
+    assert.ok(t.lastCall().includes("rename"));
   });
 });
 

@@ -8,7 +8,15 @@
  * Run with --help (or see usage() below) for the full command list.
  */
 
-import { DriveService } from "./services/drive.js";
+import {
+  DriveService,
+  type FileConflictStrategy,
+  type FolderConflictStrategy,
+  type FileDownloadConflictStrategy,
+  type FolderDownloadConflictStrategy,
+  type PhotoUploadConflictStrategy,
+  type PhotoDownloadConflictStrategy,
+} from "./services/drive.js";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./utils/errors.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
 import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName } from "./utils/validation.js";
@@ -28,8 +36,10 @@ Commands:
   list <path>                              List files at path
   info <path>                              Show full node metadata for one path
   mkdir <path>                             Create a new folder
-  upload <local> <remote> [--conflict X]  Upload file/folder (skip/replace/keep-both/merge)
-  download <remote> <local> [--conflict X] Download file/folder (skip/replace/keep-both)
+  upload <local> <remote> [--file-conflict X] [--folder-conflict X]
+                                           Upload file/folder (files: skip/create-new-revision/rename/replace; folders: skip/merge/rename/replace)
+  download <remote> <local> [--file-conflict X] [--folder-conflict X]
+                                           Download file/folder (files: skip/rename/remove; folders: skip/merge/rename/remove)
   rename <path> <new-name>                 Rename in place, no move
   move <src> <dst>                         Move and/or rename
   delete <path> --confirm                  Delete a file/folder already in trash, permanently
@@ -56,8 +66,8 @@ Commands:
   album add-photo <album> <photo>          Add a photo to an album
   album remove-photo <album> <photo>       Remove a photo from an album
   photo timeline [--load-details]          List photos in your timeline
-  photo download <photo>... <local> [--conflict X]  Download photos (skip/replace/keep-both)
-  photo upload <local>... [--conflict X]   Upload photos to your library (skip/keep-both)
+  photo download <photo>... <local> [--conflict X]  Download photos (skip/rename/remove)
+  photo upload <local>... [--conflict X]   Upload photos to your library (skip/rename)
 
 Flags:
   --json                                   Machine-readable JSON output (one line)
@@ -145,34 +155,51 @@ async function run() {
 
     case "upload": {
       const rawLocal = sub;
-      if (!rawLocal) { console.error("Usage: upload <local> <remote>"); process.exit(1); }
+      if (!rawLocal) { console.error("Usage: upload <local> <remote> [--file-conflict X] [--folder-conflict X]"); process.exit(1); }
       let local: string;
       try { local = validateLocalPath(rawLocal); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
       const remote = requirePath(rest[0], "upload <local> <remote>");
-      const conflictRaw = getFlag("--conflict") ?? "skip";
-      if (!["skip", "replace", "keep-both", "merge"].includes(conflictRaw)) {
-        console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip, replace, keep-both, or merge.`);
+      const fileConflictRaw = getFlag("--file-conflict") ?? "skip";
+      if (!["skip", "create-new-revision", "rename", "replace"].includes(fileConflictRaw)) {
+        console.error(`Invalid --file-conflict value: ${fileConflictRaw}. Must be skip, create-new-revision, rename, or replace.`);
         process.exit(1);
       }
-      const conflict = conflictRaw as "skip" | "replace" | "keep-both" | "merge";
-      print(await drive.upload(local, remote, conflict));
+      const folderConflictRaw = getFlag("--folder-conflict") ?? "skip";
+      if (!["skip", "merge", "rename", "replace"].includes(folderConflictRaw)) {
+        console.error(`Invalid --folder-conflict value: ${folderConflictRaw}. Must be skip, merge, rename, or replace.`);
+        process.exit(1);
+      }
+      print(await drive.upload(
+        local, remote,
+        fileConflictRaw as FileConflictStrategy,
+        folderConflictRaw as FolderConflictStrategy
+      ));
       break;
     }
 
     case "download": {
-      const remote = requirePath(sub, "download <remote> <local>");
+      const remote = requirePath(sub, "download <remote> <local> [--file-conflict X] [--folder-conflict X]");
       const rawLocal2 = rest[0];
       if (!rawLocal2) { console.error("Usage: download <remote> <local>"); process.exit(1); return; }
       let local: string;
       try { local = validateLocalPath(rawLocal2); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
-      const dConflictRaw = getFlag("--conflict") ?? "skip";
-      if (!["skip", "replace", "keep-both"].includes(dConflictRaw)) {
-        console.error(`Invalid --conflict value: ${dConflictRaw}. Must be skip, replace, or keep-both.`);
+      const fileConflictRaw = getFlag("--file-conflict") ?? "skip";
+      if (!["skip", "rename", "remove"].includes(fileConflictRaw)) {
+        console.error(`Invalid --file-conflict value: ${fileConflictRaw}. Must be skip, rename, or remove.`);
         process.exit(1);
       }
-      print(await drive.download(remote, local, dConflictRaw as "skip" | "replace" | "keep-both"));
+      const folderConflictRaw = getFlag("--folder-conflict") ?? "skip";
+      if (!["skip", "merge", "rename", "remove"].includes(folderConflictRaw)) {
+        console.error(`Invalid --folder-conflict value: ${folderConflictRaw}. Must be skip, merge, rename, or remove.`);
+        process.exit(1);
+      }
+      print(await drive.download(
+        remote, local,
+        fileConflictRaw as FileDownloadConflictStrategy,
+        folderConflictRaw as FolderDownloadConflictStrategy
+      ));
       break;
     }
 
@@ -382,11 +409,11 @@ async function run() {
         let localFolderValidated: string;
         try { localFolderValidated = validateLocalPath(localFolder); }
         catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
-        if (!["skip", "replace", "keep-both"].includes(conflictRaw)) {
-          console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip, replace, or keep-both.`);
+        if (!["skip", "rename", "remove"].includes(conflictRaw)) {
+          console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip, rename, or remove.`);
           process.exit(1);
         }
-        print(await drive.photoDownload(photoPaths, localFolderValidated, conflictRaw as "skip" | "replace" | "keep-both"));
+        print(await drive.photoDownload(photoPaths, localFolderValidated, conflictRaw as PhotoDownloadConflictStrategy));
       } else if (sub === "upload") {
         if (positionals.length === 0) { console.error("Usage: photo upload <local>... [--conflict X]"); process.exit(1); return; }
         const localPaths: string[] = [];
@@ -394,11 +421,11 @@ async function run() {
           try { localPaths.push(validateLocalPath(p)); }
           catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
         }
-        if (!["skip", "keep-both"].includes(conflictRaw)) {
-          console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip or keep-both.`);
+        if (!["skip", "rename"].includes(conflictRaw)) {
+          console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip or rename.`);
           process.exit(1);
         }
-        print(await drive.photoUpload(localPaths, conflictRaw as "skip" | "keep-both"));
+        print(await drive.photoUpload(localPaths, conflictRaw as PhotoUploadConflictStrategy));
       } else {
         console.error("Usage: photo timeline [--load-details] | photo download <photo>... <local> | photo upload <local>...");
         process.exit(1);

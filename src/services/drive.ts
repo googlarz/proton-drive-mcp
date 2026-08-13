@@ -19,7 +19,17 @@ import { DriveNotAuthenticatedError, DriveParseError } from "../utils/errors.js"
 type Runner = (args: string[]) => Promise<unknown>;
 type RawRunner = (args: string[]) => Promise<string>;
 
-export type ConflictStrategy = "merge" | "keep-both" | "replace" | "skip";
+// CLI v0.8.0 split the old unified --conflict-strategy into separate
+// per-target flags for filesystem upload/download, each with its own
+// allowed values (files can get a new revision; folders can merge).
+export type FileConflictStrategy = "create-new-revision" | "rename" | "replace" | "skip";
+export type FolderConflictStrategy = "merge" | "rename" | "replace" | "skip";
+export type FileDownloadConflictStrategy = "rename" | "remove" | "skip";
+export type FolderDownloadConflictStrategy = "merge" | "rename" | "remove" | "skip";
+// Photos upload/download kept a single --conflict-strategy flag (files only,
+// no folder distinction) but with the same v0.8.0 value renames.
+export type PhotoUploadConflictStrategy = "rename" | "skip";
+export type PhotoDownloadConflictStrategy = "rename" | "remove" | "skip";
 
 export class DriveService {
   private readonly run: Runner;
@@ -82,15 +92,18 @@ export class DriveService {
   async upload(
     localPath: string,
     remotePath: string,
-    conflictStrategy: ConflictStrategy = "skip"
+    fileConflictStrategy: FileConflictStrategy = "skip",
+    folderConflictStrategy: FolderConflictStrategy = "skip"
   ): Promise<UploadResult> {
     const result = await this.run([
       "filesystem",
       "upload",
       localPath,
       remotePath,
-      "--conflict-strategy",
-      conflictStrategy,
+      "--file-conflict-strategy",
+      fileConflictStrategy,
+      "--folder-conflict-strategy",
+      folderConflictStrategy,
       "--skip-thumbnails",
     ]);
     const r = (result ?? {}) as Record<string, unknown>;
@@ -105,11 +118,13 @@ export class DriveService {
   async download(
     remotePath: string,
     localPath: string,
-    conflictStrategy: Exclude<ConflictStrategy, "merge"> = "skip"
+    fileConflictStrategy: FileDownloadConflictStrategy = "skip",
+    folderConflictStrategy: FolderDownloadConflictStrategy = "skip"
   ): Promise<DownloadResult> {
     const result = await this.run([
       "filesystem", "download", remotePath, localPath,
-      "--conflict-strategy", conflictStrategy,
+      "--file-conflict-strategy", fileConflictStrategy,
+      "--folder-conflict-strategy", folderConflictStrategy,
     ]);
     const r = (result ?? {}) as Record<string, unknown>;
     return {
@@ -371,7 +386,7 @@ export class DriveService {
   async photoDownload(
     remotePaths: string[],
     localFolder: string,
-    conflictStrategy: "skip" | "replace" | "keep-both" = "skip"
+    conflictStrategy: PhotoDownloadConflictStrategy = "skip"
   ): Promise<TransferSummary> {
     const result = await this.run([
       "photo", "download", ...remotePaths, localFolder,
@@ -382,7 +397,7 @@ export class DriveService {
 
   async photoUpload(
     localPaths: string[],
-    conflictStrategy: "skip" | "keep-both" = "skip"
+    conflictStrategy: PhotoUploadConflictStrategy = "skip"
   ): Promise<TransferSummary> {
     const result = await this.run([
       "photo", "upload", ...localPaths,

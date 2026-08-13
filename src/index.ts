@@ -9,7 +9,15 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createRequire } from "node:module";
-import { DriveService, type ConflictStrategy } from "./services/drive.js";
+import {
+  DriveService,
+  type FileConflictStrategy,
+  type FolderConflictStrategy,
+  type FileDownloadConflictStrategy,
+  type FolderDownloadConflictStrategy,
+  type PhotoUploadConflictStrategy,
+  type PhotoDownloadConflictStrategy,
+} from "./services/drive.js";
 import { isMainModule } from "./utils/isMainModule.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
 import {
@@ -139,7 +147,7 @@ const TOOLS = [
       "Upload a local file or folder to Proton Drive with end-to-end encryption. Requires authentication. " +
       "For folders, uploads recursively and preserves directory structure. " +
       "Returns {uploaded, skipped, failed} counts — fails the call if failed > 0 (common causes: quota exceeded, destination path not found, permission denied). " +
-      "conflictStrategy defaults to 'skip'. Values: 'skip' (leave existing remote file unchanged), 'replace' (permanently overwrite — confirm with user first), 'keep-both' (upload with a unique name), 'merge' (folders only — merge contents instead of failing). " +
+      "Conflict strategies are set separately for files and folders (CLI v0.8.0+) — both default to 'skip'. " +
       "Do not use to move files already on Drive (use drive_move) or to write text content directly (use drive_write_file if PROTON_DRIVE_SYNC_PATH is set). " +
       "Ensure destination folder exists first with drive_list; create it with drive_mkdir if needed.",
     annotations: { openWorldHint: true },
@@ -154,14 +162,23 @@ const TOOLS = [
           type: "string",
           description: "Absolute remote Drive destination folder path (must start with '/'). E.g. /my-files/Reports",
         },
-        conflictStrategy: {
+        fileConflictStrategy: {
           type: "string",
-          enum: ["skip", "replace", "keep-both", "merge"],
+          enum: ["skip", "create-new-revision", "rename", "replace"],
           description:
-            "'skip' leaves existing remote files unchanged (default). " +
-            "'replace' permanently overwrites the remote file — confirm with user first. " +
-            "'keep-both' uploads with a unique name to avoid conflicts. " +
-            "'merge' merges folder contents instead of failing (folders only).",
+            "'skip' leaves an existing remote file unchanged (default). " +
+            "'create-new-revision' uploads as a new version of the existing file, keeping history. " +
+            "'rename' adds a unique suffix to the uploaded file's name. " +
+            "'replace' trashes the remote file and uploads the local copy in its place — confirm with user first.",
+        },
+        folderConflictStrategy: {
+          type: "string",
+          enum: ["skip", "merge", "rename", "replace"],
+          description:
+            "'skip' leaves an existing remote folder unchanged (default). " +
+            "'merge' merges the uploaded folder's contents into the existing one. " +
+            "'rename' adds a unique suffix to the uploaded folder's name. " +
+            "'replace' trashes the remote folder and uploads the local copy in its place — confirm with user first.",
         },
       },
       required: ["localPath", "remotePath"],
@@ -173,7 +190,7 @@ const TOOLS = [
     description:
       "Download a file or folder from Proton Drive to the local filesystem. Requires authentication. " +
       "For folders, downloads recursively. " +
-      "conflictStrategy defaults to 'skip' — pass 'replace' to overwrite an existing local file, or 'keep-both' to save under a unique name. " +
+      "Conflict strategies are set separately for files and folders (CLI v0.8.0+) — both default to 'skip'. " +
       "Fails if the local parent directory does not exist. " +
       "Returns {downloaded} count. " +
       "Do not use to move files within Drive (use drive_move) or to read a small text file's contents (use drive_read_file if PROTON_DRIVE_SYNC_PATH is set).",
@@ -189,13 +206,22 @@ const TOOLS = [
           type: "string",
           description: "Absolute local destination path (must start with '/'). Parent directory must already exist.",
         },
-        conflictStrategy: {
+        fileConflictStrategy: {
           type: "string",
-          enum: ["skip", "replace", "keep-both"],
+          enum: ["skip", "rename", "remove"],
           description:
             "'skip' leaves an existing local file unchanged (default). " +
-            "'replace' overwrites it — confirm with user first. " +
-            "'keep-both' downloads under a unique name.",
+            "'rename' downloads under a unique name. " +
+            "'remove' deletes the local file and downloads the remote copy in its place — confirm with user first.",
+        },
+        folderConflictStrategy: {
+          type: "string",
+          enum: ["skip", "merge", "rename", "remove"],
+          description:
+            "'skip' leaves an existing local folder unchanged (default). " +
+            "'merge' merges the downloaded folder's contents into the existing one. " +
+            "'rename' downloads under a unique name. " +
+            "'remove' deletes the local folder and downloads the remote copy in its place — confirm with user first.",
         },
       },
       required: ["remotePath", "localPath"],
@@ -799,7 +825,7 @@ const TOOLS = [
     name: "photos_download",
     description:
       "Download one or more photos from Proton Photos (timeline, an album, or shared-with-me) to a local folder. Requires authentication. " +
-      "Multiple timeline photos can share the same filename — with conflictStrategy 'replace' or 'skip' only one copy survives locally; use 'keep-both' to keep all. " +
+      "Multiple timeline photos can share the same filename — with conflictStrategy 'remove' or 'skip' only one copy survives locally; use 'rename' to keep all. " +
       "Fails if any item fails to download. " +
       "Do not use for regular Drive files — use drive_download instead.",
     annotations: { openWorldHint: true },
@@ -817,8 +843,11 @@ const TOOLS = [
         },
         conflictStrategy: {
           type: "string",
-          enum: ["skip", "replace", "keep-both"],
-          description: "How to handle local filename collisions. Defaults to 'skip'.",
+          enum: ["skip", "rename", "remove"],
+          description:
+            "'skip' leaves an existing local file unchanged (default). " +
+            "'rename' downloads under a unique name. " +
+            "'remove' deletes the local file and downloads the remote copy in its place — confirm with user first.",
         },
       },
       required: ["photoPaths", "localFolder"],
@@ -830,7 +859,7 @@ const TOOLS = [
     description:
       "Upload one or more local photo or video files directly into your Proton Photos library (My Photos timeline). Requires authentication. " +
       "Non-photo/video files are silently skipped. Folders are recursed but flattened into My Photos — folder structure is not preserved. " +
-      "Never overwrites — duplicates (matched by name + content hash) resolve to 'keep-both' or 'skip' only. " +
+      "Never overwrites — duplicates (matched by name + content hash) resolve to 'rename' or 'skip' only. " +
       "Do not use for regular Drive files — use drive_upload instead.",
     annotations: { openWorldHint: true },
     inputSchema: {
@@ -843,8 +872,8 @@ const TOOLS = [
         },
         conflictStrategy: {
           type: "string",
-          enum: ["skip", "keep-both"],
-          description: "How to handle duplicate photos (matched by name + content hash). Defaults to 'skip'.",
+          enum: ["skip", "rename"],
+          description: "How to handle duplicate photos (matched by name + content hash). 'skip' leaves the existing photo unchanged (default); 'rename' uploads under a unique name.",
         },
       },
       required: ["localPaths"],
@@ -957,14 +986,19 @@ export async function main() {
         }
 
         case "drive_upload": {
-          const cs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
-          if (!["skip", "replace", "keep-both", "merge"].includes(cs)) {
-            return fail(`conflictStrategy must be skip, replace, keep-both, or merge`);
+          const fcs = typeof a.fileConflictStrategy === "string" ? a.fileConflictStrategy : "skip";
+          if (!["skip", "create-new-revision", "rename", "replace"].includes(fcs)) {
+            return fail(`fileConflictStrategy must be skip, create-new-revision, rename, or replace`);
+          }
+          const dcs2 = typeof a.folderConflictStrategy === "string" ? a.folderConflictStrategy : "skip";
+          if (!["skip", "merge", "rename", "replace"].includes(dcs2)) {
+            return fail(`folderConflictStrategy must be skip, merge, rename, or replace`);
           }
           const uploadResult = await drive.upload(
             validateLocalPath(a.localPath),
             validateRemotePath(a.remotePath),
-            cs as ConflictStrategy
+            fcs as FileConflictStrategy,
+            dcs2 as FolderConflictStrategy
           );
           if (uploadResult.failed > 0) {
             return fail(`Upload completed with ${uploadResult.failed} failed file(s). uploaded=${uploadResult.uploaded} skipped=${uploadResult.skipped}`);
@@ -973,14 +1007,19 @@ export async function main() {
         }
 
         case "drive_download": {
-          const dcs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
-          if (!["skip", "replace", "keep-both"].includes(dcs)) {
-            return fail(`conflictStrategy must be skip, replace, or keep-both`);
+          const fdcs = typeof a.fileConflictStrategy === "string" ? a.fileConflictStrategy : "skip";
+          if (!["skip", "rename", "remove"].includes(fdcs)) {
+            return fail(`fileConflictStrategy must be skip, rename, or remove`);
+          }
+          const fodcs = typeof a.folderConflictStrategy === "string" ? a.folderConflictStrategy : "skip";
+          if (!["skip", "merge", "rename", "remove"].includes(fodcs)) {
+            return fail(`folderConflictStrategy must be skip, merge, rename, or remove`);
           }
           return ok(await drive.download(
             validateRemotePath(a.remotePath),
             validateLocalPath(a.localPath),
-            dcs as "skip" | "replace" | "keep-both"
+            fdcs as FileDownloadConflictStrategy,
+            fodcs as FolderDownloadConflictStrategy
           ));
         }
 
@@ -1173,8 +1212,8 @@ export async function main() {
           const downloadPaths = a.photoPaths.map((p) => validateRemotePath(p));
           const downloadFolder = validateLocalPath(a.localFolder);
           const pdcs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
-          if (!["skip", "replace", "keep-both"].includes(pdcs)) return fail("conflictStrategy must be skip, replace, or keep-both");
-          const downloadSummary = await drive.photoDownload(downloadPaths, downloadFolder, pdcs as "skip" | "replace" | "keep-both");
+          if (!["skip", "rename", "remove"].includes(pdcs)) return fail("conflictStrategy must be skip, rename, or remove");
+          const downloadSummary = await drive.photoDownload(downloadPaths, downloadFolder, pdcs as PhotoDownloadConflictStrategy);
           if (downloadSummary.failedItems > 0) {
             return fail(`Download completed with ${downloadSummary.failedItems} failed item(s). transferred=${downloadSummary.transferredItems}`);
           }
@@ -1185,8 +1224,8 @@ export async function main() {
           if (!Array.isArray(a.localPaths) || a.localPaths.length === 0) return fail("localPaths must be a non-empty array of strings");
           const uploadPaths = a.localPaths.map((p) => validateLocalPath(p));
           const pucs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
-          if (!["skip", "keep-both"].includes(pucs)) return fail("conflictStrategy must be skip or keep-both");
-          const uploadSummary = await drive.photoUpload(uploadPaths, pucs as "skip" | "keep-both");
+          if (!["skip", "rename"].includes(pucs)) return fail("conflictStrategy must be skip or rename");
+          const uploadSummary = await drive.photoUpload(uploadPaths, pucs as PhotoUploadConflictStrategy);
           if (uploadSummary.failedItems > 0) {
             return fail(`Upload completed with ${uploadSummary.failedItems} failed item(s). transferred=${uploadSummary.transferredItems}`);
           }

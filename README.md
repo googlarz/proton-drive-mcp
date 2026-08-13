@@ -163,10 +163,10 @@ proton-drive-cli info /my-files/report.pdf       # full metadata, incl. revision
 proton-drive-cli mkdir /my-files/NewFolder
 
 proton-drive-cli upload ./report.pdf /my-files/Reports
-proton-drive-cli upload ./dist /my-files/Releases --conflict replace
+proton-drive-cli upload ./dist /my-files/Releases --file-conflict replace --folder-conflict merge
 
 proton-drive-cli download /my-files/report.pdf ./local/report.pdf
-proton-drive-cli download /my-files/Reports ./local/Reports --conflict keep-both
+proton-drive-cli download /my-files/Reports ./local/Reports --file-conflict rename --folder-conflict merge
 
 proton-drive-cli rename /my-files/old-name.pdf new-name.pdf   # in place, no move
 proton-drive-cli move /my-files/old-name.pdf /my-files/new-name.pdf
@@ -208,7 +208,7 @@ proton-drive-cli album update /albums/Summer2026 --name "Summer Trip"
 proton-drive-cli album add-photo /albums/Summer2026 /photos/IMG_001.jpg
 
 proton-drive-cli photo timeline
-proton-drive-cli photo download /photos/IMG_001.jpg ./local/photos --conflict keep-both
+proton-drive-cli photo download /photos/IMG_001.jpg ./local/photos --conflict rename
 proton-drive-cli photo upload ./camera-roll --conflict skip
 ```
 
@@ -216,7 +216,7 @@ proton-drive-cli photo upload ./camera-roll --conflict skip
 
 ```bash
 # Backup build output after CI
-proton-drive-cli upload ./dist /my-files/Releases/$(date +%Y-%m-%d) --conflict keep-both
+proton-drive-cli upload ./dist /my-files/Releases/$(date +%Y-%m-%d) --file-conflict rename --folder-conflict rename
 
 # Download all contracts for audit
 proton-drive-cli download /my-files/Contracts ./audit/contracts
@@ -268,8 +268,8 @@ proton-drive-cli share status /my-files/Projects
 | `drive_list` | List files and folders at a path | `path` |
 | `drive_info` | Get full metadata for one file/folder, including revision details | `path` |
 | `drive_mkdir` | Create a new empty folder | `path` |
-| `drive_upload` | Upload local file or folder | `localPath`, `remotePath`, `conflictStrategy` (skip/replace/keep-both/merge) |
-| `drive_download` | Download to local path | `remotePath`, `localPath`, `conflictStrategy` (skip/replace/keep-both) |
+| `drive_upload` | Upload local file or folder | `localPath`, `remotePath`, `fileConflictStrategy?` (skip/create-new-revision/rename/replace), `folderConflictStrategy?` (skip/merge/rename/replace) |
+| `drive_download` | Download to local path | `remotePath`, `localPath`, `fileConflictStrategy?` (skip/rename/remove), `folderConflictStrategy?` (skip/merge/rename/remove) |
 | `drive_rename` | Rename in place, no move | `path`, `newName` |
 | `drive_move` | Move and/or rename | `sourcePath`, `destinationPath` |
 | `drive_copy` | Copy file or folder to another Drive location | `sourcePath`, `destinationPath` |
@@ -298,8 +298,8 @@ proton-drive-cli share status /my-files/Projects
 | `photos_add_to_album` | Add a photo from your library to an album | `albumPath`, `photoPath` |
 | `photos_remove_from_album` | Remove a photo from an album (keeps it in library) ⚠️ | `albumPath`, `photoPath` |
 | `photos_list_timeline` | List photos in your full library timeline | `loadDetails?` |
-| `photos_download` | Download photos to a local folder | `photoPaths`, `localFolder`, `conflictStrategy?` (skip/replace/keep-both) |
-| `photos_upload` | Upload local files directly into your Photos library | `localPaths`, `conflictStrategy?` (skip/keep-both) |
+| `photos_download` | Download photos to a local folder | `photoPaths`, `localFolder`, `conflictStrategy?` (skip/rename/remove) |
+| `photos_upload` | Upload local files directly into your Photos library | `localPaths`, `conflictStrategy?` (skip/rename) |
 
 > ⚠️ **Destructive tools** require `confirmed: true`. Use `drive_list_trash` first so you know what will be deleted, then pass `confirmed: true` to proceed.
 

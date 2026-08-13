@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.29 — 2026-08-13
+
+Tracks the Proton Drive CLI v0.8.0 release, which reworked upload/download conflict strategies for clarity (per Proton's release notes: general terms like "overwrite" were leading to confusion, so strategies are now explicit and set separately per file/folder). Verified against the `cli/v0.8.0` tag — a full tree diff against `cli/v0.7.0` (what 1.0.27/1.0.28 were built against) confirmed this is the *only* functional change; every other command this package wraps is untouched.
+
+### Fixed — breaking upstream change, adapted
+- **`drive_upload`** — the CLI removed the unified `--conflict-strategy` flag entirely. It's now `fileConflictStrategy` (skip/create-new-revision/rename/replace) and `folderConflictStrategy` (skip/merge/rename/replace), set independently. `create-new-revision` is new — uploads as a new version of the existing file instead of forcing a choice between overwrite and skip.
+- **`drive_download`** — same split: `fileConflictStrategy` (skip/rename/remove) and `folderConflictStrategy` (skip/merge/rename/remove). `remove` replaces the old `replace`/`overwrite` naming — it deletes the local copy and downloads the remote one in its place.
+- **`photos_upload`** — flag name (`--conflict-strategy`) unchanged, but `keep-both` was renamed to `rename`; `merge` was never valid here (photos have no folder concept) and remains excluded.
+- **`photos_download`** — flag name unchanged; values changed from skip/replace/keep-both to skip/remove/rename (folder handling is auto-merged internally by the CLI, not user-settable, since a photo download's only folder is the root).
+
+### Unaffected
+`drive_version`'s plain-text output format is unchanged (verified against the new dedicated `version.ts`, which also added the "you're up to date" / update-available check — no parsing changes needed on this end). Every other tool — filesystem, trash, sharing, invitations, albums — calls commands untouched by v0.8.0.
+
 ## 1.0.28 — 2026-08-11
 
 Closes the last 2 gaps found in the full CLI command audit — every scriptable Proton Drive CLI command now has a matching tool.
