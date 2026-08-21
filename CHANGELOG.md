@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.31 — 2026-08-21
+
+A second, more skeptical pass over v1.0.30 — re-verified everything live rather than trusting the previous session's own reasoning, and tested the actual MCP JSON-RPC protocol layer directly (not just the `DriveService` class underneath it), plus recursive multi-file transfers.
+
+### Fixed
+- **`drive_download`'s tool description was misleading.** `localPath` is a destination *folder* — auto-created if missing, with the downloaded item placed inside it under its original remote name — not the file's exact final path. The old description said "must already exist," which is also simply false (confirmed live: the CLI creates it). An agent following the old description could reasonably expect a file at the literal `localPath` given and be confused to find a directory there instead.
+
+### Verified live, no bug found (ruling out a false alarm)
+- **`photos_upload`'s "non-photo files are silently skipped" claim is accurate.** An initial test using a `.jpg`-named text file *failed* rather than skipped — looked like a bug at first. Root cause: media-type detection is extension-based, so the mislabeled file was sniffed as `image/jpeg`, passed the photo-type check, and correctly failed at the actual upload stage since the content wasn't a valid image. A genuinely non-photo file (`.txt`) correctly produces `skippedItems: 1`, exactly as documented.
+- **The real MCP server (JSON-RPC over stdio), not just the CLI wrapper.** Sent actual `tools/call` protocol messages to the compiled server for `drive_list` and `drive_share_status` — both correct, matching the CLI-wrapper output exactly. (One `drive_list` call failed transiently on a rapid-fire multi-request batch; immediately reproducible as a one-off, not a code bug — retried clean.)
+- **Recursive folder upload/download** (nested subfolder, 3 files) — round-tripped correctly, structure preserved, transfer counts accurate.
+
+### Still not independently verified (disclosed, not swept under the rug)
+- `drive_list_invitations`'s field mapping — no pending invitation existed to test against; the fix is based on the SDK's TypeScript type definition, not an empirically observed response.
+- Any sharing operation requiring a second real account (`share_invite`, `share_revoke` against a real member, `invitation_accept`/`reject`, `share_leave`) — correctly not exercised against a real third party without their consent.
+- `drive_read_file`/`drive_write_file` (the `PROTON_DRIVE_SYNC_PATH`-gated tools) — not configured in this environment.
+- `drive_empty_trash` — deliberately not executed for real; the test account's actual Trash held real, unrelated user data that a live run would have destroyed.
+
 ## 1.0.30 — 2026-08-21
 
 **Root cause of this release:** every prior "verification" of this package (v1.0.24 through v1.0.29) diffed the CLI's *command source* against GitHub tags — confirming the right argv gets built — but never actually ran the CLI and inspected its *response* JSON. This release does that, live, against a real authenticated account. It found that several response-shape assumptions were wrong from day one, in ways no amount of source-reading would have caught, because the exact wire format (Result-wrapped names, nested fields, a CLI-side `undefined`-text quirk) isn't visible from the command classes — it only shows up in the actual output.

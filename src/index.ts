@@ -189,10 +189,11 @@ const TOOLS = [
     name: "drive_download",
     description:
       "Download a file or folder from Proton Drive to the local filesystem. Requires authentication. " +
+      "localPath is a destination FOLDER, not the file's exact final path — the CLI creates it automatically if missing and places the downloaded item inside it under its original remote name. " +
+      "E.g. downloading /my-files/report.pdf with localPath '/tmp/out' produces /tmp/out/report.pdf, not /tmp/out itself as a file — confirmed live against the real CLI (v0.8.0). " +
       "For folders, downloads recursively. " +
       "Conflict strategies are set separately for files and folders (CLI v0.8.0+) — both default to 'skip'. " +
-      "Fails if the local parent directory does not exist. " +
-      "Returns {downloaded} count. " +
+      "Returns {downloaded} count — not the actual local path; construct it as localPath + the remote item's basename if you need it. " +
       "Do not use to move files within Drive (use drive_move) or to read a small text file's contents (use drive_read_file if PROTON_DRIVE_SYNC_PATH is set).",
     annotations: { openWorldHint: true },
     inputSchema: {
@@ -204,7 +205,7 @@ const TOOLS = [
         },
         localPath: {
           type: "string",
-          description: "Absolute local destination path (must start with '/'). Parent directory must already exist.",
+          description: "Absolute local DESTINATION FOLDER (must start with '/'), not the file's final path. Created automatically if it doesn't exist. The downloaded item is placed inside it, keeping its original remote name.",
         },
         fileConflictStrategy: {
           type: "string",
