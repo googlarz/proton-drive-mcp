@@ -31,6 +31,33 @@ export type FolderDownloadConflictStrategy = "merge" | "rename" | "remove" | "sk
 export type PhotoUploadConflictStrategy = "rename" | "skip";
 export type PhotoDownloadConflictStrategy = "rename" | "remove" | "skip";
 
+// The SDK verifies the author of every name (and several other fields)
+// cryptographically and returns a `Result<string, Error>`-shaped object —
+// {ok:true, value:"name"} on success, {ok:false, error:{...}} if the
+// signature couldn't be verified — never a plain string. Confirmed live
+// against the CLI's `filesystem list`, `filesystem info`, `album list`,
+// `invitation list` output. A naive `String(item.name)` on this object
+// produces the literal text "[object Object]".
+function unwrapResult(value: unknown, fallback = ""): string {
+  if (value && typeof value === "object" && "ok" in value) {
+    const r = value as { ok: boolean; value?: unknown };
+    if (r.ok && typeof r.value === "string") return r.value;
+    return fallback;
+  }
+  return typeof value === "string" ? value : fallback;
+}
+
+// Strips "<package-name>@" and "+<hash>" from a version token like
+// "cli-drive@0.8.0+06e8c605", leaving "0.8.0". Falls back to the raw
+// token if it doesn't match, so an unexpected future format still shows
+// something rather than silently becoming "unknown".
+function extractSemver(token: string | undefined): string {
+  if (!token) return "unknown";
+  const afterAt = token.includes("@") ? token.slice(token.indexOf("@") + 1) : token;
+  const semverMatch = afterAt.match(/^(\d+\.\d+\.\d+)/);
+  return semverMatch ? semverMatch[1] : token;
+}
+
 export class DriveService {
   private readonly run: Runner;
   private readonly runRaw: RawRunner;
@@ -61,32 +88,43 @@ export class DriveService {
   }
 
   // `version` ignores --json entirely and always prints plain text:
-  //   Proton Drive CLI 1.2.3
-  //   Proton Drive SDK 4.5.6
+  //   Proton Drive CLI cli-drive@0.8.0+06e8c605
+  //   Proton Drive SDK js@0.21.0+06e8c605
   //   ...update-check line...
+  // Confirmed live: the token after "CLI"/"SDK" is <package-name>@<semver>+<hash>,
+  // not a bare semver — the CLI's own version.ts extracts semver the same way
+  // (slice after '@', match leading \d+.\d+.\d+) before comparing versions.
   async version(): Promise<DriveVersion> {
     const text = await this.runRaw(["version"]);
     const cliMatch = text.match(/Proton Drive CLI\s+(\S+)/);
     const sdkMatch = text.match(/Proton Drive SDK\s+(\S+)/);
     return {
-      cli: cliMatch ? cliMatch[1] : "unknown",
-      sdk: sdkMatch ? sdkMatch[1] : "unknown",
+      cli: extractSemver(cliMatch?.[1]),
+      sdk: extractSemver(sdkMatch?.[1]),
     };
   }
 
   // Filesystem
+  //
+  // The CLI's list output has no `path` field at all — only `uid`/`parentUid`.
+  // We compute a usable path by joining the listed folder with each item's
+  // (unwrapped) name; confirmed live that /parent/name round-trips correctly
+  // through the CLI's own name-based path resolver for every other command.
   async list(remotePath: string): Promise<DriveFile[]> {
     const result = await this.run(["filesystem", "list", remotePath]);
     if (result === null) return [];
     if (!Array.isArray(result)) throw new DriveParseError(`Expected array from list, got: ${JSON.stringify(result).slice(0, 100)}`);
-    return result.map((item: Record<string, unknown>) => ({
-      name: String(item.name ?? ""),
-      path: String(item.path ?? remotePath),
-      type: item.type === "folder" ? "folder" : "file",
-      size: typeof item.size === "number" ? item.size : undefined,
-      modifiedAt: typeof item.modifiedAt === "string" ? item.modifiedAt : undefined,
-      mimeType: typeof item.mimeType === "string" ? item.mimeType : undefined,
-    }));
+    return result.map((item: Record<string, unknown>) => {
+      const name = unwrapResult(item.name, "[unnamed]");
+      return {
+        name,
+        path: posixPath.join(remotePath, name),
+        type: item.type === "folder" || item.type === "album" ? "folder" : "file",
+        size: typeof item.totalStorageSize === "number" ? item.totalStorageSize : undefined,
+        modifiedAt: typeof item.modificationTime === "string" ? item.modificationTime : undefined,
+        mimeType: typeof item.mediaType === "string" ? item.mediaType : undefined,
+      };
+    });
   }
 
   async upload(
@@ -106,12 +144,16 @@ export class DriveService {
       folderConflictStrategy,
       "--skip-thumbnails",
     ]);
-    const r = (result ?? {}) as Record<string, unknown>;
+    // Real shape is TransferSummary: {transferredItems, transferredBytes,
+    // skippedItems, failedItems, failures}. Confirmed live — the old
+    // {uploaded, skipped, failed} field names never existed, so failures
+    // were silently reported as 0 regardless of what actually happened.
+    const summary = this.parseTransferSummary(result);
     return {
       path: remotePath,
-      uploaded: typeof r?.uploaded === "number" ? r.uploaded : 0,
-      skipped: typeof r?.skipped === "number" ? r.skipped : 0,
-      failed: typeof r?.failed === "number" ? r.failed : 0,
+      uploaded: summary.transferredItems,
+      skipped: summary.skippedItems,
+      failed: summary.failedItems,
     };
   }
 
@@ -126,11 +168,12 @@ export class DriveService {
       "--file-conflict-strategy", fileConflictStrategy,
       "--folder-conflict-strategy", folderConflictStrategy,
     ]);
-    const r = (result ?? {}) as Record<string, unknown>;
+    // Same real shape as upload — TransferSummary, not {downloaded}.
+    const summary = this.parseTransferSummary(result);
     return {
       path: remotePath,
       localPath,
-      downloaded: typeof r?.downloaded === "number" ? r.downloaded : 0,
+      downloaded: summary.transferredItems,
     };
   }
 
@@ -190,23 +233,31 @@ export class DriveService {
   }
 
   // Sharing
+  //
+  // Real shape is the SDK's ShareResult: {protonInvitations, nonProtonInvitations,
+  // members, urlAccess?, editorsCanShare} — confirmed live. There is no
+  // isShared/email/addedAt/shareUrl field; those were all wrong names.
+  // When nothing is shared, the CLI prints literal "undefined" (see
+  // subprocess.ts) which now resolves to `result === null` here.
   async shareStatus(remotePath: string): Promise<ShareStatus> {
     const result = await this.run(["sharing", "status", remotePath]);
-    if (result === null) throw new DriveParseError("sharing status returned empty response");
-    const r = result as Record<string, unknown>;
+    const r = (result ?? {}) as Record<string, unknown>;
     const VALID_ROLES = new Set(["viewer", "editor", "admin"]);
-    const members = Array.isArray(r?.members)
+    const members = Array.isArray(r.members)
       ? (r.members as Record<string, unknown>[]).map((m) => ({
-          email: String(m.email ?? ""),
+          email: String(m.inviteeEmail ?? ""),
           role: (VALID_ROLES.has(String(m.role)) ? String(m.role) : "viewer") as ShareRole,
-          addedAt: typeof m.addedAt === "string" ? m.addedAt : undefined,
+          addedAt: typeof m.invitationTime === "string" ? m.invitationTime : undefined,
         }))
       : [];
+    const protonInvitationCount = Array.isArray(r.protonInvitations) ? r.protonInvitations.length : 0;
+    const nonProtonInvitationCount = Array.isArray(r.nonProtonInvitations) ? r.nonProtonInvitations.length : 0;
+    const urlAccess = (r.urlAccess ?? undefined) as Record<string, unknown> | undefined;
     return {
       path: remotePath,
-      isShared: Boolean(r?.isShared ?? members.length > 0),
+      isShared: members.length > 0 || protonInvitationCount > 0 || nonProtonInvitationCount > 0 || !!urlAccess,
       members,
-      shareUrl: typeof r?.shareUrl === "string" ? r.shareUrl : undefined,
+      shareUrl: typeof urlAccess?.url === "string" ? urlAccess.url : undefined,
     };
   }
 
@@ -297,14 +348,14 @@ export class DriveService {
     if (!Array.isArray(result)) throw new DriveParseError(`Expected array from invitation list, got: ${JSON.stringify(result).slice(0, 100)}`);
     return result.map((item: Record<string, unknown>) => {
       const node = (item.node ?? {}) as Record<string, unknown>;
-      const nameVal = (node.name ?? {}) as Record<string, unknown>;
-      const nodeName = typeof nameVal.value === "string" ? nameVal.value : String(node.name ?? "");
+      // addedByEmail is also a verified Result<string,...>, same as name —
+      // confirmed via the SDK's Member type (client/js/src/interface/sharing.ts).
       return {
         uid: String(item.uid ?? ""),
         role: (["viewer", "editor", "admin"].includes(String(item.role)) ? String(item.role) : "viewer") as ShareRole,
-        invitedByEmail: String(item.addedByEmail ?? ""),
+        invitedByEmail: unwrapResult(item.addedByEmail),
         invitedAt: typeof item.invitationTime === "string" ? item.invitationTime : undefined,
-        nodeName,
+        nodeName: unwrapResult(node.name, "[unnamed]"),
         nodeType: node.type === "folder" ? "folder" : "file",
       };
     });
@@ -323,16 +374,23 @@ export class DriveService {
   }
 
   // Photos / Albums
+  //
+  // Albums are NodeEntity too — name needs the same {ok,value} unwrap as
+  // filesystem list(), and photoCount lives under a nested `album` object
+  // (`item.album.photoCount`), not top-level. Both confirmed live.
   async listAlbums(): Promise<Album[]> {
     const result = await this.run(["album", "list"]);
     if (result === null) return [];
     if (!Array.isArray(result)) throw new DriveParseError(`Expected array from album list, got: ${JSON.stringify(result).slice(0, 100)}`);
-    return result.map((item: Record<string, unknown>) => ({
-      name: String(item.name ?? ""),
-      photoCount: typeof item.photoCount === "number" ? item.photoCount : 0,
-      isShared: Boolean(item.isShared ?? false),
-      creationTime: typeof item.creationTime === "string" ? item.creationTime : undefined,
-    }));
+    return result.map((item: Record<string, unknown>) => {
+      const albumInfo = (item.album ?? {}) as Record<string, unknown>;
+      return {
+        name: unwrapResult(item.name, "[unnamed]"),
+        photoCount: typeof albumInfo.photoCount === "number" ? albumInfo.photoCount : 0,
+        isShared: Boolean(item.isShared ?? false),
+        creationTime: typeof item.creationTime === "string" ? item.creationTime : undefined,
+      };
+    });
   }
 
   async createAlbum(name: string): Promise<void> {

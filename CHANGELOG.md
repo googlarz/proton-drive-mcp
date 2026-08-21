@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.30 — 2026-08-21
+
+**Root cause of this release:** every prior "verification" of this package (v1.0.24 through v1.0.29) diffed the CLI's *command source* against GitHub tags — confirming the right argv gets built — but never actually ran the CLI and inspected its *response* JSON. This release does that, live, against a real authenticated account. It found that several response-shape assumptions were wrong from day one, in ways no amount of source-reading would have caught, because the exact wire format (Result-wrapped names, nested fields, a CLI-side `undefined`-text quirk) isn't visible from the command classes — it only shows up in the actual output.
+
+### Fixed — confirmed live against CLI v0.8.0 + a real Proton Drive account
+
+- **`drive_list` (and `drive_list_trash`, which reuses it) — most severe.** Every item's `name` rendered as the literal string `"[object Object]"`, and every item's `path` showed the *same* value (the parent folder) regardless of the actual file. Root cause: the CLI wraps `name` in a cryptographic-verification result (`{ok, value}`), not a plain string, and doesn't return a `path` field at all. Now unwraps the name correctly and computes the path by joining the listed folder with the (correct) name. Also fixed: `size` was always `undefined` (real field is `totalStorageSize`, not `size`), `modifiedAt` was always `undefined` (real field is `modificationTime`), `mimeType` was always `undefined` (real field is `mediaType`).
+- **`drive_share_status` — most severe.** Threw `DriveParseError` on any item with no sharing at all — extremely common — because the CLI prints the literal 5 characters `undefined` (not valid JSON) when there's no share record, and `JSON.parse("undefined")` throws. Fixed at the subprocess layer: that literal text is now treated the same as empty output. Also fixed, for the case where an item *is* shared: `members[].email` and `members[].addedAt` read from fields that don't exist (real names: `inviteeEmail`, `invitationTime`); `isShared` and `shareUrl` were read from fields that don't exist on the real `ShareResult` type at all (`shareUrl` is nested under `urlAccess.url`; `isShared` must be computed from whether any members/invitations/urlAccess exist).
+- **`drive_share_remove_url` — threw on success.** Same literal-`undefined` CLI quirk as above; a successful removal was reported as a parse error. Fixed by the same subprocess-layer change.
+- **`drive_upload` / `drive_download` — silently misreported failures.** Parsed `{uploaded, skipped, failed}`/`{downloaded}` field names that don't exist on the real response (`TransferSummary`: `transferredItems`, `transferredBytes`, `skippedItems`, `failedItems`). Because `failed`/`downloaded` always read as `0`, a genuinely failed upload or download could be reported as a full success — the worst kind of bug for these two tools. Now reads the real fields.
+- **`photos_list_albums`** — `name` had the same `{ok,value}` unwrap bug as `drive_list`. `photoCount` was always `0` regardless of how many photos an album actually had — real field is nested under `album.photoCount`, not top-level.
+- **`drive_list_invitations`** — `invitedByEmail` had the same unwrap bug (`addedByEmail` is also a verified `{ok,value}` result, not a plain string).
+- **`drive_version`** — returned the raw token straight from CLI output, e.g. `cli-drive@0.8.0+06e8c605`, instead of a clean `0.8.0`. Any comparison against a plain semver string would never match. Now strips the package-name prefix and build hash, the same way the CLI's own update-check does internally.
+
+### Verified correct, no change needed
+`drive_auth_status`, `drive_info`, `drive_rename`, `photos_list_timeline`, `photos_list_album_photos`, `photos_download`, `photos_upload`, `drive_share_set_url`, `drive_copy`, `drive_move` (including its move+rename composition), `drive_mkdir`, `drive_trash`/`restore`/`delete`/`empty_trash`, `photos_create_album`/`update_album`/`delete_album`/`add_to_album`/`remove_from_album` — all exercised live end-to-end (create → verify → clean up) against the real account, no discrepancies found.
+
+### Testing
+120 tests passing (up from 113). Every rewritten test now uses JSON fixtures captured verbatim from real CLI output, not hand-written guesses — the exact class of mistake that caused this release.
+
 ## 1.0.29 — 2026-08-13
 
 Tracks the Proton Drive CLI v0.8.0 release, which reworked upload/download conflict strategies for clarity (per Proton's release notes: general terms like "overwrite" were leading to confusion, so strategies are now explicit and set separately per file/folder). Verified against the `cli/v0.8.0` tag — a full tree diff against `cli/v0.7.0` (what 1.0.27/1.0.28 were built against) confirmed this is the *only* functional change; every other command this package wraps is untouched.

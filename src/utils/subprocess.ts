@@ -82,6 +82,16 @@ export async function runDrive(args: string[]): Promise<unknown> {
       return null;
     }
 
+    // Some commands (e.g. `sharing status`/`sharing remove-url` on an item
+    // with no share record) call the CLI's own printObject(undefined, true)
+    // helper, which does console.log(JSON.stringify(undefined)) — and
+    // JSON.stringify(undefined) is the JS value undefined, so console.log
+    // prints the literal 5 characters "undefined", not valid JSON. Confirmed
+    // live against the real CLI (v0.8.0). Treat it the same as empty stdout.
+    if (raw === "undefined") {
+      return null;
+    }
+
     try {
       return JSON.parse(raw);
     } catch {

@@ -97,6 +97,20 @@ describe("version", () => {
     assert.deepEqual(raw.lastCall(), ["version"]);
   });
 
+  it("strips the package-name prefix and build hash from the real CLI v0.8.0 format", async () => {
+    // Captured live: `proton-drive version` really prints
+    // "Proton Drive CLI cli-drive@0.8.0+06e8c605" — not a bare semver.
+    // The old code returned that whole token verbatim, which no caller
+    // comparing against a plain "0.8.0" would ever match.
+    const t = makeRunner();
+    const raw = makeRawRunner();
+    const drive = new DriveService(t.runner, raw.rawRunner);
+    raw.setText("Proton Drive CLI cli-drive@0.8.0+06e8c605\nProton Drive SDK js@0.21.0+06e8c605\nYou are running the latest version.\n");
+    const v = await drive.version();
+    assert.equal(v.cli, "0.8.0");
+    assert.equal(v.sdk, "0.21.0");
+  });
+
   it("returns unknown for both when output is empty", async () => {
     const t = makeRunner();
     const raw = makeRawRunner();
@@ -118,21 +132,56 @@ describe("version", () => {
 });
 
 // ─── Filesystem ───────────────────────────────────────────────────────────────
+// Fixtures below are captured verbatim from a real `proton-drive filesystem
+// list --json` call against a live CLI v0.8.0 + real account — NOT hand-written
+// guesses. The CLI wraps `name` in a verified Result ({ok,value}), has no
+// `path` field at all, and uses totalStorageSize/modificationTime/mediaType
+// instead of size/modifiedAt/mimeType. Every field name here was wrong before
+// this was live-tested; see CHANGELOG for the incident writeup.
 describe("list", () => {
-  it("returns parsed file list", async () => {
+  it("returns parsed file list using real CLI field names", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult([
-      { name: "report.pdf", path: "/my-files/report.pdf", type: "file", size: 1024 },
-      { name: "Archive", path: "/my-files/Archive", type: "folder" },
+      {
+        uid: "abc~1", name: { ok: true, value: "report.pdf" }, type: "file",
+        mediaType: "application/pdf", totalStorageSize: 1024,
+        modificationTime: "2026-03-17T12:27:11.000Z",
+      },
+      {
+        uid: "abc~2", name: { ok: true, value: "Archive" }, type: "folder",
+        modificationTime: "2026-03-12T08:27:26.000Z",
+      },
     ]);
     const files = await drive.list("/my-files");
     assert.equal(files.length, 2);
     assert.equal(files[0].name, "report.pdf");
+    assert.equal(files[0].path, "/my-files/report.pdf");
     assert.equal(files[0].type, "file");
     assert.equal(files[0].size, 1024);
+    assert.equal(files[0].mimeType, "application/pdf");
+    assert.equal(files[0].modifiedAt, "2026-03-17T12:27:11.000Z");
+    assert.equal(files[1].name, "Archive");
+    assert.equal(files[1].path, "/my-files/Archive");
     assert.equal(files[1].type, "folder");
     assert.deepEqual(t.lastCall(), ["filesystem", "list", "/my-files"]);
+  });
+
+  it("falls back to [unnamed] when the name Result failed verification", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([{ uid: "abc~3", name: { ok: false, error: { claimedAuthor: "x" } }, type: "file" }]);
+    const files = await drive.list("/my-files");
+    assert.equal(files[0].name, "[unnamed]");
+    assert.equal(files[0].path, "/my-files/[unnamed]");
+  });
+
+  it("treats album type as a folder", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([{ uid: "abc~4", name: { ok: true, value: "Vacation" }, type: "album" }]);
+    const files = await drive.list("/albums");
+    assert.equal(files[0].type, "folder");
   });
 
   it("returns empty array when CLI returns null", async () => {
@@ -165,11 +214,16 @@ describe("info", () => {
 // CLI v0.8.0 split the old unified --conflict-strategy into separate
 // --file-conflict-strategy / --folder-conflict-strategy flags with new
 // per-target value sets.
+// Real upload/download result shape is TransferSummary — confirmed live:
+// {transferredItems, transferredBytes, skippedItems, failedItems, failures}.
+// The old {uploaded,skipped,failed} field names never existed on the real
+// CLI response, so uploaded/failed always read as 0 regardless of outcome —
+// a genuine failure would silently report success.
 describe("upload", () => {
   it("uses skip for both file and folder conflict strategy by default", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ uploaded: 1, skipped: 0, failed: 0 });
+    t.setResult({ transferredItems: 1, transferredBytes: 51, skippedItems: 0, failedItems: 0, failures: [] });
     const result = await drive.upload("/local/report.pdf", "/my-files/Reports");
     assert.equal(result.uploaded, 1);
     assert.deepEqual(t.lastCall(), [
@@ -181,7 +235,7 @@ describe("upload", () => {
   it("passes custom file and folder conflict strategies", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ uploaded: 1, skipped: 0, failed: 0 });
+    t.setResult({ transferredItems: 1, skippedItems: 0, failedItems: 0 });
     await drive.upload("/local/file.txt", "/my-files", "create-new-revision", "merge");
     const call = t.lastCall();
     assert.ok(call.includes("create-new-revision"));
@@ -197,10 +251,10 @@ describe("upload", () => {
     assert.equal(result.failed, 0);
   });
 
-  it("reports failed count in result", async () => {
+  it("reports failed count in result using the real failedItems field", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ uploaded: 0, skipped: 0, failed: 2 });
+    t.setResult({ transferredItems: 0, skippedItems: 0, failedItems: 2 });
     const result = await drive.upload("/a", "/b");
     assert.equal(result.failed, 2);
   });
@@ -210,7 +264,7 @@ describe("download", () => {
   it("calls filesystem download with default skip conflict strategies and returns localPath", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ downloaded: 3 });
+    t.setResult({ transferredItems: 3, skippedItems: 0, failedItems: 0 });
     const result = await drive.download("/my-files/report.pdf", "/tmp/report.pdf");
     assert.equal(result.localPath, "/tmp/report.pdf");
     assert.equal(result.downloaded, 3);
@@ -223,7 +277,7 @@ describe("download", () => {
   it("passes custom file and folder conflict strategies", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ downloaded: 1 });
+    t.setResult({ transferredItems: 1 });
     await drive.download("/my-files/report.pdf", "/tmp/report.pdf", "remove", "merge");
     const call = t.lastCall();
     assert.ok(call.includes("remove"));
@@ -307,51 +361,65 @@ describe("delete", () => {
 });
 
 // ─── Sharing ──────────────────────────────────────────────────────────────────
+// Real shape is the SDK's ShareResult (confirmed live against CLI v0.8.0):
+// {protonInvitations, nonProtonInvitations, members, urlAccess?, editorsCanShare}.
+// There is no isShared/email/addedAt/shareUrl field — those were all wrong
+// names before this was live-tested. Members use inviteeEmail/invitationTime;
+// the public link lives nested under urlAccess.url, not a top-level shareUrl.
+// On an item with no share record at all, the CLI prints the literal text
+// "undefined" (not valid JSON) — subprocess.ts normalizes that to `null`,
+// which reaches here as `result === null`.
 describe("shareStatus", () => {
-  it("returns share status with members", async () => {
+  it("returns share status with members using real field names", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult({
-      isShared: true,
-      members: [{ email: "alice@pm.me", role: "editor" }],
-      shareUrl: "https://drive.proton.me/urls/abc123",
+      protonInvitations: [],
+      nonProtonInvitations: [],
+      members: [{ uid: "m1", inviteeEmail: "alice@pm.me", role: "editor", invitationTime: "2026-08-01T00:00:00.000Z" }],
+      urlAccess: { uid: "u1", url: "https://drive.proton.me/urls/abc123", role: "viewer", creationTime: "2026-08-01T00:00:00.000Z", numberOfInitializedDownloads: 0 },
+      editorsCanShare: false,
     });
     const status = await drive.shareStatus("/my-files/Reports");
     assert.equal(status.isShared, true);
     assert.equal(status.members.length, 1);
     assert.equal(status.members[0].email, "alice@pm.me");
+    assert.equal(status.members[0].addedAt, "2026-08-01T00:00:00.000Z");
     assert.equal(status.shareUrl, "https://drive.proton.me/urls/abc123");
     assert.deepEqual(t.lastCall(), ["sharing", "status", "/my-files/Reports"]);
   });
 
-  it("infers isShared=true from non-empty members list", async () => {
+  it("infers isShared=true from a non-empty members list with no urlAccess", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ members: [{ email: "bob@pm.me", role: "viewer" }] });
+    t.setResult({ protonInvitations: [], nonProtonInvitations: [], members: [{ inviteeEmail: "bob@pm.me", role: "viewer" }], editorsCanShare: false });
     const status = await drive.shareStatus("/my-files/Reports");
     assert.equal(status.isShared, true);
   });
 
-  it("returns not-shared with empty members", async () => {
+  it("infers isShared=true from pending protonInvitations alone", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ isShared: false, members: [] });
-    const status = await drive.shareStatus("/my-files/Private");
-    assert.equal(status.isShared, false);
+    t.setResult({ protonInvitations: [{ uid: "i1" }], nonProtonInvitations: [], members: [], editorsCanShare: false });
+    const status = await drive.shareStatus("/my-files/Reports");
+    assert.equal(status.isShared, true);
     assert.equal(status.members.length, 0);
   });
 
-  it("throws DriveParseError when CLI returns null", async () => {
+  it("returns not-shared when the CLI's literal 'undefined' text resolves to null", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult(null);
-    await assert.rejects(() => drive.shareStatus("/my-files/Reports"), { name: "DriveParseError" });
+    t.setResult(null); // subprocess.ts already normalizes the CLI's "undefined" stdout to null
+    const status = await drive.shareStatus("/my-files/Private");
+    assert.equal(status.isShared, false);
+    assert.equal(status.members.length, 0);
+    assert.equal(status.shareUrl, undefined);
   });
 
   it("coerces unknown role to viewer", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ isShared: true, members: [{ email: "x@pm.me", role: "superadmin" }] });
+    t.setResult({ protonInvitations: [], nonProtonInvitations: [], members: [{ inviteeEmail: "x@pm.me", role: "superadmin" }], editorsCanShare: false });
     const status = await drive.shareStatus("/my-files/Reports");
     assert.equal(status.members[0].role, "viewer");
   });
@@ -458,15 +526,17 @@ describe("shareRemoveUrl", () => {
 // The CLI has no top-level "trash" group — trash operations are subcommands
 // of "filesystem", and listing trash is just `filesystem list /trash`.
 describe("listTrash", () => {
-  it("returns parsed trash list via filesystem list /trash", async () => {
+  it("returns parsed trash list via filesystem list /trash, using real field names", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult([
-      { name: "old.pdf", path: "/trash/old.pdf", type: "file", size: 512 },
+      { uid: "abc~1", name: { ok: true, value: "old.pdf" }, type: "file", totalStorageSize: 512 },
     ]);
     const items = await drive.listTrash();
     assert.equal(items.length, 1);
     assert.equal(items[0].name, "old.pdf");
+    assert.equal(items[0].path, "/trash/old.pdf");
+    assert.equal(items[0].size, 512);
     assert.deepEqual(t.lastCall(), ["filesystem", "list", "/trash"]);
   });
 
@@ -483,6 +553,37 @@ describe("listTrash", () => {
     const drive = new DriveService(t.runner);
     t.setResult({ count: 0 });
     await assert.rejects(() => drive.listTrash(), { name: "DriveParseError" });
+  });
+});
+
+// addedByEmail is a verified Result<string,...> (same {ok,value} pattern as
+// node names), per the SDK's Member type — was never a plain string.
+describe("listInvitations", () => {
+  it("unwraps addedByEmail and node.name from their Result wrappers", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([
+      {
+        uid: "inv1",
+        role: "editor",
+        addedByEmail: { ok: true, value: "alice@pm.me" },
+        invitationTime: "2026-08-01T00:00:00.000Z",
+        node: { uid: "n1", name: { ok: true, value: "Reports" }, type: "folder" },
+      },
+    ]);
+    const invitations = await drive.listInvitations();
+    assert.equal(invitations.length, 1);
+    assert.equal(invitations[0].invitedByEmail, "alice@pm.me");
+    assert.equal(invitations[0].nodeName, "Reports");
+    assert.equal(invitations[0].nodeType, "folder");
+    assert.deepEqual(t.lastCall(), ["invitation", "list"]);
+  });
+
+  it("returns empty array when there are no pending invitations", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([]);
+    assert.deepEqual(await drive.listInvitations(), []);
   });
 });
 
@@ -517,6 +618,40 @@ describe("emptyTrash", () => {
 });
 
 // ─── Photos ───────────────────────────────────────────────────────────────────
+// Albums are NodeEntity too — name needs the same {ok,value} unwrap as
+// filesystem list(), and photoCount lives under a nested `album` object,
+// not top-level. Confirmed live: creating a real album and listing it back
+// showed `{..., album: {photoCount: 0, lastActivityTime: ...}}` — reading
+// `item.photoCount` directly always produced 0, even for non-empty albums.
+describe("listAlbums", () => {
+  it("unwraps name and reads photoCount from the nested album object", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([
+      {
+        uid: "alb1",
+        name: { ok: true, value: "Vacation 2026" },
+        type: "album",
+        isShared: false,
+        creationTime: "2026-08-21T08:43:54.000Z",
+        album: { photoCount: 12, lastActivityTime: "2026-08-21T08:43:54.000Z" },
+      },
+    ]);
+    const albums = await drive.listAlbums();
+    assert.equal(albums.length, 1);
+    assert.equal(albums[0].name, "Vacation 2026");
+    assert.equal(albums[0].photoCount, 12);
+    assert.equal(albums[0].isShared, false);
+  });
+
+  it("returns empty array when there are no albums", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([]);
+    assert.deepEqual(await drive.listAlbums(), []);
+  });
+});
+
 describe("updateAlbum", () => {
   it("passes --name when only renaming", async () => {
     const t = makeRunner();
