@@ -20,6 +20,12 @@ export interface ShareMember {
   email: string;
   role: ShareRole;
   addedAt?: string;
+  // "pending" covers both Proton and non-Proton invitations that haven't
+  // been accepted yet (e.g. inviting a Gmail address, which Proton files as
+  // a nonProtonInvitation rather than a member). Confirmed live: without
+  // this, a real invite to a non-Proton email was completely invisible —
+  // isShared reported true but members was empty.
+  status: "accepted" | "pending";
 }
 
 export type ShareRole = "viewer" | "editor" | "admin";

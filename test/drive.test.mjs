@@ -370,7 +370,7 @@ describe("delete", () => {
 // "undefined" (not valid JSON) — subprocess.ts normalizes that to `null`,
 // which reaches here as `result === null`.
 describe("shareStatus", () => {
-  it("returns share status with members using real field names", async () => {
+  it("returns share status with accepted members using real field names", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     t.setResult({
@@ -385,6 +385,7 @@ describe("shareStatus", () => {
     assert.equal(status.members.length, 1);
     assert.equal(status.members[0].email, "alice@pm.me");
     assert.equal(status.members[0].addedAt, "2026-08-01T00:00:00.000Z");
+    assert.equal(status.members[0].status, "accepted");
     assert.equal(status.shareUrl, "https://drive.proton.me/urls/abc123");
     assert.deepEqual(t.lastCall(), ["sharing", "status", "/my-files/Reports"]);
   });
@@ -397,13 +398,40 @@ describe("shareStatus", () => {
     assert.equal(status.isShared, true);
   });
 
-  it("infers isShared=true from pending protonInvitations alone", async () => {
+  // Fixture captured verbatim from a real invite: inviting a non-Proton
+  // address (a Gmail account) is filed under nonProtonInvitations, NOT
+  // members — reading only `members` made a real, successfully-sent
+  // invite completely invisible from this tool. protonInvitations follow
+  // the same merge for Proton-account invitees who haven't accepted yet.
+  it("merges pending nonProtonInvitations into members, tagged pending", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ protonInvitations: [{ uid: "i1" }], nonProtonInvitations: [], members: [], editorsCanShare: false });
+    t.setResult({
+      protonInvitations: [],
+      nonProtonInvitations: [{
+        uid: "8fmndxbc...", invitationTime: "2026-08-21T09:13:19.000Z",
+        addedByEmail: { ok: true, value: "dawid.piaskowski@proton.me" },
+        inviteeEmail: "googlarz@gmail.com", role: "viewer", state: "pending",
+      }],
+      members: [],
+      editorsCanShare: false,
+    });
     const status = await drive.shareStatus("/my-files/Reports");
     assert.equal(status.isShared, true);
-    assert.equal(status.members.length, 0);
+    assert.equal(status.members.length, 1);
+    assert.equal(status.members[0].email, "googlarz@gmail.com");
+    assert.equal(status.members[0].status, "pending");
+  });
+
+  it("merges pending protonInvitations into members, tagged pending", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ protonInvitations: [{ uid: "i1", inviteeEmail: "carol@proton.me", role: "editor" }], nonProtonInvitations: [], members: [], editorsCanShare: false });
+    const status = await drive.shareStatus("/my-files/Reports");
+    assert.equal(status.isShared, true);
+    assert.equal(status.members.length, 1);
+    assert.equal(status.members[0].email, "carol@proton.me");
+    assert.equal(status.members[0].status, "pending");
   });
 
   it("returns not-shared when the CLI's literal 'undefined' text resolves to null", async () => {

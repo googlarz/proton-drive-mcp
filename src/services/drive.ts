@@ -8,6 +8,7 @@ import type {
   DriveInvitation,
   DriveVersion,
   PublicLink,
+  ShareMember,
   ShareRole,
   ShareStatus,
   TransferSummary,
@@ -239,23 +240,30 @@ export class DriveService {
   // isShared/email/addedAt/shareUrl field; those were all wrong names.
   // When nothing is shared, the CLI prints literal "undefined" (see
   // subprocess.ts) which now resolves to `result === null` here.
+  //
+  // `members` merges all three sources (accepted members + both invitation
+  // kinds), each tagged accepted/pending. Confirmed live: inviting a
+  // non-Proton email (e.g. a Gmail address) files it under
+  // nonProtonInvitations, not members — reading only `members` made a real,
+  // successfully-sent invite completely invisible from this tool.
   async shareStatus(remotePath: string): Promise<ShareStatus> {
     const result = await this.run(["sharing", "status", remotePath]);
     const r = (result ?? {}) as Record<string, unknown>;
     const VALID_ROLES = new Set(["viewer", "editor", "admin"]);
-    const members = Array.isArray(r.members)
-      ? (r.members as Record<string, unknown>[]).map((m) => ({
-          email: String(m.inviteeEmail ?? ""),
-          role: (VALID_ROLES.has(String(m.role)) ? String(m.role) : "viewer") as ShareRole,
-          addedAt: typeof m.invitationTime === "string" ? m.invitationTime : undefined,
-        }))
-      : [];
-    const protonInvitationCount = Array.isArray(r.protonInvitations) ? r.protonInvitations.length : 0;
-    const nonProtonInvitationCount = Array.isArray(r.nonProtonInvitations) ? r.nonProtonInvitations.length : 0;
+    const toShareMember = (m: Record<string, unknown>, status: "accepted" | "pending"): ShareMember => ({
+      email: String(m.inviteeEmail ?? ""),
+      role: (VALID_ROLES.has(String(m.role)) ? String(m.role) : "viewer") as ShareRole,
+      addedAt: typeof m.invitationTime === "string" ? m.invitationTime : undefined,
+      status,
+    });
+    const accepted = Array.isArray(r.members) ? (r.members as Record<string, unknown>[]).map((m) => toShareMember(m, "accepted")) : [];
+    const protonPending = Array.isArray(r.protonInvitations) ? (r.protonInvitations as Record<string, unknown>[]).map((m) => toShareMember(m, "pending")) : [];
+    const nonProtonPending = Array.isArray(r.nonProtonInvitations) ? (r.nonProtonInvitations as Record<string, unknown>[]).map((m) => toShareMember(m, "pending")) : [];
+    const members = [...accepted, ...protonPending, ...nonProtonPending];
     const urlAccess = (r.urlAccess ?? undefined) as Record<string, unknown> | undefined;
     return {
       path: remotePath,
-      isShared: members.length > 0 || protonInvitationCount > 0 || nonProtonInvitationCount > 0 || !!urlAccess,
+      isShared: members.length > 0 || !!urlAccess,
       members,
       shareUrl: typeof urlAccess?.url === "string" ? urlAccess.url : undefined,
     };

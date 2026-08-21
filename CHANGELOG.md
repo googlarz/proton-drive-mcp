@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.32 — 2026-08-21
+
+Closed the last disclosed gap from v1.0.31 — tested `drive_share_invite` for real, against the user's own Gmail address, through the actual MCP JSON-RPC server. Found a real bug in the process.
+
+### Fixed
+- **`drive_share_status` only read the `members` field, ignoring `protonInvitations` and `nonProtonInvitations` entirely.** Confirmed live: inviting a non-Proton address (a Gmail account) is filed by the CLI under `nonProtonInvitations`, not `members` — so a real, successfully-sent invite was completely invisible from this tool. `isShared` correctly reported `true`, but `members` came back empty, giving zero visibility into who the item was actually shared with. `members` now merges accepted members with both pending-invitation sources, each entry tagged `status: "accepted" | "pending"` so callers can still tell them apart. `drive_share_revoke` was separately confirmed to correctly cancel a pending invitation, not just remove accepted access, so no fix was needed there.
+
+### Verified live (closing v1.0.31's disclosed gaps)
+- `drive_share_invite` — sent a real invitation via the actual MCP server (not just the CLI wrapper), to a real external email.
+- `drive_share_revoke` — confirmed it cancels a pending (not-yet-accepted) invitation as well as accepted access.
+
+### Still not independently verified
+- `drive_list_invitations`'s field mapping — still no real pending invitation exists from the *invitee's* side to test against (this release only tested from the inviter's side).
+- `invitation_accept`/`invitation_reject`, `share_leave` — require a second real account to be on the receiving end.
+- Sync-folder tools, `drive_empty_trash` — same reasons as v1.0.31.
+
 ## 1.0.31 — 2026-08-21
 
 A second, more skeptical pass over v1.0.30 — re-verified everything live rather than trusting the previous session's own reasoning, and tested the actual MCP JSON-RPC protocol layer directly (not just the `DriveService` class underneath it), plus recursive multi-file transfers.

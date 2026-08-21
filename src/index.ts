@@ -326,8 +326,9 @@ const TOOLS = [
     name: "drive_share_status",
     description:
       "Return the current sharing state of a Proton Drive path. Requires authentication. " +
-      "Returns {isShared: boolean, members: [{email, role, addedAt?}], shareUrl?}. " +
-      "Always call this before drive_share_invite (to avoid duplicate invitations) and before drive_share_revoke (to confirm the member email). " +
+      "Returns {isShared: boolean, members: [{email, role, addedAt?, status: 'accepted'|'pending'}], shareUrl?}. " +
+      "members includes both accepted access and pending invitations that haven't been accepted yet (including invites sent to non-Proton addresses, e.g. Gmail) — check the status field to tell them apart. " +
+      "Always call this before drive_share_invite (to avoid duplicate invitations) and before drive_share_revoke (to confirm the member email — revoke also cancels pending invitations, not just accepted access). " +
       "Do not call this to modify sharing — it is read-only.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
