@@ -29,12 +29,22 @@ export function validateMessage(message: unknown): string {
 }
 
 // For bare filename/name arguments passed as a positional CLI arg (not a
-// path) — e.g. rename's newName. Guards against flag injection the same way
-// validatePath/validateEmail/validateMessage do.
+// path) — e.g. rename's newName, album create/update's name. Guards against
+// flag injection the same way validatePath/validateEmail/validateMessage do.
+//
+// Also rejects '/': confirmed live that renaming a file to a name containing
+// '/' (e.g. "evil/nested.txt") succeeds on the CLI side, but the resulting
+// item's actual Drive name contains the slash literally — it is not two path
+// segments. Every other tool computes this item's path by joining parent +
+// name (see list()), producing a path that LOOKS like a nested folder but
+// isn't, and that path then fails to resolve ("Node not found") in every
+// other tool (info, download, move, delete, ...). The item becomes
+// unreachable except by listing its real parent and matching by prefix.
 export function validateName(name: unknown): string {
   const n = String(name ?? "").trim();
   if (!n) throw new Error("name must not be empty");
   if (n.startsWith("-")) throw new Error(`name must not start with '-': ${n}`);
+  if (n.includes("/")) throw new Error(`name must not contain '/': ${n}`);
   if (CONTROL_RE.test(n)) throw new Error("name contains control characters");
   return n;
 }

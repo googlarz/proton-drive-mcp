@@ -1160,15 +1160,16 @@ export async function main() {
 
         case "photos_create_album": {
           if (typeof a.name !== "string" || !a.name.trim()) return fail("name must be a non-empty string");
-          await drive.createAlbum(a.name.trim());
-          return ok({ message: `Album created: ${a.name.trim()}` });
+          const albumName = validateName(a.name);
+          await drive.createAlbum(albumName);
+          return ok({ message: `Album created: ${albumName}` });
         }
 
         case "photos_update_album": {
           const updateAlbumPath = validateRemotePath(a.albumPath);
           if (!updateAlbumPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
-          const newName = typeof a.name === "string" && a.name.trim() ? a.name.trim() : undefined;
-          const coverPhotoUid = typeof a.coverPhotoUid === "string" && a.coverPhotoUid.trim() ? a.coverPhotoUid.trim() : undefined;
+          const newName = typeof a.name === "string" && a.name.trim() ? validateName(a.name) : undefined;
+          const coverPhotoUid = typeof a.coverPhotoUid === "string" && a.coverPhotoUid.trim() ? validateName(a.coverPhotoUid) : undefined;
           if (!newName && !coverPhotoUid) return fail("At least one of name or coverPhotoUid must be provided");
           await drive.updateAlbum(updateAlbumPath, newName, coverPhotoUid);
           return ok({ message: `Album updated: ${updateAlbumPath}` });

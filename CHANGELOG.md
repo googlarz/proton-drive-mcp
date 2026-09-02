@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.33 — 2026-09-02
+
+A full skeptical re-read of every source file (`drive.ts`, `index.ts`, `cli.ts`, `subprocess.ts`, `validation.ts`, `syncfs.ts`, `errors.ts`, `logger.ts`) plus live testing of every candidate finding. 7 real, confirmed bugs — every one reproduced live before being called a bug, and every fix re-verified live afterward, through both the MCP JSON-RPC protocol and the companion CLI.
+
+### Fixed
+- **`validateName()` didn't reject `/`.** Confirmed live: renaming a file to a name containing `/` (e.g. `"evil/nested.txt"`) succeeded on the CLI side, but the resulting item's real Drive name literally contains the slash — it is not two path segments. `drive_list`'s path is computed by joining parent + name, so it then looks like a nested folder that doesn't exist; every other tool (`drive_info`, `drive_download`, `drive_move`, `drive_delete`, ...) fails with "Node not found" on that path, and the item becomes unreachable except by re-listing its real parent. `validateName()` now rejects `/` anywhere in the name.
+- **`photos_create_album` had no flag-injection protection at all**, in both the MCP tool and the CLI (`album create <name>`) — unlike every other user-typed name/path/email in this codebase, it was never run through a validator. Confirmed live: `album create "--help"` was misparsed as a CLI flag by the underlying binary, producing a confusing parse error instead of a clean rejection. Now validated with `validateName()`.
+- **`photos_update_album`'s `--name` and `--cover-photo-uid` had the same gap**, in both the MCP tool and the CLI (`album update`). Same fix.
+- **Large `drive_copy`/`drive_move` operations could be killed mid-flight.** The extended 30-minute timeout was only applied to `upload`/`download`; `copy`/`move` on a large folder tree — which can take just as long, re-encrypting or re-sharing many files server-side — got only the 60-second default and would be `SIGKILL`'d if it ran long, potentially leaving Drive in a partially-copied/moved state. `copy` and `move` now get the same extended timeout.
+
+### Investigated, confirmed NOT bugs (avoided introducing a regression)
+- `photos_download` was missing a `/photos/`-only path check that its sibling tools (`photos_add_to_album` etc.) have. Checked the CLI source first: `photo download` explicitly supports `/photos/`, `/albums/`, and `/photos-shared-with-me/` roots (`SUPPORTED_REMOTE_PATH_TYPES`). Adding the restriction would have been a regression, not a fix — left as-is.
+- Suspected `photos_add_to_album`/`remove_from_album`'s `/photos/`-only restriction was too narrow, since the underlying CLI command imposes no path-type restriction at all. Tested live: a compound `/albums/<name>/<photo>` path does **not** actually resolve through the CLI's path resolver — the existing restriction is correct as shipped.
+- Suspected the MCP-mode logger (stdout vs. stderr gating via `PROTON_DRIVE_MCP=1`) could leak a stray `console.log` into the JSON-RPC stream under some import order. Traced the actual call graph: `logger` is only ever used from within `index.ts`'s own functions, and the env var is set at that same module's top level before those functions can be invoked — the ordering is guaranteed correct by construction, not a bug.
+
+### Testing
+122 tests passing (was 121).
+
 ## 1.0.32 — 2026-08-21
 
 Closed the last disclosed gap from v1.0.31 — tested `drive_share_invite` for real, against the user's own Gmail address, through the actual MCP JSON-RPC server. Found a real bug in the process.

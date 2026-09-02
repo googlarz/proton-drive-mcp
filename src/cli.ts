@@ -351,18 +351,28 @@ async function run() {
       if (sub === "list" || sub === "ls") {
         print(await drive.listAlbums());
       } else if (sub === "create") {
-        const albumName = rest[0];
-        if (!albumName) { console.error("Usage: album create <name>"); process.exit(1); }
+        const rawAlbumName = rest[0];
+        if (!rawAlbumName) { console.error("Usage: album create <name>"); process.exit(1); return; }
+        let albumName: string;
+        try { albumName = validateName(rawAlbumName); }
+        catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
         await drive.createAlbum(albumName);
         console.log(`Album created: ${albumName}`);
       } else if (sub === "update") {
         const albumPath = requirePath(rest[0], "album update <path> [--name] [--cover-photo-uid]");
-        const newName = getFlag("--name");
-        const coverPhotoUid = getFlag("--cover-photo-uid");
-        if (!newName && !coverPhotoUid) {
+        const rawNewName = getFlag("--name");
+        const rawCoverPhotoUid = getFlag("--cover-photo-uid");
+        if (!rawNewName && !rawCoverPhotoUid) {
           console.error("Usage: album update <path> [--name <name>] [--cover-photo-uid <uid>] (at least one required)");
           process.exit(1);
+          return;
         }
+        let newName: string | undefined;
+        let coverPhotoUid: string | undefined;
+        try {
+          newName = rawNewName ? validateName(rawNewName) : undefined;
+          coverPhotoUid = rawCoverPhotoUid ? validateName(rawCoverPhotoUid) : undefined;
+        } catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
         await drive.updateAlbum(albumPath, newName, coverPhotoUid);
         console.log(`Album updated: ${albumPath}`);
       } else if (sub === "delete") {

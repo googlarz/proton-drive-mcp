@@ -955,6 +955,17 @@ describe("validateName", () => {
     assert.throws(() => validateName("--conflict-strategy"), /must not start with '-'/);
   });
 
+  // Confirmed live: renaming a file to a name containing '/' (e.g.
+  // "evil/nested.txt") succeeds on the CLI side, but the resulting item's
+  // real Drive name literally contains the slash. Every other tool computes
+  // this item's path by joining parent + name, producing a path that looks
+  // like a nested folder but isn't — and that path then fails to resolve
+  // ("Node not found") in every other tool. The item becomes unreachable.
+  it("throws on '/' anywhere in the name", () => {
+    assert.throws(() => validateName("evil/nested.txt"), /must not contain '\/'/);
+    assert.throws(() => validateName("a/b/c"), /must not contain '\/'/);
+  });
+
   it("throws on control characters", () => {
     assert.throws(() => validateName("evil\x00name"), /control characters/);
   });

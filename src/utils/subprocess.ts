@@ -9,7 +9,12 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 // Upload and download transfer actual file bytes — use a much longer timeout.
 const TRANSFER_TIMEOUT_MS = 30 * 60_000; // 30 minutes
 
-const TRANSFER_COMMANDS = new Set(["upload", "download"]);
+// copy/move can process large folder trees server-side (re-encrypting or
+// re-sharing many files), just like upload/download — they need the same
+// extended timeout. Previously only upload/download got it; a large
+// drive_copy or drive_move would be SIGKILL'd after the 60s default,
+// potentially leaving Drive in a partially-copied/moved state.
+const TRANSFER_COMMANDS = new Set(["upload", "download", "copy", "move"]);
 const TRANSFER_GROUPS = new Set(["filesystem", "photo"]);
 
 function timeoutFor(args: string[]): number {
