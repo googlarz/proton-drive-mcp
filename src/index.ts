@@ -26,7 +26,7 @@ import {
   DriveNotAuthenticatedError,
   DriveParseError,
 } from "./utils/errors.js";
-import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName } from "./utils/validation.js";
+import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
 import { getSyncRoot, readSyncFile, writeSyncFile } from "./utils/syncfs.js";
 
@@ -193,7 +193,7 @@ const TOOLS = [
       "E.g. downloading /my-files/report.pdf with localPath '/tmp/out' produces /tmp/out/report.pdf, not /tmp/out itself as a file — confirmed live against the real CLI (v0.8.0). " +
       "For folders, downloads recursively. " +
       "Conflict strategies are set separately for files and folders (CLI v0.8.0+) — both default to 'skip'. " +
-      "Returns {downloaded} count — not the actual local path; construct it as localPath + the remote item's basename if you need it. " +
+      "Returns {downloaded, skipped, failed} counts — not the actual local path; construct it as localPath + the remote item's basename if you need it. Fails the call if any file failed to download. " +
       "Do not use to move files within Drive (use drive_move) or to read a small text file's contents (use drive_read_file if PROTON_DRIVE_SYNC_PATH is set).",
     annotations: { openWorldHint: true },
     inputSchema: {
@@ -808,7 +808,7 @@ const TOOLS = [
     name: "photos_list_timeline",
     description:
       "List photos in your Proton Photos timeline (your full photo library, not scoped to an album). Requires authentication. " +
-      "Returns [{nodeUid}] by default — pass loadDetails=true for full node metadata (slower; buffers the whole list in memory first). " +
+      "Returns [{nodeUid}] by default — pass loadDetails=true for [{nodeUid, name, mediaType, creationTime, totalStorageSize, captureTime, tags}] (slower; buffers the whole list in memory first). " +
       "Use photos_download to download items by path, or photos_add_to_album to add them to an album.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
@@ -1017,12 +1017,16 @@ export async function main() {
           if (!["skip", "merge", "rename", "remove"].includes(fodcs)) {
             return fail(`folderConflictStrategy must be skip, merge, rename, or remove`);
           }
-          return ok(await drive.download(
+          const downloadResult = await drive.download(
             validateRemotePath(a.remotePath),
             validateLocalPath(a.localPath),
             fdcs as FileDownloadConflictStrategy,
             fodcs as FolderDownloadConflictStrategy
-          ));
+          );
+          if (downloadResult.failed > 0) {
+            return fail(`Download completed with ${downloadResult.failed} failed file(s). downloaded=${downloadResult.downloaded} skipped=${downloadResult.skipped}`);
+          }
+          return ok(downloadResult);
         }
 
         case "drive_rename": {
@@ -1114,13 +1118,15 @@ export async function main() {
 
         case "drive_invitation_accept": {
           if (typeof a.uid !== "string" || !a.uid) return fail("uid must be a non-empty string");
-          await drive.invitationAccept(a.uid);
+          const acceptUid = validateFlagValue(a.uid, "uid");
+          await drive.invitationAccept(acceptUid);
           return ok({ message: "Invitation accepted." });
         }
 
         case "drive_invitation_reject": {
           if (typeof a.uid !== "string" || !a.uid) return fail("uid must be a non-empty string");
-          await drive.invitationReject(a.uid);
+          const rejectUid = validateFlagValue(a.uid, "uid");
+          await drive.invitationReject(rejectUid);
           return ok({ message: "Invitation rejected." });
         }
 
@@ -1134,8 +1140,8 @@ export async function main() {
           const setUrlPath = validateRemotePath(a.path);
           const role = typeof a.role === "string" ? a.role : "viewer";
           if (!["viewer", "editor"].includes(role)) return fail("role must be viewer or editor");
-          const password = typeof a.password === "string" ? a.password : undefined;
-          const expiration = typeof a.expiration === "string" ? a.expiration : undefined;
+          const password = typeof a.password === "string" && a.password ? validateFlagValue(a.password, "password") : undefined;
+          const expiration = typeof a.expiration === "string" && a.expiration ? validateFlagValue(a.expiration, "expiration") : undefined;
           const link = await drive.shareSetUrl(setUrlPath, role as "viewer" | "editor", password, expiration);
           return ok(link);
         }
@@ -1238,16 +1244,18 @@ export async function main() {
         case "drive_read_file": {
           const syncRoot = getSyncRoot();
           if (!syncRoot) return fail("PROTON_DRIVE_SYNC_PATH is not set. Set it to the root of your Proton Drive sync folder.");
-          const content = await readSyncFile(syncRoot, validateRemotePath(a.path));
-          return ok({ path: a.path, content });
+          const readPath = validateRemotePath(a.path);
+          const content = await readSyncFile(syncRoot, readPath);
+          return ok({ path: readPath, content });
         }
 
         case "drive_write_file": {
           const syncRoot = getSyncRoot();
           if (!syncRoot) return fail("PROTON_DRIVE_SYNC_PATH is not set. Set it to the root of your Proton Drive sync folder.");
           if (typeof a.content !== "string") return fail("content must be a string");
-          await writeSyncFile(syncRoot, validateRemotePath(a.path), a.content);
-          return ok({ message: `Written: ${a.path}` });
+          const writePath = validateRemotePath(a.path);
+          await writeSyncFile(syncRoot, writePath, a.content);
+          return ok({ message: `Written: ${writePath}` });
         }
 
         default:

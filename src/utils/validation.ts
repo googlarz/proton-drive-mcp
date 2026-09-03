@@ -49,6 +49,18 @@ export function validateName(name: unknown): string {
   return n;
 }
 
+// Guards a value passed to a bare CLI flag (e.g. --password, --expiration)
+// against flag injection — confirmed live: `sharing set-url --password "-x"`
+// makes the real CLI's arg parser treat "-x" as an unknown flag and print
+// usage instead of setting the password. Unlike validateName, allows '/'
+// since these aren't Drive item names.
+export function validateFlagValue(value: unknown, label: string): string {
+  const v = String(value ?? "").trim();
+  if (v.startsWith("-")) throw new Error(`${label} must not start with '-': ${v}`);
+  if (CONTROL_RE.test(v)) throw new Error(`${label} contains control characters`);
+  return v;
+}
+
 export function validateLocalPath(path: unknown): string {
   const p = validatePath(path);
   if (!isAbsolute(p)) throw new Error(`local path must be absolute: ${p}`);

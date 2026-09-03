@@ -41,6 +41,8 @@ export interface DownloadResult {
   path: string;
   localPath: string;
   downloaded: number;
+  skipped: number;
+  failed: number;
 }
 
 export interface AuthStatus {
@@ -70,6 +72,13 @@ export interface Album {
 
 export interface AlbumPhoto {
   nodeUid: string;
+  // Populated only when photos_list_timeline is called with loadDetails=true.
+  name?: string;
+  mediaType?: string;
+  creationTime?: string;
+  totalStorageSize?: number;
+  captureTime?: string;
+  tags?: unknown[];
 }
 
 export interface PublicLink {

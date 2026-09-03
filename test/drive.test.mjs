@@ -7,7 +7,7 @@ import {
   DriveNotAuthenticatedError,
   DriveParseError,
 } from "../dist/utils/errors.js";
-import { validatePath, validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName } from "../dist/utils/validation.js";
+import { validatePath, validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "../dist/utils/validation.js";
 import { checkCliAvailable } from "../dist/utils/subprocess.js";
 
 // ─── Test runner factory ──────────────────────────────────────────────────────
@@ -198,6 +198,15 @@ describe("list", () => {
     t.setResult({ files: [] });
     await assert.rejects(() => drive.list("/my-files"), { name: "DriveParseError" });
   });
+
+  it("escapes a literal '/' in an item's name when building its path — confirmed live: an unescaped path fails to resolve in every other tool", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([{ uid: "abc~5", name: { ok: true, value: "raw/slash" }, type: "folder" }]);
+    const files = await drive.list("/my-files");
+    assert.equal(files[0].name, "raw/slash");
+    assert.equal(files[0].path, "/my-files/raw\\/slash");
+  });
 });
 
 describe("info", () => {
@@ -228,7 +237,7 @@ describe("upload", () => {
     assert.equal(result.uploaded, 1);
     assert.deepEqual(t.lastCall(), [
       "filesystem", "upload", "/local/report.pdf", "/my-files/Reports",
-      "--file-conflict-strategy", "skip", "--folder-conflict-strategy", "skip", "--skip-thumbnails",
+      "--file-conflict-strategy", "skip", "--folder-conflict-strategy", "skip",
     ]);
   });
 
@@ -282,6 +291,15 @@ describe("download", () => {
     const call = t.lastCall();
     assert.ok(call.includes("remove"));
     assert.ok(call.includes("merge"));
+  });
+
+  it("reports skipped and failed counts using the real TransferSummary fields — previously dropped entirely", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ transferredItems: 1, skippedItems: 2, failedItems: 3 });
+    const result = await drive.download("/my-files/report.pdf", "/tmp/report.pdf");
+    assert.equal(result.skipped, 2);
+    assert.equal(result.failed, 3);
   });
 });
 
@@ -731,6 +749,27 @@ describe("photoTimeline", () => {
     const photos = await drive.photoTimeline(false);
     assert.deepEqual(photos, []);
   });
+
+  it("extracts full metadata from --load-details node objects, not just nodeUid", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([{
+      uid: "n1",
+      name: { ok: true, value: "IMG_0001.jpg" },
+      mediaType: "image/jpeg",
+      creationTime: "2026-03-15T08:59:04.000Z",
+      totalStorageSize: 1180238,
+      photo: { captureTime: "2026-03-08T07:09:58.000Z", tags: [1] },
+    }]);
+    const [photo] = await drive.photoTimeline(true);
+    assert.equal(photo.nodeUid, "n1");
+    assert.equal(photo.name, "IMG_0001.jpg");
+    assert.equal(photo.mediaType, "image/jpeg");
+    assert.equal(photo.creationTime, "2026-03-15T08:59:04.000Z");
+    assert.equal(photo.totalStorageSize, 1180238);
+    assert.equal(photo.captureTime, "2026-03-08T07:09:58.000Z");
+    assert.deepEqual(photo.tags, [1]);
+  });
 });
 
 describe("photoDownload", () => {
@@ -935,6 +974,25 @@ describe("validateEmail", () => {
 
   it("throws on control characters", () => {
     assert.throws(() => validateEmail("user\x00@example.com"), /control characters/);
+  });
+});
+
+// ─── validateFlagValue ────────────────────────────────────────────────────────
+describe("validateFlagValue", () => {
+  it("returns the value unchanged when valid", () => {
+    assert.equal(validateFlagValue("s3cret", "password"), "s3cret");
+  });
+
+  it("trims whitespace", () => {
+    assert.equal(validateFlagValue("  2026-06-06  ", "expiration"), "2026-06-06");
+  });
+
+  it("throws on leading dash (flag injection) — confirmed live against the real CLI", () => {
+    assert.throws(() => validateFlagValue("-x", "password"), /password must not start with '-'/);
+  });
+
+  it("throws on control characters", () => {
+    assert.throws(() => validateFlagValue("s3\x00cret", "password"), /control characters/);
   });
 });
 

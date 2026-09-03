@@ -19,7 +19,7 @@ import {
 } from "./services/drive.js";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./utils/errors.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
-import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName } from "./utils/validation.js";
+import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 
 const drive = new DriveService();
 const args = process.argv.slice(2);
@@ -279,8 +279,10 @@ async function run() {
           console.error(`Invalid --role value: ${roleRaw}. Must be viewer or editor.`);
           process.exit(1);
         }
-        const password = getFlag("--password");
-        const expiration = getFlag("--expiration");
+        const rawPassword = getFlag("--password");
+        const rawExpiration = getFlag("--expiration");
+        const password = rawPassword ? validateFlagValue(rawPassword, "password") : undefined;
+        const expiration = rawExpiration ? validateFlagValue(rawExpiration, "expiration") : undefined;
         print(await drive.shareSetUrl(setUrlPath, roleRaw as "viewer" | "editor", password, expiration));
       } else if (sub === "remove-url") {
         const removeUrlPath = requirePath(rest[0], "share remove-url <path>");
@@ -332,13 +334,19 @@ async function run() {
       if (sub === "list" || sub === "ls") {
         print(await drive.listInvitations());
       } else if (sub === "accept") {
-        const acceptUid = rest[0];
-        if (!acceptUid) { console.error("Usage: invitation accept <uid>"); process.exit(1); }
+        const rawAcceptUid = rest[0];
+        if (!rawAcceptUid) { console.error("Usage: invitation accept <uid>"); process.exit(1); }
+        let acceptUid: string;
+        try { acceptUid = validateFlagValue(rawAcceptUid, "uid"); }
+        catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
         await drive.invitationAccept(acceptUid);
         console.log("Invitation accepted.");
       } else if (sub === "reject") {
-        const rejectUid = rest[0];
-        if (!rejectUid) { console.error("Usage: invitation reject <uid>"); process.exit(1); }
+        const rawRejectUid = rest[0];
+        if (!rawRejectUid) { console.error("Usage: invitation reject <uid>"); process.exit(1); }
+        let rejectUid: string;
+        try { rejectUid = validateFlagValue(rawRejectUid, "uid"); }
+        catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
         await drive.invitationReject(rejectUid);
         console.log("Invitation rejected.");
       } else {

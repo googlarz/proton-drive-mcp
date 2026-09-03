@@ -48,6 +48,19 @@ function unwrapResult(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
+// The CLI's own path syntax requires escaping a literal '/' inside a node
+// name with a backslash (confirmed in `filesystem info --help`: "Escape /
+// in node names with a backslash"). Our own validateName() rejects '/' in
+// names WE create, but an item created by any other Proton Drive client
+// (web, desktop, mobile) can still have a literal '/' in its name. Confirmed
+// live: naively joining such a name into a path ("/parent/raw/slash") makes
+// every path-based tool (info, download, move, rename, delete, ...) fail
+// with "Node not found", while the correctly escaped form ("/parent/raw\/slash")
+// resolves. list() must escape names before building the path it returns.
+function escapeNameForPath(name: string): string {
+  return name.replace(/\//g, "\\/");
+}
+
 // Strips "<package-name>@" and "+<hash>" from a version token like
 // "cli-drive@0.8.0+06e8c605", leaving "0.8.0". Falls back to the raw
 // token if it doesn't match, so an unexpected future format still shows
@@ -119,7 +132,7 @@ export class DriveService {
       const name = unwrapResult(item.name, "[unnamed]");
       return {
         name,
-        path: posixPath.join(remotePath, name),
+        path: posixPath.join(remotePath, escapeNameForPath(name)),
         type: item.type === "folder" || item.type === "album" ? "folder" : "file",
         size: typeof item.totalStorageSize === "number" ? item.totalStorageSize : undefined,
         modifiedAt: typeof item.modificationTime === "string" ? item.modificationTime : undefined,
@@ -143,7 +156,6 @@ export class DriveService {
       fileConflictStrategy,
       "--folder-conflict-strategy",
       folderConflictStrategy,
-      "--skip-thumbnails",
     ]);
     // Real shape is TransferSummary: {transferredItems, transferredBytes,
     // skippedItems, failedItems, failures}. Confirmed live — the old
@@ -169,12 +181,17 @@ export class DriveService {
       "--file-conflict-strategy", fileConflictStrategy,
       "--folder-conflict-strategy", folderConflictStrategy,
     ]);
-    // Same real shape as upload — TransferSummary, not {downloaded}.
+    // Same real shape as upload — TransferSummary, not {downloaded}. Previously
+    // this dropped skippedItems/failedItems entirely, and the MCP dispatch
+    // never checked for partial failure the way drive_upload's does — a
+    // download where some files failed silently reported success.
     const summary = this.parseTransferSummary(result);
     return {
       path: remotePath,
       localPath,
       downloaded: summary.transferredItems,
+      skipped: summary.skippedItems,
+      failed: summary.failedItems,
     };
   }
 
@@ -444,9 +461,24 @@ export class DriveService {
     const result = await this.run(args);
     if (result === null) return [];
     if (!Array.isArray(result)) throw new DriveParseError(`Expected array from photo timeline, got: ${JSON.stringify(result).slice(0, 100)}`);
-    return result.map((item: Record<string, unknown>) => ({
-      nodeUid: String(item.nodeUid ?? item.uid ?? ""),
-    }));
+    // Without --load-details the CLI returns {nodeUid, captureTime, tags}.
+    // With --load-details it returns full node objects ({uid, name, mediaType,
+    // creationTime, totalStorageSize, photo: {captureTime, tags}, ...}) —
+    // confirmed live. Previously this always extracted only nodeUid, so
+    // loadDetails=true paid the CLI's slower buffered call for nothing: the
+    // "full node metadata" the tool description promises was thrown away.
+    return result.map((item: Record<string, unknown>) => {
+      const photo = (item.photo ?? {}) as Record<string, unknown>;
+      return {
+        nodeUid: String(item.nodeUid ?? item.uid ?? ""),
+        name: item.name !== undefined ? unwrapResult(item.name) || undefined : undefined,
+        mediaType: typeof item.mediaType === "string" ? item.mediaType : undefined,
+        creationTime: typeof item.creationTime === "string" ? item.creationTime : undefined,
+        totalStorageSize: typeof item.totalStorageSize === "number" ? item.totalStorageSize : undefined,
+        captureTime: typeof (item.captureTime ?? photo.captureTime) === "string" ? (item.captureTime ?? photo.captureTime) as string : undefined,
+        tags: Array.isArray(item.tags ?? photo.tags) ? (item.tags ?? photo.tags) as unknown[] : undefined,
+      };
+    });
   }
 
   async photoDownload(
