@@ -61,6 +61,27 @@ function escapeNameForPath(name: string): string {
   return name.replace(/\//g, "\\/");
 }
 
+// filesystem move/copy/trash/restore/delete all accept multiple paths in one
+// call and report per-item success as an array of {uid, ok, error} — NOT via
+// a non-zero exit code. Confirmed live: a name collision at the destination
+// makes `filesystem move`/`filesystem copy` exit 0 with
+// [{ok:false, error:{name:"NodeWithSameNameExistsValidationError", ...}}].
+// Every one of these wrappers previously discarded the result outright, so a
+// collision was silently reported as success. Worst case was move(): it then
+// went on to rename whatever OTHER item happened to already be sitting at the
+// computed destination path — silently renaming an unrelated file while the
+// real source never moved.
+function assertItemsOk(result: unknown, action: string): void {
+  if (!Array.isArray(result)) return;
+  for (const item of result as Record<string, unknown>[]) {
+    if (item && item.ok === false) {
+      const err = (item.error ?? {}) as Record<string, unknown>;
+      const code = typeof err.code !== "undefined" ? ` (code ${err.code})` : "";
+      throw new Error(`${action} failed: ${err.name ?? "unknown error"}${code} — likely a name collision at the destination.`);
+    }
+  }
+}
+
 // Strips "<package-name>@" and "+<hash>" from a version token like
 // "cli-drive@0.8.0+06e8c605", leaving "0.8.0". Falls back to the raw
 // token if it doesn't match, so an unexpected future format still shows
@@ -235,7 +256,8 @@ export class DriveService {
       return;
     }
 
-    await this.run(["filesystem", "move", sourcePath, dstParent]);
+    const moveResult = await this.run(["filesystem", "move", sourcePath, dstParent]);
+    assertItemsOk(moveResult, "Move");
 
     if (srcName !== dstName) {
       const movedPath = posixPath.join(dstParent, srcName);
@@ -247,7 +269,7 @@ export class DriveService {
   // /trash or /photos-trash (the CLI rejects live paths). No --confirm flag
   // exists on the CLI side; our own confirmed-gate lives in the MCP layer.
   async delete(remotePath: string): Promise<void> {
-    await this.run(["filesystem", "delete", remotePath]);
+    assertItemsOk(await this.run(["filesystem", "delete", remotePath]), "Delete");
   }
 
   // Sharing
@@ -352,11 +374,11 @@ export class DriveService {
   }
 
   async trash(remotePath: string): Promise<void> {
-    await this.run(["filesystem", "trash", remotePath]);
+    assertItemsOk(await this.run(["filesystem", "trash", remotePath]), "Trash");
   }
 
   async restore(remotePath: string): Promise<void> {
-    await this.run(["filesystem", "restore", remotePath]);
+    assertItemsOk(await this.run(["filesystem", "restore", remotePath]), "Restore");
   }
 
   async emptyTrash(): Promise<void> {
@@ -364,7 +386,7 @@ export class DriveService {
   }
 
   async copy(remoteSrc: string, remoteDst: string): Promise<void> {
-    await this.run(["filesystem", "copy", remoteSrc, remoteDst]);
+    assertItemsOk(await this.run(["filesystem", "copy", remoteSrc, remoteDst]), "Copy");
   }
 
   async listInvitations(): Promise<DriveInvitation[]> {

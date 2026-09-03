@@ -366,6 +366,37 @@ describe("move", () => {
     await drive.move("/my-files/same.pdf", "/my-files/same.pdf");
     assert.equal(t.calls.length, 0);
   });
+
+  it("throws and does NOT proceed to rename when the destination has a name collision — confirmed live: filesystem move exits 0 with [{ok:false,error:...}] on collision, which previously went undetected and renamed whatever unrelated item was already sitting at the computed path", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([{ uid: "n1", ok: false, error: { name: "NodeWithSameNameExistsValidationError", code: 2500 } }]);
+    await assert.rejects(
+      () => drive.move("/my-files/old.pdf", "/my-files/Archive/new.pdf"),
+      /Move failed: NodeWithSameNameExistsValidationError/
+    );
+    assert.equal(t.calls.length, 1, "must not proceed to the rename step after a failed move");
+  });
+});
+
+describe("copy", () => {
+  it("succeeds when the destination has no collision", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([{ uid: "n1", ok: true }]);
+    await drive.copy("/my-files/report.pdf", "/my-files/Archive");
+    assert.deepEqual(t.lastCall(), ["filesystem", "copy", "/my-files/report.pdf", "/my-files/Archive"]);
+  });
+
+  it("throws on a name collision at the destination — confirmed live: filesystem copy exits 0 with [{ok:false,error:...}], previously discarded and reported as a false success", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult([{ uid: "n1", ok: false, error: { name: "NodeWithSameNameExistsValidationError", code: 2500 } }]);
+    await assert.rejects(
+      () => drive.copy("/my-files/report.pdf", "/my-files/Archive"),
+      /Copy failed: NodeWithSameNameExistsValidationError/
+    );
+  });
 });
 
 describe("delete", () => {

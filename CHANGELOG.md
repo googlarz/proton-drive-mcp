@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.35 — 2026-09-03
+
+Continued the live-testing bug sweep. This round found a serious silent-data-corruption bug in `drive_move`, confirmed by a full live reproduction against the real account, plus the same root cause in `drive_copy`. The same fix hardens three more structurally identical code paths (`trash`, `restore`, `delete`) against the same failure mode.
+
+### Fixed
+- **`drive_move` could silently rename the WRONG file and report false success**, when moving across folders into a destination that already has an item with the same name. Root cause confirmed live: `filesystem move` exits **0** with `[{ok:false, error:{name:"NodeWithSameNameExistsValidationError", ...}}]` on a name collision — not a non-zero exit code. `move()`'s cross-folder composition (`move` the item, then `rename` it) discarded this result entirely, assumed the move always succeeded, and blindly renamed *whatever item happened to already exist* at the computed destination path — which, on a collision, was the pre-existing unrelated file, not the one that was supposed to move. Reproduced the full scenario live: source file stayed in its original folder, untouched, while a completely different file in the destination folder got silently renamed, and the tool reported "Moved: ..." success throughout. Now `move()` checks the result and fails cleanly with a clear error instead of proceeding.
+- **`drive_copy` reported false success on the same kind of destination-name collision.** Same root cause, confirmed live the same way (`filesystem copy` also returns `[{ok:false, ...}]` with exit 0) — `copy()` discarded the result and unconditionally reported success. Now checked the same way.
+- **Same defensive check added to `trash`, `restore`, and `delete`**, which share the identical CLI response shape (all support batch operation via `path...` and report per-item `{uid, ok, error}` results) — hardening them against the same silent-failure class even though a live collision wasn't independently reproduced for each.
+
 ## 1.0.34 — 2026-09-03
 
 Continued the live-testing bug sweep from v1.0.33. 7 more real, confirmed bugs across two rounds — every one reproduced live against the real Proton Drive CLI and account before being called a bug, and every fix re-verified live afterward.
