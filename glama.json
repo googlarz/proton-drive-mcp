@@ -1,5 +1,8 @@
 {
-  "$schema": "https://glama.ai/mcp/schemas/glama.json",
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "maintainers": [
+    "googlarz"
+  ],
   "name": "proton-drive-mcp",
   "description": "MCP server and CLI that gives Claude full access to Proton Drive — upload, download, share, and manage your end-to-end encrypted files without leaving the conversation.",
   "icon": "https://proton.me/favicon.ico",
