@@ -7,6 +7,9 @@ export interface DriveFile {
   size?: number;
   modifiedAt?: string;
   mimeType?: string;
+  // Only set for trash listings, where names are not unique.
+  uid?: string;
+  trashedAt?: string;
 }
 
 export interface ShareStatus {
@@ -14,6 +17,10 @@ export interface ShareStatus {
   isShared: boolean;
   members: ShareMember[];
   shareUrl?: string;
+  // Whether the public link has a password (never the password itself) / expiry.
+  sharePasswordProtected?: boolean;
+  shareUrlExpiresAt?: string;
+  editorsCanShare?: boolean;
 }
 
 export interface ShareMember {
@@ -64,6 +71,7 @@ export interface DriveInvitation {
 }
 
 export interface Album {
+  uid?: string;
   name: string;
   photoCount: number;
   isShared: boolean;
@@ -85,6 +93,7 @@ export interface PublicLink {
   url?: string;
   role?: ShareRole;
   expirationTime?: string;
+  warning?: string;
 }
 
 export interface TransferSummary {

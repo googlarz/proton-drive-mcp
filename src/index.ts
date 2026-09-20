@@ -19,7 +19,7 @@ import {
   type PhotoDownloadConflictStrategy,
 } from "./services/drive.js";
 import { isMainModule } from "./utils/isMainModule.js";
-import { checkCliAvailable } from "./utils/subprocess.js";
+import { checkCliAvailable, callContext, killAllChildren } from "./utils/subprocess.js";
 import {
   DriveCliNotFoundError,
   DriveCliError,
@@ -28,7 +28,7 @@ import {
 } from "./utils/errors.js";
 import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
-import { getSyncRoot, readSyncFile, writeSyncFile } from "./utils/syncfs.js";
+import { getSyncRoot, readSyncFile, writeSyncFile, syncFileExists } from "./utils/syncfs.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version?: string };
@@ -43,7 +43,7 @@ type ToolResult = {
 
 function ok(data: unknown): ToolResult {
   return {
-    content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+    content: [{ type: "text", text: JSON.stringify(data) }],
   };
 }
 
@@ -65,6 +65,58 @@ function handleError(err: unknown): ToolResult {
   if (err instanceof DriveParseError) return fail(`Parse error: ${err.message}`);
   if (err instanceof Error) return fail(truncate(err.message));
   return fail(`Unexpected error: ${truncate(String(err))}`);
+}
+
+// Outward-facing / destructive tools refuse to run without an explicit
+// confirmed=true, so a prompt-injected or careless agent cannot trigger them in
+// a single call. Mirrors the CLI's --confirm flags.
+function needConfirm(a: Record<string, unknown>, tool: string, action: string): ToolResult | undefined {
+  if (a.confirmed === true) return undefined;
+  return fail(`${tool} ${action} Describe this to the user, get their explicit OK, then call again with confirmed=true.`);
+}
+
+function paginate<T>(all: T[], a: Record<string, unknown>, defaultLimit: number) {
+  const limit = typeof a.limit === "number" ? a.limit : defaultLimit;
+  const offset = typeof a.offset === "number" ? a.offset : 0;
+  const items = all.slice(offset, offset + limit);
+  return { total: all.length, offset, limit, hasMore: offset + items.length < all.length, items };
+}
+
+type JsonSchemaProp = { type?: string; enum?: readonly unknown[]; items?: { type?: string }; minimum?: number; maximum?: number };
+type ToolDef = {
+  name: string;
+  description: string;
+  inputSchema: { type: string; properties: Record<string, JsonSchemaProp>; required?: readonly string[]; additionalProperties?: boolean };
+  annotations?: Record<string, boolean>;
+};
+
+// The schemas advertise additionalProperties:false, but nothing enforced it, and
+// String() coercion let e.g. an array pass as a path. Enforce the declared schema.
+function checkArgs(def: ToolDef, a: Record<string, unknown>): string | undefined {
+  const props = def.inputSchema.properties;
+  for (const k of Object.keys(a)) {
+    if (!(k in props)) return `Unknown argument '${k}'. Allowed: ${Object.keys(props).join(", ") || "(none)"}.`;
+  }
+  for (const k of def.inputSchema.required ?? []) {
+    if (a[k] === undefined || a[k] === null) return `Missing required argument '${k}'.`;
+  }
+  for (const [k, v] of Object.entries(a)) {
+    const p = props[k];
+    if (v === undefined || v === null || !p) continue;
+    if (p.type === "string" && typeof v !== "string") return `${k} must be a string.`;
+    if (p.type === "boolean" && typeof v !== "boolean") return `${k} must be a boolean.`;
+    if (p.type === "integer") {
+      if (typeof v !== "number" || !Number.isInteger(v)) return `${k} must be an integer.`;
+      if (p.minimum !== undefined && v < p.minimum) return `${k} must be >= ${p.minimum}.`;
+      if (p.maximum !== undefined && v > p.maximum) return `${k} must be <= ${p.maximum}.`;
+    }
+    if (p.type === "array") {
+      if (!Array.isArray(v)) return `${k} must be an array.`;
+      if (p.items?.type === "string" && v.some((x) => typeof x !== "string")) return `${k} must be an array of strings.`;
+    }
+    if (p.enum && !p.enum.includes(v)) return `${k} must be one of: ${p.enum.join(", ")}.`;
+  }
+  return undefined;
 }
 
 const TOOLS = [
@@ -104,7 +156,7 @@ const TOOLS = [
     name: "drive_list",
     description:
       "List the immediate children of a Proton Drive folder. Requires authentication. " +
-      "Returns [{name, path, type ('file'|'folder'), size?, modifiedAt?, mimeType?}]. " +
+      "Returns {items, total, offset, limit, hasMore} (default limit 200); items are [{name, path, type ('file'|'folder'), size?, modifiedAt?, mimeType?}]. Listing '/' returns the top-level roots. " +
       "Not recursive — one directory level only. " +
       "Use before drive_upload to confirm the destination exists, or before drive_download to verify the remote path. " +
       "Do not use to list trash — use drive_list_trash instead.",
@@ -125,7 +177,7 @@ const TOOLS = [
     name: "drive_info",
     description:
       "Get full metadata for a single Proton Drive file or folder, including latest revision details. Requires authentication. " +
-      "Returns the raw CLI node object — richer than drive_list's trimmed per-item fields, but its exact shape is not guaranteed. " +
+      "Returns the node with verification wrappers unwrapped and duplicate/noise fields dropped (pass verbose=true for the raw CLI node, whose exact shape is not guaranteed). " +
       "Use when you need details drive_list doesn't return (e.g. revision info) for one specific known path. " +
       "Do not use to enumerate a folder's children — use drive_list instead.",
     annotations: { readOnlyHint: true, idempotentHint: true },
@@ -347,7 +399,7 @@ const TOOLS = [
     name: "drive_list_trash",
     description:
       "List all files and folders currently in the Proton Drive trash. Requires authentication. " +
-      "Returns [{name, path, type, size?, modifiedAt?}]. " +
+      "Returns {items, total, offset, limit, hasMore} (default limit 100, newest first when the CLI reports trash times); items are [{name, path, type, size?, modifiedAt?, uid, trashedAt?}]. Names are NOT unique in trash — two items can share one path; use uid to tell them apart. " +
       "Use before drive_restore to find a trashed item's exact path, or before drive_empty_trash to show the user what will be permanently deleted. " +
       "Do not use to list active (non-trashed) files — use drive_list instead.",
     annotations: { readOnlyHint: true, idempotentHint: true },
@@ -394,7 +446,7 @@ const TOOLS = [
       "Remove a specific person's access to a Proton Drive file or folder. Requires authentication. " +
       "The revoked user receives no notification. " +
       "Always call drive_share_status first to confirm the email and current role before revoking. " +
-      "To revoke all members, call this once per member listed by drive_share_status. " +
+      "Fails if the address is not a current member or pending invitee (matched case-insensitively). To remove everyone at once use drive_share_remove_all. " +
       "Do not use to modify a role — revoke and re-invite with the new role instead.",
     annotations: { destructiveHint: true },
     inputSchema: {
@@ -480,6 +532,7 @@ const TOOLS = [
     description:
       "Copy a file or folder to another location on Proton Drive. Requires authentication. " +
       "The original is preserved — this is not a move. " +
+      "destinationPath is the target PARENT folder (unlike drive_move, which takes a full new path). Pass newName to copy under a different name — required to duplicate an item inside its own folder. " +
       "Use drive_move when you want to relocate without keeping the original. " +
       "Do not use to duplicate large folder trees without user awareness of the storage cost.",
     annotations: { destructiveHint: false, idempotentHint: false },
@@ -575,8 +628,8 @@ const TOOLS = [
     description:
       "Create or update a public share link for a Proton Drive file or folder. Requires authentication. " +
       "Anyone with the link can access the item at the given role — no invitation or Proton account required. " +
-      "Calling this again on the same path updates the existing link's role/password/expiration rather than creating a duplicate. " +
-      "Returns {url?, role?, expirationTime?} — the exact shape depends on the CLI/SDK response and fields may be absent. " +
+      "Calling this again on the same path REPLACES the existing link's settings (same URL): omitting password/expiration removes them, and the result then carries a warning. Expiration can be at most ~90 days out. " +
+      "Returns {url?, role?, expirationTime?, warning?} — the exact shape depends on the CLI/SDK response and fields may be absent. " +
       "The password, if set, is passed as a CLI argument and will appear in shell history/process list on the machine running this server. " +
       "Do not use for private sharing with specific people — use drive_share_invite instead.",
     annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -709,7 +762,7 @@ const TOOLS = [
     description:
       "Delete a Proton Photos album. Requires authentication and confirmed=true. " +
       "By default refuses to delete an album that still contains photos — pass force=true to override. " +
-      "By default photos are removed from the album but kept in your timeline — pass save=true to explicitly preserve them in your timeline before deleting. " +
+      "Photos live in your timeline independently of albums. save maps to the CLI's --save option (its exact effect is undocumented upstream) — leave it off unless the user asks. " +
       "albumPath must start with /albums/. " +
       "Always show the user the album name and photo count (from photos_list_albums) before calling.",
     annotations: { destructiveHint: true },
@@ -741,7 +794,7 @@ const TOOLS = [
     name: "photos_list_album_photos",
     description:
       "List the photos in a Proton Photos album. Requires authentication. " +
-      "Returns [{nodeUid}] — photo node UIDs. " +
+      "Returns {items, total, offset, limit, hasMore} (default limit 100); items are [{nodeUid}], or with loadDetails=true also name, mediaType, sizes, captureTime and tags. " +
       "albumPath must start with /albums/. " +
       "To add or remove photos, use their Drive path under /photos/ (not the nodeUid).",
     annotations: { readOnlyHint: true, idempotentHint: true },
@@ -808,7 +861,7 @@ const TOOLS = [
     name: "photos_list_timeline",
     description:
       "List photos in your Proton Photos timeline (your full photo library, not scoped to an album). Requires authentication. " +
-      "Returns [{nodeUid}] by default — pass loadDetails=true for [{nodeUid, name, mediaType, creationTime, totalStorageSize, captureTime, tags}] (slower; buffers the whole list in memory first). " +
+      "Returns {items, total, offset, limit, hasMore} (default limit 50, newest first); items are [{nodeUid, captureTime, tags}], or with loadDetails=true also {name, mediaType, creationTime, totalStorageSize} (about 50% more tokens). " +
       "Use photos_download to download items by path, or photos_add_to_album to add them to an album.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
@@ -907,11 +960,11 @@ const TOOLS = [
   {
     name: "drive_write_file",
     description:
-      "Write text content to a file in the local Proton Drive sync folder. Requires authentication. " +
+      "Write text content to a file in the local Proton Drive sync folder (no Proton login needed — this only touches the local synced folder). " +
       "Requires the PROTON_DRIVE_SYNC_PATH environment variable to point to the sync folder root. " +
       "The Proton Drive desktop app must be running to sync the written file to the cloud. " +
       "Creates parent directories locally if they do not exist. " +
-      "Overwrites the file if it already exists — confirm with the user before overwriting. " +
+      "Refuses to overwrite an existing file unless confirmed=true — ask the user first. Content is limited to 5 MB. " +
       "Do not use for binary content or files that need to be uploaded without the desktop app running — use drive_upload instead.",
     annotations: { destructiveHint: true, openWorldHint: true },
     inputSchema: {
@@ -932,17 +985,56 @@ const TOOLS = [
   },
 ] as const;
 
-export async function main() {
-  // Warn if the CLI is missing but don't exit — the server must start so MCP
-  // hosts can introspect tools. Individual tool calls will return a clear error.
-  const cliCheck = await checkCliAvailable();
-  if (!cliCheck.available) {
-    const msg = cliCheck.reason === "not_executable"
-      ? "proton-drive CLI found but not executable. Run: chmod +x $(which proton-drive)"
-      : "proton-drive CLI not found. Download from https://proton.me/download/drive/cli/index.html";
-    logger.error(msg);
-  }
+// ---- Tool surface: derived from TOOLS so the literal stays readable ----------
+const CONFIRM_ALWAYS = new Set([
+  "drive_auth_logout", "drive_share_invite", "drive_share_revoke", "drive_share_set_url",
+  "drive_share_remove_url", "drive_share_leave", "drive_invitation_reject", "photos_remove_from_album",
+]);
+const CONFIRM_CONDITIONAL: Record<string, string> = {
+  drive_upload: "when fileConflictStrategy or folderConflictStrategy is 'replace' (it trashes the existing remote item)",
+  drive_download: "when fileConflictStrategy or folderConflictStrategy is 'remove' (it deletes the existing LOCAL file or folder)",
+  photos_download: "when conflictStrategy is 'remove' (it deletes the existing LOCAL file)",
+  drive_write_file: "when the file already exists (it would be overwritten)",
+};
+const PAGE_DEFAULTS: Record<string, number> = { drive_list: 200, drive_list_trash: 100, photos_list_timeline: 50, photos_list_album_photos: 100 };
+const EXTRA_PROPS: Record<string, Record<string, JsonSchemaProp & { description: string }>> = {
+  drive_info: { verbose: { type: "boolean", description: "Return the raw CLI node instead of the trimmed one (default false)." } },
+  drive_copy: { newName: { type: "string", description: "Optional name for the copy (CLI --name). Required to copy an item into its own folder." } },
+  photos_list_album_photos: { loadDetails: { type: "boolean", description: "Include name, mediaType, sizes, captureTime and tags (default false)." } },
+};
+const ANNOTATION_OVERRIDES: Record<string, Record<string, boolean>> = {
+  drive_share_set_url: { destructiveHint: true },
+  drive_upload: { destructiveHint: true },
+  drive_download: { destructiveHint: true },
+  photos_download: { destructiveHint: true },
+  drive_read_file: { idempotentHint: true },
+};
 
+const TOOL_DEFS: ToolDef[] = TOOLS.map((t) => {
+  const base = t as unknown as ToolDef;
+  const properties: Record<string, JsonSchemaProp & { description?: string }> = { ...base.inputSchema.properties, ...(EXTRA_PROPS[base.name] ?? {}) };
+  let description = base.description;
+  if (base.name in PAGE_DEFAULTS) {
+    properties.limit = { type: "integer", minimum: 1, maximum: 1000, description: `Max items to return (default ${PAGE_DEFAULTS[base.name]}).` };
+    properties.offset = { type: "integer", minimum: 0, description: "Number of items to skip (default 0)." };
+  }
+  const confirmedProp = { type: "boolean", description: "Must be true. Only set after the user explicitly approved this exact action." };
+  if (CONFIRM_ALWAYS.has(base.name)) {
+    properties.confirmed = confirmedProp;
+    description += " Requires confirmed=true — describe the action to the user and get their explicit OK first.";
+  } else if (CONFIRM_CONDITIONAL[base.name]) {
+    properties.confirmed = confirmedProp;
+    description += ` Also requires confirmed=true ${CONFIRM_CONDITIONAL[base.name]}.`;
+  }
+  return {
+    ...base,
+    description,
+    inputSchema: { ...base.inputSchema, properties },
+    annotations: { ...(base.annotations ?? {}), ...(ANNOTATION_OVERRIDES[base.name] ?? {}) },
+  };
+});
+
+export async function main() {
   const drive = new DriveService();
 
   const server = new Server(
@@ -951,35 +1043,46 @@ export async function main() {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOLS.map((t) => ({
+    tools: TOOL_DEFS.map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
-      annotations: (t as { annotations?: Record<string, boolean> }).annotations,
+      annotations: t.annotations,
     })),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  const handleCall = async (req: { params: { name: string; arguments?: Record<string, unknown> } }): Promise<ToolResult> => {
     const { name, arguments: args = {} } = req.params;
     const a = args as Record<string, unknown>;
+
+    const def = TOOL_DEFS.find((t) => t.name === name);
+    if (def) {
+      const problem = checkArgs(def, a);
+      if (problem) return fail(problem);
+    }
 
     try {
       switch (name) {
         case "drive_auth_status":
           return ok(await drive.authStatus());
 
-        case "drive_auth_logout":
+        case "drive_auth_logout": {
+          const gate = needConfirm(a, "drive_auth_logout", "ends the stored Proton Drive session for every client on this machine.");
+          if (gate) return gate;
           await drive.authLogout();
           return ok({ message: "Logged out successfully." });
+        }
 
         case "drive_version":
           return ok(await drive.version());
 
-        case "drive_list":
-          return ok(await drive.list(validateRemotePath(a.path)));
+        case "drive_list": {
+          const listPath = validateRemotePath(a.path);
+          return ok({ path: listPath, ...paginate(await drive.list(listPath), a, PAGE_DEFAULTS.drive_list) });
+        }
 
         case "drive_info":
-          return ok(await drive.info(validateRemotePath(a.path)));
+          return ok(await drive.info(validateRemotePath(a.path), a.verbose === true));
 
         case "drive_mkdir": {
           const mkdirPath = validateRemotePath(a.path);
@@ -995,6 +1098,9 @@ export async function main() {
           const dcs2 = typeof a.folderConflictStrategy === "string" ? a.folderConflictStrategy : "skip";
           if (!["skip", "merge", "rename", "replace"].includes(dcs2)) {
             return fail(`folderConflictStrategy must be skip, merge, rename, or replace`);
+          }
+          if ((fcs === "replace" || dcs2 === "replace") && a.confirmed !== true) {
+            return fail("drive_upload with strategy 'replace' trashes the existing remote item. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
           const uploadResult = await drive.upload(
             validateLocalPath(a.localPath),
@@ -1016,6 +1122,9 @@ export async function main() {
           const fodcs = typeof a.folderConflictStrategy === "string" ? a.folderConflictStrategy : "skip";
           if (!["skip", "merge", "rename", "remove"].includes(fodcs)) {
             return fail(`folderConflictStrategy must be skip, merge, rename, or remove`);
+          }
+          if ((fdcs === "remove" || fodcs === "remove") && a.confirmed !== true) {
+            return fail("drive_download with strategy 'remove' deletes the existing LOCAL file or folder before downloading. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
           const downloadResult = await drive.download(
             validateRemotePath(a.remotePath),
@@ -1052,13 +1161,18 @@ export async function main() {
           return ok({ message: `Deleted: ${deletePath}` });
         }
 
-        case "drive_list_trash":
-          return ok(await drive.listTrash());
+        case "drive_list_trash": {
+          const trashed = await drive.listTrash();
+          if (trashed.some((f) => f.trashedAt)) trashed.sort((x, y) => (y.trashedAt ?? "").localeCompare(x.trashedAt ?? ""));
+          return ok(paginate(trashed, a, PAGE_DEFAULTS.drive_list_trash));
+        }
 
         case "drive_share_status":
           return ok(await drive.shareStatus(validateRemotePath(a.path)));
 
         case "drive_share_invite": {
+          const inviteGate = needConfirm(a, "drive_share_invite", "immediately emails the invitee and grants them access.");
+          if (inviteGate) return inviteGate;
           const email = validateEmail(a.email);
           if (typeof a.role !== "string") {
             return fail("role must be a string: viewer, editor, or admin");
@@ -1079,6 +1193,8 @@ export async function main() {
 
         case "drive_share_revoke":
         {
+          const revokeGate = needConfirm(a, "drive_share_revoke", "removes a person's access.");
+          if (revokeGate) return revokeGate;
           const revokeEmail = validateEmail(a.email);
           await drive.shareRevoke(validateRemotePath(a.path), revokeEmail);
           return ok({ message: `Revoked access for ${revokeEmail}.` });
@@ -1109,8 +1225,9 @@ export async function main() {
         case "drive_copy": {
           const copySrc = validateRemotePath(a.sourcePath);
           const copyDst = validateRemotePath(a.destinationPath);
-          await drive.copy(copySrc, copyDst);
-          return ok({ message: `Copied: ${copySrc} → ${copyDst}` });
+          const copyName = typeof a.newName === "string" ? validateName(a.newName) : undefined;
+          await drive.copy(copySrc, copyDst, copyName);
+          return ok({ message: `Copied: ${copySrc} → ${copyDst}${copyName ? ` as '${copyName}'` : ""}` });
         }
 
         case "drive_list_invitations":
@@ -1125,18 +1242,24 @@ export async function main() {
 
         case "drive_invitation_reject": {
           if (typeof a.uid !== "string" || !a.uid) return fail("uid must be a non-empty string");
+          const rejectGate = needConfirm(a, "drive_invitation_reject", "declines the invitation permanently.");
+          if (rejectGate) return rejectGate;
           const rejectUid = validateFlagValue(a.uid, "uid");
           await drive.invitationReject(rejectUid);
           return ok({ message: "Invitation rejected." });
         }
 
         case "drive_share_leave": {
+          const leaveGate = needConfirm(a, "drive_share_leave", "removes your own access to a shared folder.");
+          if (leaveGate) return leaveGate;
           const leavePath = validateRemotePath(a.path);
           await drive.shareLeave(leavePath);
           return ok({ message: `Left shared folder: ${leavePath}` });
         }
 
         case "drive_share_set_url": {
+          const setUrlGate = needConfirm(a, "drive_share_set_url", "creates or replaces a PUBLIC link that anyone with the URL can open.");
+          if (setUrlGate) return setUrlGate;
           const setUrlPath = validateRemotePath(a.path);
           const role = typeof a.role === "string" ? a.role : "viewer";
           if (!["viewer", "editor"].includes(role)) return fail("role must be viewer or editor");
@@ -1147,6 +1270,8 @@ export async function main() {
         }
 
         case "drive_share_remove_url": {
+          const removeUrlGate = needConfirm(a, "drive_share_remove_url", "disables the public link.");
+          if (removeUrlGate) return removeUrlGate;
           const removeUrlPath = validateRemotePath(a.path);
           await drive.shareRemoveUrl(removeUrlPath);
           return ok({ message: `Public link removed: ${removeUrlPath}` });
@@ -1157,8 +1282,8 @@ export async function main() {
             return fail("drive_share_remove_all requires confirmed=true. Use drive_share_status first to show the user who has access.");
           }
           const removeAllPath = validateRemotePath(a.path);
-          await drive.shareRemove(removeAllPath, [], true);
-          return ok({ message: `Removed all access to: ${removeAllPath}` });
+          const removedCount = await drive.shareRemoveAll(removeAllPath);
+          return ok({ message: removedCount === 0 ? `Nothing to remove: ${removeAllPath} has no members or pending invitations.` : `Removed all access (${removedCount} member/invitation(s)) to: ${removeAllPath}` });
         }
 
         case "photos_list_albums":
@@ -1192,7 +1317,7 @@ export async function main() {
         case "photos_list_album_photos": {
           const albumListPath = validateRemotePath(a.albumPath);
           if (!albumListPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
-          return ok(await drive.listAlbumPhotos(albumListPath));
+          return ok(paginate(await drive.listAlbumPhotos(albumListPath, a.loadDetails === true), a, PAGE_DEFAULTS.photos_list_album_photos));
         }
 
         case "photos_add_to_album": {
@@ -1205,6 +1330,8 @@ export async function main() {
         }
 
         case "photos_remove_from_album": {
+          const removePhotoGate = needConfirm(a, "photos_remove_from_album", "removes a photo from the album.");
+          if (removePhotoGate) return removePhotoGate;
           const remAlbumPath = validateRemotePath(a.albumPath);
           const remPhotoPath = validateRemotePath(a.photoPath);
           if (!remAlbumPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
@@ -1214,7 +1341,7 @@ export async function main() {
         }
 
         case "photos_list_timeline":
-          return ok(await drive.photoTimeline(a.loadDetails === true));
+          return ok(paginate(await drive.photoTimeline(a.loadDetails === true), a, PAGE_DEFAULTS.photos_list_timeline));
 
         case "photos_download": {
           if (!Array.isArray(a.photoPaths) || a.photoPaths.length === 0) return fail("photoPaths must be a non-empty array of strings");
@@ -1222,6 +1349,9 @@ export async function main() {
           const downloadFolder = validateLocalPath(a.localFolder);
           const pdcs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
           if (!["skip", "rename", "remove"].includes(pdcs)) return fail("conflictStrategy must be skip, rename, or remove");
+          if (pdcs === "remove" && a.confirmed !== true) {
+            return fail("photos_download with conflictStrategy 'remove' deletes the existing LOCAL file before downloading. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
+          }
           const downloadSummary = await drive.photoDownload(downloadPaths, downloadFolder, pdcs as PhotoDownloadConflictStrategy);
           if (downloadSummary.failedItems > 0) {
             return fail(`Download completed with ${downloadSummary.failedItems} failed item(s). transferred=${downloadSummary.transferredItems}`);
@@ -1254,6 +1384,9 @@ export async function main() {
           if (!syncRoot) return fail("PROTON_DRIVE_SYNC_PATH is not set. Set it to the root of your Proton Drive sync folder.");
           if (typeof a.content !== "string") return fail("content must be a string");
           const writePath = validateRemotePath(a.path);
+          if (a.confirmed !== true && (await syncFileExists(syncRoot, writePath))) {
+            return fail(`drive_write_file would overwrite the existing file ${writePath}. Ask the user to confirm, then call again with confirmed=true.`);
+          }
           await writeSyncFile(syncRoot, writePath, a.content);
           return ok({ message: `Written: ${writePath}` });
         }
@@ -1265,11 +1398,50 @@ export async function main() {
       if (err instanceof McpError) throw err;
       return handleError(err);
     }
+  };
+
+  let inFlight = 0;
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
+    inFlight++;
+    try {
+      // The request's AbortSignal reaches the CLI child via AsyncLocalStorage, so
+      // notifications/cancelled actually kills a running upload/download.
+      return await callContext.run({ signal: extra?.signal }, () => handleCall(req));
+    } finally {
+      inFlight--;
+    }
+  });
+
+  const shutdown = (code: number) => {
+    killAllChildren();
+    process.exit(code);
+  };
+  server.onclose = () => killAllChildren();
+  process.once("SIGTERM", () => shutdown(0));
+  process.once("SIGINT", () => shutdown(0));
+  process.stdout.on("error", (e: NodeJS.ErrnoException) => { if (e.code === "EPIPE") shutdown(0); });
+  process.on("uncaughtException", (err) => { logger.error("Uncaught exception:", err); shutdown(1); });
+  process.on("unhandledRejection", (err) => { logger.error("Unhandled rejection:", err); shutdown(1); });
+  // Host went away: let in-flight calls finish briefly (one-shot `echo | node` use),
+  // then kill whatever CLI is still running instead of lingering until its timeout.
+  process.stdin.on("end", () => {
+    if (inFlight > 0) setTimeout(() => shutdown(0), 15_000).unref();
   });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
   logger.info(`proton-drive-mcp v${VERSION} running`);
+
+  // Probe the CLI after connecting so a slow `version` can never delay
+  // `initialize` (hosts time out at ~5s). A missing CLI still leaves the server
+  // up: tools/list works and each call returns a clear error.
+  void checkCliAvailable().then((cliCheck) => {
+    if (!cliCheck.available) {
+      logger.error(cliCheck.reason === "not_executable"
+        ? "proton-drive CLI found but not executable. Run: chmod +x $(which proton-drive)"
+        : "proton-drive CLI not found. Download from https://proton.me/download/drive/cli/index.html");
+    }
+  });
 }
 
 if (isMainModule(import.meta.url)) {

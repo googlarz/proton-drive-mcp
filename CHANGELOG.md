@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.0.37 — 2026-09-20
+
+A parallel review of the whole project (security, live testing of every tool group, reliability, token cost, CI/supply chain, test-suite gaps — modelled on the Proton Mail Bridge MCP review rounds), then every finding fixed. Every behaviour change was checked live against a real account (39 end-to-end checks on scratch data) besides the automated tests. 1.0.36 was folded into this release.
+
+**Behaviour changes to be aware of:** destructive and outward-facing tools now require `confirmed: true`; long lists return `{total, offset, limit, hasMore, items}` instead of a bare array; responses are compact JSON; tool arguments are validated against the published schema (unknown/mistyped arguments are rejected).
+
+### Critical
+- **`npx proton-drive-mcp` never served MCP.** The entry-point check compared `import.meta.url` with `process.argv[1]`, which under `npx`, a global install or `node_modules/.bin` is the bin *symlink* — so the published server started, printed nothing and exited 0. Now compares real paths. CI gained a pack-and-install smoke test that launches the real bin symlink (the previous tests imported `dist/` directly and could not see this).
+- **A failing call leaked its full command line to the client**, including the `--password` of `drive_share_set_url` and the binary path (`e.message` from Node's exec). Errors are now built from the CLI's own output; secrets are never echoed. The same change surfaces the real cause when the CLI writes it to stdout behind an `=====` banner (e.g. a missing local file), truncates huge output, tolerates ANSI noise before the JSON, and recognises more "session expired" wording.
+- **`drive_rename` accepted `.` and `..`**, after which `drive_list` returned a path that resolves to the *parent* folder — a follow-up `drive_trash` on it would have trashed the wrong node. Rejected now; `list()` also builds paths by concatenation instead of `posix.join`.
+
+### Security
+- `drive_download` with `remove` (deletes the existing local file/folder), `drive_upload` with `replace` (trashes the remote item), `photos_download` with `remove`, and overwriting a sync-folder file via `drive_write_file` now need `confirmed: true` (CLI: `--confirm`).
+- Also gated: `drive_auth_logout`, `drive_share_invite`, `drive_share_revoke`, `drive_share_set_url` (public links), `drive_share_remove_url`, `drive_share_leave`, `drive_invitation_reject`, `photos_remove_from_album`.
+- `drive_read_file` / `drive_write_file` no longer follow symlinks out of `PROTON_DRIVE_SYNC_PATH` (containment by realpath, `O_NOFOLLOW`), read size is checked before loading, writes are capped at 5 MB.
+- Local paths given to upload/download/photos tools are checked: credential locations (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.claude*`, keychains, `.env`, keys, …) are refused (`PROTON_DRIVE_LOCAL_ROOT` allowlist, `PROTON_DRIVE_ALLOW_SENSITIVE_PATHS=1` to opt out).
+- Arguments are validated against the tool schema (unknown keys, wrong types, enums, integer bounds); validators reject non-strings (an array used to coerce into a path).
+
+### Fixed (data correctness)
+- **`drive_share_set_url` silently turned a password-protected link into an open one** when re-run without a password (same URL). It now says so in a `warning`; `drive_share_status` reports `sharePasswordProtected`, `shareUrlExpiresAt` and `editorsCanShare`.
+- **`photos_create_album` created duplicate names**, after which `update`/`delete` acted on an arbitrary one of them. Duplicates are refused, and album operations refuse an ambiguous `/albums/<name>`; `photos_list_albums` returns `uid`.
+- **`drive_share_revoke` reported success for a non-member**, and for a wrong-case address the real member kept access (the CLI matches case-sensitively and exits 0 either way). Now verified against the current members, matched case-insensitively, canonical address sent. `drive_share_remove_all` on an unshared item reports "Nothing to remove".
+- **`drive_list "/"` returned ten `[unnamed]` entries**; it now lists the real roots.
+- **Names with a trailing space were unusable** (paths were trimmed: `list` returned `…/tsp ` but `info` then said "Node not found"; `mkdir "trail "` created `trail`). Paths, names and passwords are no longer trimmed; trailing `/` is stripped from remote paths.
+- **`drive_move` across folders with a rename** could fail with a bogus collision or leave the item half-moved. It now checks the destination first, renames-first when the source's own name is taken there, rolls back on failure and reports partial state explicitly; a `X → X` no-op on a missing source now fails.
+- `mkdir`/`move` split paths on the last *unescaped* slash (items created by other clients can contain `\/`).
+- `{ok:false}` results are also checked for `share_leave`, invitation accept/reject and album add/remove-photo; the "name collision" hint is only added for real collisions (move-into-itself etc. get their own message).
+- `drive_list_trash` returns `uid` (and trash time when the CLI reports it) — names are not unique in trash, so two items could share one path.
+
+### Reliability
+- Cancelling a request (`notifications/cancelled`) now kills the running CLI process; SIGTERM/SIGINT, a closed stdout (EPIPE) and client disconnect kill running CLI children instead of orphaning them; a timeout kills the whole process group (grandchildren too); stdin closing mid-call no longer leaves the server lingering for up to 30 minutes.
+- The startup CLI probe runs after the connection is up, so a slow `proton-drive version` can no longer delay `initialize` (hosts time out at ~5 s).
+
+### Token cost
+- `drive_list`, `drive_list_trash`, `photos_list_timeline`, `photos_list_album_photos` take `limit`/`offset` and return `{total, offset, limit, hasMore, items}` (defaults 200 / 100 / 50 / 100). Measured on a real account before the change: the trash list alone was ~54k tokens, the photo timeline ~15.6k.
+- Compact JSON (−14–16 % bytes on large lists); `drive_info` unwraps the `{ok,value}` wrappers and drops duplicate fields (`verbose: true` for the raw node).
+
+### Added
+- `drive_copy`: `newName` (CLI `--name`) — copy under a new name or duplicate inside the same folder. CLI: `copy --name`, `info --verbose`, `album photos --load-details`.
+- `photos_list_album_photos`: `loadDetails`.
+
+### CI / supply chain / packaging
+- Actions pinned to commit SHAs, least-privilege `permissions`, concurrency group, `npm audit --audit-level=high` gate, pack-and-install smoke test, Dependabot for npm and Actions (majors of `typescript` / `@types/node` ignored).
+- Publish: `id-token: write`, `npm publish --provenance`, `npm-publish` environment, tag must be reachable from `main`.
+- Lockfile refreshed (6 advisories → 0), SDK range raised to `^1.29.0`.
+- Dockerfile: multi-stage, non-root, production deps only, `.dockerignore`; `SECURITY.md`; `.code-review-graph/` ignored.
+
+### Tests and docs
+- ~230 unit tests plus real-process tests that spawn the server/CLI against a fake `PROTON_DRIVE_BIN` over stdio (gates, schema enforcement, error sanitization, lifecycle, symlink launch, tool/README/glama/smithery parity) and an opt-in read-only live smoke test. The old integration test probed a nonexistent `auth status` command and never ran in CI; it is removed.
+- Tool descriptions corrected where they contradicted behaviour (`photos_create_album`, `share_revoke`, `share_set_url`, `photos_delete_album`, `drive_read_file` / `drive_write_file` "requires authentication", timeline shapes). README no longer claims `--skip-thumbnails` (removed in 1.0.34) or full CLI parity; SPEC.md rewritten (it described 11 tools and a layout that never existed).
+
+### Investigated, not bugs
+- CLI role `inherited` is rejected by the CLI itself despite its help text — the three roles offered are correct.
+- Stdout hygiene, concurrent calls, the 60 s / 50 MB limits, a missing CLI and unicode/emoji/backslash names all behaved correctly.
+
 ## 1.0.35 — 2026-09-03
 
 Continued the live-testing bug sweep. This round found a serious silent-data-corruption bug in `drive_move`, confirmed by a full live reproduction against the real account, plus the same root cause in `drive_copy`. The same fix hardens three more structurally identical code paths (`trash`, `restore`, `delete`) against the same failure mode.

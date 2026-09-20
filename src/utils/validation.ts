@@ -1,13 +1,26 @@
 import { isAbsolute } from "node:path";
+import { assertLocalPathAllowed } from "./localguard.js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // Control chars: 0x00-0x1F, DEL (0x7F), Unicode separators U+2028 and U+2029.
 const CONTROL_RE = new RegExp("[\\x00-\\x1f\\x7f\\u2028\\u2029]");
 
+// Tool arguments arrive as untyped JSON. Coercing with String(x) let an array
+// like ["/my-files"] pass as a path; reject anything that is not a string.
+// null/undefined still read as "missing" so callers get the "must not be empty" error.
+function asString(value: unknown, label: string): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  return value;
+}
+
+// Paths are deliberately NOT trimmed: a name may legitimately end in a space
+// (confirmed live — list() returned ".../tsp " but the trimmed lookup then failed
+// with "Node not found"), and silently trimming created "trail" for "trail ".
 export function validatePath(path: unknown): string {
-  const p = String(path ?? "").trim();
-  if (!p) throw new Error("path must not be empty");
+  const p = asString(path, "path");
+  if (!p.trim()) throw new Error("path must not be empty");
   if (p.startsWith("-")) throw new Error(`path must not start with '-': ${p}`);
   if (CONTROL_RE.test(p)) throw new Error("path contains control characters");
   if (p.split("/").some((seg) => seg === ".." || seg === ".")) throw new Error(`path must not contain '.' or '..' segments: ${p}`);
@@ -17,11 +30,13 @@ export function validatePath(path: unknown): string {
 export function validateRemotePath(path: unknown): string {
   const p = validatePath(path);
   if (!p.startsWith("/")) throw new Error(`remote path must be absolute (start with '/'): ${p}`);
-  return p;
+  // "/a/b/" and "/a/b" are the same node; a trailing slash only confuses the
+  // dirname/basename splitting done by mkdir/move and is echoed back verbatim.
+  return p.length > 1 ? p.replace(/\/+$/, "") || "/" : p;
 }
 
 export function validateMessage(message: unknown): string {
-  const m = String(message ?? "").trim();
+  const m = asString(message, "message").trim();
   if (m.startsWith("-")) throw new Error(`message must not start with '-': ${m}`);
   if (CONTROL_RE.test(m)) throw new Error("message contains control characters");
   if (m.length > 2000) throw new Error("message must be 2000 characters or fewer");
@@ -40,9 +55,14 @@ export function validateMessage(message: unknown): string {
 // isn't, and that path then fails to resolve ("Node not found") in every
 // other tool (info, download, move, delete, ...). The item becomes
 // unreachable except by listing its real parent and matching by prefix.
+//
+// Also rejects "." and "..": confirmed live that renaming to ".." succeeds, and
+// list() then returned a path resolving to the PARENT folder, so a follow-up
+// drive_trash on that path would have trashed the wrong node.
 export function validateName(name: unknown): string {
-  const n = String(name ?? "").trim();
-  if (!n) throw new Error("name must not be empty");
+  const n = asString(name, "name");
+  if (!n.trim()) throw new Error("name must not be empty");
+  if (n === "." || n === "..") throw new Error(`name must not be '.' or '..': ${n}`);
   if (n.startsWith("-")) throw new Error(`name must not start with '-': ${n}`);
   if (n.includes("/")) throw new Error(`name must not contain '/': ${n}`);
   if (CONTROL_RE.test(n)) throw new Error("name contains control characters");
@@ -53,9 +73,10 @@ export function validateName(name: unknown): string {
 // against flag injection — confirmed live: `sharing set-url --password "-x"`
 // makes the real CLI's arg parser treat "-x" as an unknown flag and print
 // usage instead of setting the password. Unlike validateName, allows '/'
-// since these aren't Drive item names.
+// since these aren't Drive item names. Not trimmed: a password with leading or
+// trailing spaces must reach the CLI unchanged.
 export function validateFlagValue(value: unknown, label: string): string {
-  const v = String(value ?? "").trim();
+  const v = asString(value, label);
   if (v.startsWith("-")) throw new Error(`${label} must not start with '-': ${v}`);
   if (CONTROL_RE.test(v)) throw new Error(`${label} contains control characters`);
   return v;
@@ -64,11 +85,12 @@ export function validateFlagValue(value: unknown, label: string): string {
 export function validateLocalPath(path: unknown): string {
   const p = validatePath(path);
   if (!isAbsolute(p)) throw new Error(`local path must be absolute: ${p}`);
+  assertLocalPathAllowed(p);
   return p;
 }
 
 export function validateEmail(email: unknown): string {
-  const e = String(email ?? "").trim();
+  const e = asString(email, "email").trim();
   if (e.startsWith("-")) throw new Error(`email must not start with '-': ${e}`);
   if (CONTROL_RE.test(e)) throw new Error("email contains control characters");
   if (!EMAIL_RE.test(e)) throw new Error(`invalid email address: ${e}`);

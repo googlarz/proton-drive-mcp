@@ -15,9 +15,11 @@ function makeRunner() {
   let nextResult = null;
   let nextError = null;
   const calls = [];
+  const queued = [];
 
   const runner = async (args) => {
     calls.push([...args]);
+    if (queued.length) { const q = queued.shift(); if (q instanceof Error) throw q; return q; }
     if (nextError) { const e = nextError; nextError = null; throw e; }
     const r = nextResult; nextResult = null; return r;
   };
@@ -26,6 +28,8 @@ function makeRunner() {
     runner,
     calls,
     setResult: (r) => { nextResult = r; nextError = null; },
+    // Results for consecutive calls (methods that make several CLI calls).
+    queue:     (...rs) => { queued.push(...rs); },
     setError:  (e) => { nextError = e; nextResult = null; },
     lastCall:  () => calls[calls.length - 1],
     clear:     () => { calls.length = 0; },
@@ -355,27 +359,73 @@ describe("move", () => {
     t.setResult(null);
     await drive.move("/my-files/old.pdf", "/my-files/Archive/new.pdf");
     assert.deepEqual(t.calls, [
+      ["filesystem", "list", "/my-files/Archive"], // pre-check: destination name free?
       ["filesystem", "move", "/my-files/old.pdf", "/my-files/Archive"],
       ["filesystem", "rename", "/my-files/Archive/old.pdf", "new.pdf"],
     ]);
+  });
+
+  it("fails before touching anything when the destination name is already taken", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.queue([{ name: { ok: true, value: "new.pdf" }, type: "file" }]);
+    await assert.rejects(
+      () => drive.move("/my-files/old.pdf", "/my-files/Archive/new.pdf"),
+      /Destination already exists/
+    );
+    assert.equal(t.calls.length, 1, "only the destination listing may run");
+  });
+
+  it("renames first, then moves, when the source's own name is taken in the destination folder", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    // Confirmed live: moving M/f1.txt -> N/other.txt while N/f1.txt exists failed with a bogus collision.
+    t.queue([{ name: { ok: true, value: "old.pdf" }, type: "file" }]);
+    await drive.move("/my-files/old.pdf", "/my-files/Archive/new.pdf");
+    assert.deepEqual(t.calls, [
+      ["filesystem", "list", "/my-files/Archive"],
+      ["filesystem", "rename", "/my-files/old.pdf", "new.pdf"],
+      ["filesystem", "move", "/my-files/new.pdf", "/my-files/Archive"],
+    ]);
+  });
+
+  it("rolls the rename back when the move fails after a rename-first", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.queue(
+      [{ name: { ok: true, value: "old.pdf" }, type: "file" }],
+      null,
+      [{ uid: "n1", ok: false, error: { name: "InvalidRequirementsAPIError", code: 2000 } }],
+    );
+    await assert.rejects(() => drive.move("/my-files/old.pdf", "/my-files/Archive/new.pdf"), /Move failed: InvalidRequirementsAPIError/);
+    assert.deepEqual(t.lastCall(), ["filesystem", "rename", "/my-files/new.pdf", "old.pdf"]);
+  });
+
+  it("splits paths on unescaped slashes only (items created by other clients can contain '/')", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await drive.move("/my-files/raw\\/slash", "/my-files/Archive/raw\\/slash");
+    assert.deepEqual(t.calls, [["filesystem", "move", "/my-files/raw\\/slash", "/my-files/Archive"]]);
   });
 
   it("is a no-op when source and destination are identical", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
     await drive.move("/my-files/same.pdf", "/my-files/same.pdf");
-    assert.equal(t.calls.length, 0);
+    // Still verifies the source exists: "Moved: X -> X" used to succeed for a missing X.
+    assert.deepEqual(t.calls, [["filesystem", "info", "/my-files/same.pdf"]]);
   });
 
   it("throws and does NOT proceed to rename when the destination has a name collision — confirmed live: filesystem move exits 0 with [{ok:false,error:...}] on collision, which previously went undetected and renamed whatever unrelated item was already sitting at the computed path", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult([{ uid: "n1", ok: false, error: { name: "NodeWithSameNameExistsValidationError", code: 2500 } }]);
+    t.queue(null /* destination listing */, [{ uid: "n1", ok: false, error: { name: "NodeWithSameNameExistsValidationError", code: 2500 } }]);
     await assert.rejects(
       () => drive.move("/my-files/old.pdf", "/my-files/Archive/new.pdf"),
       /Move failed: NodeWithSameNameExistsValidationError/
     );
-    assert.equal(t.calls.length, 1, "must not proceed to the rename step after a failed move");
+    assert.equal(t.calls.length, 2, "listing + move only — must not proceed to the rename step after a failed move");
   });
 });
 
@@ -539,11 +589,27 @@ describe("shareRevoke", () => {
   it("calls sharing remove with --email (sharing revoke does not exist)", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult(null);
+    t.queue({ members: [{ inviteeEmail: "alice@pm.me", role: "viewer" }] }, null);
     await drive.shareRevoke("/my-files/Reports", "alice@pm.me");
     assert.deepEqual(t.lastCall(), [
       "sharing", "remove", "--email", "alice@pm.me", "/my-files/Reports",
     ]);
+  });
+
+  it("throws for an address that is not a member — the CLI exits 0 either way", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.queue({ members: [{ inviteeEmail: "alice@pm.me", role: "viewer" }] });
+    await assert.rejects(() => drive.shareRevoke("/my-files/Reports", "nobody@example.com"), /not a member/);
+    assert.equal(t.calls.length, 1, "must not call sharing remove");
+  });
+
+  it("matches the email case-insensitively and sends the canonical address (CLI matching is case-sensitive)", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.queue({ nonProtonInvitations: [{ inviteeEmail: "Alice@Example.com", role: "viewer" }] }, null);
+    await drive.shareRevoke("/my-files/Reports", "alice@example.com");
+    assert.deepEqual(t.lastCall(), ["sharing", "remove", "--email", "Alice@Example.com", "/my-files/Reports"]);
   });
 });
 
@@ -571,10 +637,19 @@ describe("shareSetUrl", () => {
   it("calls sharing set-url with default role", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.setResult({ url: "https://drive.proton.me/urls/abc" });
+    t.queue(null /* status: no existing link */, { url: "https://drive.proton.me/urls/abc" });
     const link = await drive.shareSetUrl("/my-files/Reports");
     assert.deepEqual(t.lastCall(), ["sharing", "set-url", "/my-files/Reports", "--role", "viewer"]);
     assert.equal(link.url, "https://drive.proton.me/urls/abc");
+    assert.equal(link.warning, undefined);
+  });
+
+  it("warns when re-running without a password strips an existing password/expiration (confirmed live: link silently became open)", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.queue({ urlAccess: { url: "https://drive.proton.me/urls/abc", customPassword: "x", expirationTime: "2026-10-01T00:00:00Z" } }, { url: "https://drive.proton.me/urls/abc" });
+    const link = await drive.shareSetUrl("/my-files/Reports");
+    assert.match(link.warning, /previously had a password/);
   });
 
   it("passes password and expiration when provided", async () => {
@@ -889,8 +964,14 @@ describe("validatePath", () => {
     assert.equal(validatePath("/my-files/report.pdf"), "/my-files/report.pdf");
   });
 
-  it("trims whitespace", () => {
-    assert.equal(validatePath("  /my-files  "), "/my-files");
+  it("does not trim — a name may legitimately end in a space (confirmed live)", () => {
+    assert.equal(validatePath("/my-files/tsp "), "/my-files/tsp ");
+  });
+
+  it("throws on whitespace-only input and on non-strings (an array used to coerce into a path)", () => {
+    assert.throws(() => validatePath("   "), /must not be empty/);
+    assert.throws(() => validatePath(["/my-files"]), /must be a string/);
+    assert.throws(() => validatePath(42), /must be a string/);
   });
 
   it("throws on empty string", () => {
@@ -1014,8 +1095,8 @@ describe("validateFlagValue", () => {
     assert.equal(validateFlagValue("s3cret", "password"), "s3cret");
   });
 
-  it("trims whitespace", () => {
-    assert.equal(validateFlagValue("  2026-06-06  ", "expiration"), "2026-06-06");
+  it("does not trim — a password with spaces must reach the CLI unchanged", () => {
+    assert.equal(validateFlagValue("  pw  ", "password"), "  pw  ");
   });
 
   it("throws on leading dash (flag injection) — confirmed live against the real CLI", () => {
@@ -1032,8 +1113,19 @@ describe("validateName", () => {
     assert.equal(validateName("report-v2.pdf"), "report-v2.pdf");
   });
 
-  it("trims whitespace", () => {
-    assert.equal(validateName("  new name.pdf  "), "new name.pdf");
+  it("does not trim (trailing-space names are real)", () => {
+    assert.equal(validateName(" new name.pdf "), " new name.pdf ");
+  });
+
+  it("rejects '.' and '..' — confirmed live: renaming to '..' made list() return the PARENT's path", () => {
+    assert.throws(() => validateName(".."), /must not be '\.' or '\.\.'/);
+    assert.throws(() => validateName("."), /must not be '\.' or '\.\.'/);
+    assert.equal(validateName("..v2"), "..v2");
+  });
+
+  it("rejects whitespace-only and non-string names", () => {
+    assert.throws(() => validateName("   "), /must not be empty/);
+    assert.throws(() => validateName({}), /must be a string/);
   });
 
   it("throws on empty string", () => {

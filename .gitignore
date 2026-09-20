@@ -4,3 +4,5 @@ dist/
 .env
 .env.*
 *.log
+.code-review-graph/
+.DS_Store

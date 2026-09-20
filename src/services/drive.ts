@@ -1,4 +1,3 @@
-import { posix as posixPath } from "node:path";
 import type {
   Album,
   AlbumPhoto,
@@ -61,6 +60,25 @@ function escapeNameForPath(name: string): string {
   return name.replace(/\//g, "\\/");
 }
 
+function unescapeName(name: string): string {
+  return name.replace(/\\\//g, "/");
+}
+
+// dirname/basename that respect the "\/" escape: node's posix.basename would
+// split "/a/raw\/slash" into "slash", corrupting mkdir/move on such items.
+function splitRemotePath(p: string): { parent: string; name: string } {
+  for (let i = p.length - 1; i >= 0; i--) {
+    if (p[i] === "/" && p[i - 1] !== "\\") {
+      return { parent: i === 0 ? "/" : p.slice(0, i), name: p.slice(i + 1) };
+    }
+  }
+  return { parent: "/", name: p };
+}
+
+function joinRemote(parent: string, escapedName: string): string {
+  return `${parent === "/" ? "" : parent}/${escapedName}`;
+}
+
 // filesystem move/copy/trash/restore/delete all accept multiple paths in one
 // call and report per-item success as an array of {uid, ok, error} — NOT via
 // a non-zero exit code. Confirmed live: a name collision at the destination
@@ -76,8 +94,15 @@ function assertItemsOk(result: unknown, action: string): void {
   for (const item of result as Record<string, unknown>[]) {
     if (item && item.ok === false) {
       const err = (item.error ?? {}) as Record<string, unknown>;
+      const name = String(err.name ?? "unknown error");
       const code = typeof err.code !== "undefined" ? ` (code ${err.code})` : "";
-      throw new Error(`${action} failed: ${err.name ?? "unknown error"}${code} — likely a name collision at the destination.`);
+      const message = typeof err.message === "string" && err.message ? `: ${err.message}` : "";
+      // Only a real collision deserves the collision hint — the same wrapper also
+      // reports move-into-itself, restore-with-trashed-parent, etc.
+      const hint = name === "NodeWithSameNameExistsValidationError"
+        ? " — an item with that name already exists at the destination."
+        : "";
+      throw new Error(`${action} failed: ${name}${code}${message}${hint}`);
     }
   }
 }
@@ -91,6 +116,42 @@ function extractSemver(token: string | undefined): string {
   const afterAt = token.includes("@") ? token.slice(token.indexOf("@") + 1) : token;
   const semverMatch = afterAt.match(/^(\d+\.\d+\.\d+)/);
   return semverMatch ? semverMatch[1] : token;
+}
+
+// drive_info used to return the raw node: ~40% of it is lossless noise — the
+// {ok,value} verification wrappers, uid chains repeated per revision, and
+// fields that duplicate others. Unwrap the wrappers and drop the noise; the raw
+// node is still available with verbose=true.
+const NODE_NOISE = new Set(["treeEventScopeId", "parentUid", "keyAuthor", "nameAuthor", "claimedDigests", "isImported"]);
+function trimNode(v: unknown, depth = 0): unknown {
+  if (Array.isArray(v)) return v.map((x) => trimNode(x, depth + 1));
+  if (v && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    if (o.ok === true && "value" in o) return trimNode(o.value, depth + 1);
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(o)) {
+      if (NODE_NOISE.has(k)) continue;
+      if (k === "uid" && depth > 0) continue; // nested uids (e.g. a revision's) are noise
+      out[k] = trimNode(val, depth + 1);
+    }
+    return out;
+  }
+  return v;
+}
+
+function mapPhoto(item: Record<string, unknown>): AlbumPhoto {
+  const photo = (item.photo ?? {}) as Record<string, unknown>;
+  const captureTime = item.captureTime ?? photo.captureTime;
+  const tags = item.tags ?? photo.tags;
+  return {
+    nodeUid: String(item.nodeUid ?? item.uid ?? ""),
+    name: item.name !== undefined ? unwrapResult(item.name) || undefined : undefined,
+    mediaType: typeof item.mediaType === "string" ? item.mediaType : undefined,
+    creationTime: typeof item.creationTime === "string" ? item.creationTime : undefined,
+    totalStorageSize: typeof item.totalStorageSize === "number" ? item.totalStorageSize : undefined,
+    captureTime: typeof captureTime === "string" ? captureTime : undefined,
+    tags: Array.isArray(tags) ? tags : undefined,
+  };
 }
 
 export class DriveService {
@@ -145,20 +206,34 @@ export class DriveService {
   // We compute a usable path by joining the listed folder with each item's
   // (unwrapped) name; confirmed live that /parent/name round-trips correctly
   // through the CLI's own name-based path resolver for every other command.
-  async list(remotePath: string): Promise<DriveFile[]> {
+  // The path is built by concatenation, not posix.join: join() collapses a
+  // "." or ".." name (created by another client) into the parent folder's path.
+  //
+  // Exception: listing "/" returns the roots as [{path:"/my-files"}, ...] with
+  // no name at all — previously every root came out as "[unnamed]".
+  async list(remotePath: string, opts: { includeUid?: boolean } = {}): Promise<DriveFile[]> {
     const result = await this.run(["filesystem", "list", remotePath]);
     if (result === null) return [];
     if (!Array.isArray(result)) throw new DriveParseError(`Expected array from list, got: ${JSON.stringify(result).slice(0, 100)}`);
     return result.map((item: Record<string, unknown>) => {
+      if (item.name === undefined && typeof item.path === "string") {
+        return { name: item.path.replace(/^\//, ""), path: item.path, type: "folder" as const };
+      }
       const name = unwrapResult(item.name, "[unnamed]");
-      return {
+      const file: DriveFile = {
         name,
-        path: posixPath.join(remotePath, escapeNameForPath(name)),
+        path: joinRemote(remotePath, escapeNameForPath(name)),
         type: item.type === "folder" || item.type === "album" ? "folder" : "file",
         size: typeof item.totalStorageSize === "number" ? item.totalStorageSize : undefined,
         modifiedAt: typeof item.modificationTime === "string" ? item.modificationTime : undefined,
         mimeType: typeof item.mediaType === "string" ? item.mediaType : undefined,
       };
+      if (opts.includeUid) {
+        file.uid = typeof item.uid === "string" ? item.uid : undefined;
+        const trashed = item.trashTime ?? item.trashedTime;
+        file.trashedAt = typeof trashed === "string" ? trashed : undefined;
+      }
+      return file;
     });
   }
 
@@ -218,24 +293,26 @@ export class DriveService {
 
   // The CLI has no `mkdir` — it's `create-folder <parentPath> <name>`.
   async mkdir(remotePath: string): Promise<void> {
-    const parent = posixPath.dirname(remotePath);
-    const name = posixPath.basename(remotePath);
+    const { parent, name } = splitRemotePath(remotePath);
     if (!name || parent === remotePath) {
       throw new Error(`path must include a folder name to create: ${remotePath}`);
+    }
+    if (name.includes("\\/")) {
+      throw new Error(`folder name must not contain '/': ${remotePath}`);
     }
     await this.run(["filesystem", "create-folder", parent, name]);
   }
 
-  // Returns full node metadata (including latest revision details) for a
-  // single file or folder. Shape comes straight from the CLI/SDK and is not
-  // guaranteed — this is a deliberate raw pass-through, unlike list()'s
-  // trimmed DriveFile shape, so callers get everything the CLI exposes.
-  async info(remotePath: string): Promise<unknown> {
-    return this.run(["filesystem", "info", remotePath]);
+  // Returns metadata (including latest revision details) for a single file or
+  // folder. Trimmed of lossless noise by default; verbose=true returns the raw
+  // CLI/SDK node, whose exact shape is not guaranteed.
+  async info(remotePath: string, verbose = false): Promise<unknown> {
+    const raw = await this.run(["filesystem", "info", remotePath]);
+    return verbose ? raw : trimNode(raw);
   }
 
   // Renames in place — does not move to a different folder. Returns the
-  // renamed node (raw pass-through, same reasoning as info()).
+  // renamed node (raw pass-through).
   async rename(remotePath: string, newName: string): Promise<unknown> {
     return this.run(["filesystem", "rename", remotePath, newName]);
   }
@@ -244,24 +321,60 @@ export class DriveService {
   // accepts a target *parent folder*, and renaming is a separate `rename`
   // command. We keep the tool's external contract (a full destination path)
   // by translating into the right combination of the two real commands.
+  //
+  // A cross-folder move that also renames is two mutations, so it is
+  // pre-checked to avoid ending up half-done:
+  //  - the destination name already taken  -> fail before touching anything
+  //  - the source's *own* name taken in the destination folder (the interim
+  //    name after `move`) -> rename first, then move, instead
   async move(sourcePath: string, destinationPath: string): Promise<void> {
-    const srcParent = posixPath.dirname(sourcePath);
-    const srcName = posixPath.basename(sourcePath);
-    const dstParent = posixPath.dirname(destinationPath);
-    const dstName = posixPath.basename(destinationPath);
+    const src = splitRemotePath(sourcePath);
+    const dst = splitRemotePath(destinationPath);
+    // Only a *rename* to a slash-containing name is unsupported; moving an item
+    // that already has one (same name) is fine.
+    if (src.name !== dst.name && dst.name.includes("\\/")) {
+      throw new Error(`destination name must not contain '/': ${destinationPath}`);
+    }
 
-    if (srcParent === dstParent) {
-      if (srcName === dstName) return;
-      await this.rename(sourcePath, dstName);
+    if (src.parent === dst.parent) {
+      if (src.name === dst.name) {
+        await this.info(sourcePath); // no-op, but a missing source must still fail
+        return;
+      }
+      await this.rename(sourcePath, dst.name);
       return;
     }
 
-    const moveResult = await this.run(["filesystem", "move", sourcePath, dstParent]);
-    assertItemsOk(moveResult, "Move");
+    if (src.name === dst.name) {
+      assertItemsOk(await this.run(["filesystem", "move", sourcePath, dst.parent]), "Move");
+      return;
+    }
 
-    if (srcName !== dstName) {
-      const movedPath = posixPath.join(dstParent, srcName);
-      await this.rename(movedPath, dstName);
+    const dstNames = new Set((await this.list(dst.parent)).map((f) => f.name));
+    if (dstNames.has(dst.name)) {
+      throw new Error(`Destination already exists: ${destinationPath}`);
+    }
+
+    if (!dstNames.has(unescapeName(src.name))) {
+      assertItemsOk(await this.run(["filesystem", "move", sourcePath, dst.parent]), "Move");
+      const movedPath = joinRemote(dst.parent, src.name);
+      try {
+        await this.rename(movedPath, dst.name);
+      } catch (err) {
+        const why = err instanceof Error ? err.message : String(err);
+        throw new Error(`Moved to ${dst.parent} but renaming to '${dst.name}' failed (${why}). The item is now at ${movedPath}.`);
+      }
+      return;
+    }
+
+    // Interim-name collision in the destination folder: rename in place first.
+    await this.rename(sourcePath, dst.name);
+    const renamedPath = joinRemote(src.parent, escapeNameForPath(dst.name));
+    try {
+      assertItemsOk(await this.run(["filesystem", "move", renamedPath, dst.parent]), "Move");
+    } catch (err) {
+      try { await this.rename(renamedPath, unescapeName(src.name)); } catch { /* best effort rollback */ }
+      throw err;
     }
   }
 
@@ -300,11 +413,17 @@ export class DriveService {
     const nonProtonPending = Array.isArray(r.nonProtonInvitations) ? (r.nonProtonInvitations as Record<string, unknown>[]).map((m) => toShareMember(m, "pending")) : [];
     const members = [...accepted, ...protonPending, ...nonProtonPending];
     const urlAccess = (r.urlAccess ?? undefined) as Record<string, unknown> | undefined;
+    const password = urlAccess?.customPassword;
+    const expiresAt = urlAccess?.expirationTime;
     return {
       path: remotePath,
       isShared: members.length > 0 || !!urlAccess,
       members,
       shareUrl: typeof urlAccess?.url === "string" ? urlAccess.url : undefined,
+      // Only a boolean — never echo the link password itself.
+      sharePasswordProtected: urlAccess ? Boolean(password) : undefined,
+      shareUrlExpiresAt: typeof expiresAt === "string" ? expiresAt : undefined,
+      editorsCanShare: typeof r.editorsCanShare === "boolean" ? r.editorsCanShare : undefined,
     };
   }
 
@@ -324,8 +443,26 @@ export class DriveService {
   }
 
   // `sharing revoke` doesn't exist — it's `sharing remove --email <email>`.
+  // Confirmed live: the CLI exits 0 and prints "undefined" whether or not the
+  // address is a member, and matches case-sensitively — so a wrong-case address
+  // was reported as revoked while the real member kept access. Verify against
+  // the current members first and send the canonical address.
   async shareRevoke(remotePath: string, email: string): Promise<void> {
-    await this.shareRemove(remotePath, [email], false);
+    const status = await this.shareStatus(remotePath);
+    const match = status.members.find((m) => m.email.toLowerCase() === email.toLowerCase());
+    if (!match) {
+      throw new Error(`${email} is not a member or pending invitee of ${remotePath}`);
+    }
+    await this.shareRemove(remotePath, [match.email], false);
+  }
+
+  // Removes every member and pending invitation. Returns how many there were —
+  // 0 means the item wasn't shared and nothing was sent to the CLI.
+  async shareRemoveAll(remotePath: string): Promise<number> {
+    const status = await this.shareStatus(remotePath);
+    if (status.members.length === 0) return 0;
+    await this.shareRemove(remotePath, [], true);
+    return status.members.length;
   }
 
   // General form of remove: specific emails, or --everyone to strip all
@@ -338,17 +475,29 @@ export class DriveService {
     await this.run(args);
   }
 
+  // NOTE: set-url REPLACES the link's settings. Confirmed live: re-running it
+  // without a password/expiration silently turned a password-protected link
+  // into an open one (same URL). When that is about to happen, say so.
   async shareSetUrl(
     remotePath: string,
     role: Exclude<ShareRole, "admin"> = "viewer",
     password?: string,
     expiration?: string
   ): Promise<PublicLink> {
+    let droppedProtection = false;
+    if (!password && !expiration) {
+      const before = await this.shareStatus(remotePath).catch(() => undefined);
+      droppedProtection = Boolean(before?.sharePasswordProtected || before?.shareUrlExpiresAt);
+    }
     const args = ["sharing", "set-url", remotePath, "--role", role];
     if (password) args.push("--password", password);
     if (expiration) args.push("--expiration", expiration);
     const result = await this.run(args);
-    return this.parsePublicLink(result);
+    const link = this.parsePublicLink(result);
+    if (droppedProtection) {
+      link.warning = "This link previously had a password and/or expiration; set_url replaces link settings, so they were removed. Pass password/expiration again to keep them.";
+    }
+    return link;
   }
 
   async shareRemoveUrl(remotePath: string): Promise<void> {
@@ -369,8 +518,12 @@ export class DriveService {
   }
 
   // Trash
+  //
+  // Confirmed live: two trashed items with the same name both list as
+  // /trash/<name>, so restore/delete by that path is ambiguous. uid (and the
+  // trash time, when the CLI provides it) let the caller tell them apart.
   async listTrash(): Promise<DriveFile[]> {
-    return this.list("/trash");
+    return this.list("/trash", { includeUid: true });
   }
 
   async trash(remotePath: string): Promise<void> {
@@ -385,8 +538,12 @@ export class DriveService {
     await this.run(["filesystem", "empty-trash"]);
   }
 
-  async copy(remoteSrc: string, remoteDst: string): Promise<void> {
-    assertItemsOk(await this.run(["filesystem", "copy", remoteSrc, remoteDst]), "Copy");
+  // The destination is the target PARENT folder (unlike move). `newName` maps to
+  // the CLI's `--name`, which is the only way to copy under a new name or
+  // duplicate an item inside its own folder.
+  async copy(remoteSrc: string, remoteDst: string, newName?: string): Promise<void> {
+    const args = ["filesystem", "copy", ...(newName ? ["--name", newName] : []), remoteSrc, remoteDst];
+    assertItemsOk(await this.run(args), "Copy");
   }
 
   async listInvitations(): Promise<DriveInvitation[]> {
@@ -409,15 +566,15 @@ export class DriveService {
   }
 
   async invitationAccept(uid: string): Promise<void> {
-    await this.run(["invitation", "accept", uid]);
+    assertItemsOk(await this.run(["invitation", "accept", uid]), "Accept invitation");
   }
 
   async invitationReject(uid: string): Promise<void> {
-    await this.run(["invitation", "reject", uid]);
+    assertItemsOk(await this.run(["invitation", "reject", uid]), "Reject invitation");
   }
 
   async shareLeave(remotePath: string): Promise<void> {
-    await this.run(["sharing", "leave", remotePath]);
+    assertItemsOk(await this.run(["sharing", "leave", remotePath]), "Leave");
   }
 
   // Photos / Albums
@@ -432,6 +589,7 @@ export class DriveService {
     return result.map((item: Record<string, unknown>) => {
       const albumInfo = (item.album ?? {}) as Record<string, unknown>;
       return {
+        uid: typeof item.uid === "string" ? item.uid : undefined,
         name: unwrapResult(item.name, "[unnamed]"),
         photoCount: typeof albumInfo.photoCount === "number" ? albumInfo.photoCount : 0,
         isShared: Boolean(item.isShared ?? false),
@@ -440,11 +598,29 @@ export class DriveService {
     });
   }
 
+  // Confirmed live: the CLI happily creates a second album with the same name,
+  // and every /albums/<name> path is then ambiguous (update renamed one album,
+  // delete removed a different one, with no error). Refuse duplicates, and
+  // refuse to act on a path that is already ambiguous.
   async createAlbum(name: string): Promise<void> {
+    const existing = await this.listAlbums();
+    if (existing.some((a) => a.name === name)) {
+      throw new Error(`An album named '${name}' already exists`);
+    }
     await this.run(["album", "create", name]);
   }
 
+  private async assertAlbumUnambiguous(albumPath: string): Promise<void> {
+    const name = unescapeName(albumPath.replace(/^\/albums\//, ""));
+    if (name.includes("/")) return; // not a plain /albums/<name> path
+    const count = (await this.listAlbums()).filter((a) => a.name === name).length;
+    if (count > 1) {
+      throw new Error(`Ambiguous album path ${albumPath}: ${count} albums are named '${name}'. Rename or delete one of them in the Proton Photos app first.`);
+    }
+  }
+
   async updateAlbum(albumPath: string, name?: string, coverPhotoUid?: string): Promise<void> {
+    await this.assertAlbumUnambiguous(albumPath);
     const args = ["album", "update", albumPath];
     if (name) args.push("--name", name);
     if (coverPhotoUid) args.push("--cover-photo-uid", coverPhotoUid);
@@ -452,27 +628,31 @@ export class DriveService {
   }
 
   async deleteAlbum(albumPath: string, force: boolean, save: boolean): Promise<void> {
+    await this.assertAlbumUnambiguous(albumPath);
     const args = ["album", "delete", albumPath];
     if (force) args.push("--force");
     if (save) args.push("--save");
     await this.run(args);
   }
 
-  async listAlbumPhotos(albumPath: string): Promise<AlbumPhoto[]> {
-    const result = await this.run(["album", "photos", albumPath]);
+  async listAlbumPhotos(albumPath: string, loadDetails = false): Promise<AlbumPhoto[]> {
+    await this.assertAlbumUnambiguous(albumPath);
+    const args = ["album", "photos", albumPath];
+    if (loadDetails) args.push("--load-details");
+    const result = await this.run(args);
     if (result === null) return [];
     if (!Array.isArray(result)) throw new DriveParseError(`Expected array from album photos, got: ${JSON.stringify(result).slice(0, 100)}`);
-    return result.map((item: Record<string, unknown>) => ({
-      nodeUid: String(item.nodeUid ?? item.uid ?? ""),
-    }));
+    return result.map((item: Record<string, unknown>) => mapPhoto(item));
   }
 
   async addPhotoToAlbum(albumPath: string, photoPath: string): Promise<void> {
-    await this.run(["album", "add-photo", albumPath, photoPath]);
+    await this.assertAlbumUnambiguous(albumPath);
+    assertItemsOk(await this.run(["album", "add-photo", albumPath, photoPath]), "Add to album");
   }
 
   async removePhotoFromAlbum(albumPath: string, photoPath: string): Promise<void> {
-    await this.run(["album", "remove-photo", albumPath, photoPath]);
+    await this.assertAlbumUnambiguous(albumPath);
+    assertItemsOk(await this.run(["album", "remove-photo", albumPath, photoPath]), "Remove from album");
   }
 
   // Photos timeline / library-level transfers (distinct from album-scoped
@@ -486,21 +666,8 @@ export class DriveService {
     // Without --load-details the CLI returns {nodeUid, captureTime, tags}.
     // With --load-details it returns full node objects ({uid, name, mediaType,
     // creationTime, totalStorageSize, photo: {captureTime, tags}, ...}) —
-    // confirmed live. Previously this always extracted only nodeUid, so
-    // loadDetails=true paid the CLI's slower buffered call for nothing: the
-    // "full node metadata" the tool description promises was thrown away.
-    return result.map((item: Record<string, unknown>) => {
-      const photo = (item.photo ?? {}) as Record<string, unknown>;
-      return {
-        nodeUid: String(item.nodeUid ?? item.uid ?? ""),
-        name: item.name !== undefined ? unwrapResult(item.name) || undefined : undefined,
-        mediaType: typeof item.mediaType === "string" ? item.mediaType : undefined,
-        creationTime: typeof item.creationTime === "string" ? item.creationTime : undefined,
-        totalStorageSize: typeof item.totalStorageSize === "number" ? item.totalStorageSize : undefined,
-        captureTime: typeof (item.captureTime ?? photo.captureTime) === "string" ? (item.captureTime ?? photo.captureTime) as string : undefined,
-        tags: Array.isArray(item.tags ?? photo.tags) ? (item.tags ?? photo.tags) as unknown[] : undefined,
-      };
-    });
+    // confirmed live.
+    return result.map((item: Record<string, unknown>) => mapPhoto(item));
   }
 
   async photoDownload(

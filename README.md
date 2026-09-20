@@ -222,7 +222,7 @@ proton-drive-cli upload ./dist /my-files/Releases/$(date +%Y-%m-%d) --file-confl
 proton-drive-cli download /my-files/Contracts ./audit/contracts
 
 # Nightly backup via cron
-0 2 * * * proton-drive-cli upload ~/Documents /my-files/Backups/$(date +%Y-%m-%d) --conflict skip
+0 2 * * * proton-drive-cli upload ~/Documents /my-files/Backups/$(date +%Y-%m-%d) --file-conflict skip --folder-conflict skip
 
 # Check who has access before a team change
 proton-drive-cli share status /my-files/Projects
@@ -263,45 +263,45 @@ proton-drive-cli share status /my-files/Projects
 | Tool | Description | Key parameters |
 |------|-------------|----------------|
 | `drive_auth_status` | Check if authenticated (probes `/my-files` — no native status command) | — |
-| `drive_auth_logout` | Log out (clear session) | — |
+| `drive_auth_logout` | Log out (clear session) ⚠️ | `confirmed: true` |
 | `drive_version` | CLI and SDK version info | — |
-| `drive_list` | List files and folders at a path | `path` |
-| `drive_info` | Get full metadata for one file/folder, including revision details | `path` |
+| `drive_list` | List files and folders at a path (paginated, default 200; `/` lists the roots) | `path`, `limit?`, `offset?` |
+| `drive_info` | Get metadata for one file/folder, including revision details (noise trimmed) | `path`, `verbose?` (raw CLI node) |
 | `drive_mkdir` | Create a new empty folder | `path` |
-| `drive_upload` | Upload local file or folder | `localPath`, `remotePath`, `fileConflictStrategy?` (skip/create-new-revision/rename/replace), `folderConflictStrategy?` (skip/merge/rename/replace) |
-| `drive_download` | Download to local path | `remotePath`, `localPath`, `fileConflictStrategy?` (skip/rename/remove), `folderConflictStrategy?` (skip/merge/rename/remove) |
+| `drive_upload` | Upload local file or folder | `localPath`, `remotePath`, `fileConflictStrategy?` (skip/create-new-revision/rename/replace), `folderConflictStrategy?` (skip/merge/rename/replace), `confirmed?` (**required for `replace`** — it trashes the existing remote item) |
+| `drive_download` | Download to local path | `remotePath`, `localPath`, `fileConflictStrategy?` (skip/rename/remove), `folderConflictStrategy?` (skip/merge/rename/remove), `confirmed?` (**required for `remove`** — it deletes the existing local item) |
 | `drive_rename` | Rename in place, no move | `path`, `newName` |
 | `drive_move` | Move and/or rename | `sourcePath`, `destinationPath` |
-| `drive_copy` | Copy file or folder to another Drive location | `sourcePath`, `destinationPath` |
+| `drive_copy` | Copy file or folder into another Drive folder | `sourcePath`, `destinationPath` (target *parent folder*), `newName?` |
 | `drive_delete` | Permanently delete an item already in trash ⚠️ | `path`, `confirmed: true` |
-| `drive_list_trash` | List items currently in trash | — |
+| `drive_list_trash` | List items currently in trash (paginated, default 100; includes `uid` — names are not unique in trash) | `limit?`, `offset?` |
 | `drive_share_status` | Get sharing members and URL | `path` |
-| `drive_share_invite` | Invite a user | `path`, `email`, `role` (viewer/editor/admin), `message?` |
-| `drive_share_revoke` | Revoke one person's access | `path`, `email` |
+| `drive_share_invite` | Invite a user (sends an email) ⚠️ | `path`, `email`, `role` (viewer/editor/admin), `message?`, `confirmed: true` |
+| `drive_share_revoke` | Revoke one person's access (fails if not a member) ⚠️ | `path`, `email`, `confirmed: true` |
 | `drive_share_remove_all` | Remove every member + pending invitation at once ⚠️ | `path`, `confirmed: true` |
-| `drive_share_set_url` | Create/update a public share link | `path`, `role?` (viewer/editor), `password?`, `expiration?` |
-| `drive_share_remove_url` | Remove the public share link ⚠️ | `path` |
+| `drive_share_set_url` | Create/replace a public share link ⚠️ (re-running without `password`/`expiration` removes them; expiry max ~90 days) | `path`, `role?` (viewer/editor), `password?`, `expiration?`, `confirmed: true` |
+| `drive_share_remove_url` | Remove the public share link ⚠️ | `path`, `confirmed: true` |
 | `drive_trash` | Move to trash | `path` |
 | `drive_restore` | Restore from trash | `path` |
 | `drive_empty_trash` | Permanently delete all trash ⚠️ | `confirmed: true` |
 | `drive_read_file` | Read text file from local sync folder | `path` |
-| `drive_write_file` | Write text file to local sync folder ⚠️ | `path`, `content` |
+| `drive_write_file` | Write text file to local sync folder ⚠️ (overwriting an existing file needs confirmation; max 5 MB) | `path`, `content`, `confirmed?` |
 | `drive_list_invitations` | List pending sharing invitations received | — |
 | `drive_invitation_accept` | Accept a pending invitation | `uid` (from `drive_list_invitations`) |
-| `drive_invitation_reject` | Reject a pending invitation ⚠️ | `uid` (from `drive_list_invitations`) |
-| `drive_share_leave` | Leave a shared folder shared with you ⚠️ | `path` |
+| `drive_invitation_reject` | Reject a pending invitation ⚠️ | `uid` (from `drive_list_invitations`), `confirmed: true` |
+| `drive_share_leave` | Leave a shared folder shared with you ⚠️ | `path`, `confirmed: true` |
 | `photos_list_albums` | List all Proton Photos albums | — |
 | `photos_create_album` | Create a new empty album | `name` |
 | `photos_update_album` | Rename an album or change its cover photo | `albumPath`, `name?`, `coverPhotoUid?` |
 | `photos_delete_album` | Delete an album ⚠️ | `albumPath`, `confirmed: true`, `force?`, `save?` |
-| `photos_list_album_photos` | List photos in an album | `albumPath` |
+| `photos_list_album_photos` | List photos in an album (paginated, default 100) | `albumPath`, `loadDetails?`, `limit?`, `offset?` |
 | `photos_add_to_album` | Add a photo from your library to an album | `albumPath`, `photoPath` |
-| `photos_remove_from_album` | Remove a photo from an album (keeps it in library) ⚠️ | `albumPath`, `photoPath` |
-| `photos_list_timeline` | List photos in your full library timeline | `loadDetails?` |
-| `photos_download` | Download photos to a local folder | `photoPaths`, `localFolder`, `conflictStrategy?` (skip/rename/remove) |
+| `photos_remove_from_album` | Remove a photo from an album (keeps it in library) ⚠️ | `albumPath`, `photoPath`, `confirmed: true` |
+| `photos_list_timeline` | List photos in your full library timeline (paginated, default 50) | `loadDetails?`, `limit?`, `offset?` |
+| `photos_download` | Download photos to a local folder | `photoPaths`, `localFolder`, `conflictStrategy?` (skip/rename/remove), `confirmed?` (**required for `remove`**) |
 | `photos_upload` | Upload local files directly into your Photos library | `localPaths`, `conflictStrategy?` (skip/rename) |
 
-> ⚠️ **Destructive tools** require `confirmed: true`. Use `drive_list_trash` first so you know what will be deleted, then pass `confirmed: true` to proceed.
+> ⚠️ **Destructive and outward-facing tools** (deleting, sharing, public links, logout, and the `replace`/`remove` conflict strategies) require `confirmed: true`, and the CLI requires `--confirm` for the destructive ones. Describe the action to the user first, then pass `confirmed: true`. Tool arguments are validated against the published schema — unknown or mistyped arguments are rejected.
 
 ---
 
@@ -313,14 +313,17 @@ proton-drive-cli share status /my-files/Projects
 | Credential exposure | API keys in config | Zero — OS keychain only |
 | Sharing & invitations | Rarely | Full (invite, revoke, status) |
 | Trash & restore | Rarely | Full |
-| CLI parity | No | Full CLI mirrors all MCP tools |
+| CLI parity | No | The CLI mirrors every MCP tool except `drive_read_file` / `drive_write_file` |
 | Shell injection safe | Varies | Yes — `execFile` only |
 
 ---
 
 ## Operational notes
 
-- `drive_upload` passes `--skip-thumbnails` by default. Remove it from the subprocess args if you want WebP preview generation (requires Bun 1.3.14+ installed).
+- Long listings are paginated (`limit` / `offset`, response `{total, offset, limit, hasMore, items}`) to keep responses small. Responses are compact JSON.
+- Local paths passed to upload/download/photos tools are checked: credential locations (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.claude*`, keychains, `.env` files, …) are refused. Set `PROTON_DRIVE_LOCAL_ROOT` to allow only specific directories.
+- The sync-folder tools (`drive_read_file` / `drive_write_file`) refuse to follow symlinks out of `PROTON_DRIVE_SYNC_PATH`.
+- Error messages come from the CLI's own output; the command line (and therefore any `--password`) is never echoed back.
 - `drive_move` accepts a full destination path (parent + new name) for a familiar interface, but the underlying CLI only has separate `move` (change parent) and `rename` (change name) commands — this MCP translates automatically, issuing one or both as needed.
 - `drive_delete` only works on items already in `/trash` or `/photos-trash` — the CLI rejects live paths. Trash an item first with `drive_trash`, or use `drive_empty_trash` to clear everything at once.
 - `drive_auth_status` has no native CLI equivalent — it probes by resolving `/my-files` and reports authenticated based on whether that succeeds.
@@ -335,6 +338,8 @@ proton-drive-cli share status /my-files/Projects
 |---|---|---|
 | `PROTON_DRIVE_SYNC_PATH` | Optional | Absolute path to your local Proton Drive sync folder root (e.g. `/Users/you/Proton Drive`). Required only for `drive_read_file` and `drive_write_file`. The Proton Drive desktop app must be running to sync written files to the cloud. |
 | `PROTON_DRIVE_BIN` | Optional | Override the `proton-drive` binary name or path (default: `proton-drive`). Useful for non-standard installations. |
+| `PROTON_DRIVE_LOCAL_ROOT` | Optional | Path-delimiter-separated list of local directories that upload/download/photos tools may touch. Unset = any path except the built-in credential denylist. |
+| `PROTON_DRIVE_ALLOW_SENSITIVE_PATHS` | Optional | Set to `1` to disable the built-in credential-location denylist (not recommended). |
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "proton-drive-mcp",
-  "version": "1.0.35",
+  "version": "1.0.37",
   "description": "MCP server and CLI that gives Claude full access to Proton Drive — upload, download, share, and manage your end-to-end encrypted files without leaving the conversation.",
   "type": "module",
   "main": "dist/index.js",
@@ -18,9 +18,7 @@
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "cli": "npm run build && node dist/cli.js",
-    "test": "npm run build && node --test test/drive.test.mjs",
-    "test:integration": "npm run build && node --test test/integration.test.mjs",
-    "test:all": "npm run build && node --test test/*.test.mjs",
+    "test": "npm run build && node --test test/*.test.mjs",
     "lint": "tsc --noEmit",
     "clean": "rm -rf dist",
     "ci": "npm run lint && npm test",
@@ -55,7 +53,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.11.0"
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

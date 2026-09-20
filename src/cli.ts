@@ -34,12 +34,14 @@ Commands:
   auth logout                              Log out
   version                                  Show CLI/SDK version
   list <path>                              List files at path
-  info <path>                              Show full node metadata for one path
+  info <path> [--verbose]                  Show node metadata (--verbose = raw CLI node)
   mkdir <path>                             Create a new folder
-  upload <local> <remote> [--file-conflict X] [--folder-conflict X]
-                                           Upload file/folder (files: skip/create-new-revision/rename/replace; folders: skip/merge/rename/replace)
-  download <remote> <local> [--file-conflict X] [--folder-conflict X]
-                                           Download file/folder (files: skip/rename/remove; folders: skip/merge/rename/remove)
+  upload <local> <remote> [--file-conflict X] [--folder-conflict X] [--confirm]
+                                           Upload file/folder (files: skip/create-new-revision/rename/replace; folders: skip/merge/rename/replace;
+                                           'replace' trashes the existing remote item and needs --confirm)
+  download <remote> <local> [--file-conflict X] [--folder-conflict X] [--confirm]
+                                           Download file/folder (files: skip/rename/remove; folders: skip/merge/rename/remove;
+                                           'remove' deletes the existing LOCAL item and needs --confirm)
   rename <path> <new-name>                 Rename in place, no move
   move <src> <dst>                         Move and/or rename
   delete <path> --confirm                  Delete a file/folder already in trash, permanently
@@ -50,7 +52,7 @@ Commands:
   share set-url <path> [--role] [--password] [--expiration]  Create/update public link
   share remove-url <path>                  Remove public link
   share leave <path>                       Leave a folder shared with you
-  copy <src> <dst>                         Copy file/folder
+  copy <src> <dst-parent-folder> [--name N]  Copy file/folder into a folder (optionally under a new name)
   trash <path>                             Move to trash
   trash list                               List trash contents
   trash empty --confirm                    Permanently delete all trash
@@ -62,11 +64,11 @@ Commands:
   album create <name>                      Create a new album
   album update <path> [--name] [--cover-photo-uid]  Rename/update album cover
   album delete <path> --confirm [--force] [--save]  Delete an album
-  album photos <path>                      List photos in an album
+  album photos <path> [--load-details]     List photos in an album
   album add-photo <album> <photo>          Add a photo to an album
   album remove-photo <album> <photo>       Remove a photo from an album
   photo timeline [--load-details]          List photos in your timeline
-  photo download <photo>... <local> [--conflict X]  Download photos (skip/rename/remove)
+  photo download <photo>... <local> [--conflict X] [--confirm]  Download photos (skip/rename/remove; 'remove' needs --confirm)
   photo upload <local>... [--conflict X]   Upload photos to your library (skip/rename)
 
 Flags:
@@ -150,7 +152,7 @@ async function run() {
       break;
 
     case "info":
-      print(await drive.info(requirePath(sub, "info <path>")));
+      print(await drive.info(requirePath(sub, "info <path> [--verbose]"), args.includes("--verbose")));
       break;
 
     case "upload": {
@@ -168,6 +170,10 @@ async function run() {
       const folderConflictRaw = getFlag("--folder-conflict") ?? "skip";
       if (!["skip", "merge", "rename", "replace"].includes(folderConflictRaw)) {
         console.error(`Invalid --folder-conflict value: ${folderConflictRaw}. Must be skip, merge, rename, or replace.`);
+        process.exit(1);
+      }
+      if ((fileConflictRaw === "replace" || folderConflictRaw === "replace") && !args.includes("--confirm")) {
+        console.error("Strategy 'replace' trashes the existing remote item.\nPass --confirm to proceed.");
         process.exit(1);
       }
       print(await drive.upload(
@@ -193,6 +199,10 @@ async function run() {
       const folderConflictRaw = getFlag("--folder-conflict") ?? "skip";
       if (!["skip", "merge", "rename", "remove"].includes(folderConflictRaw)) {
         console.error(`Invalid --folder-conflict value: ${folderConflictRaw}. Must be skip, merge, rename, or remove.`);
+        process.exit(1);
+      }
+      if ((fileConflictRaw === "remove" || folderConflictRaw === "remove") && !args.includes("--confirm")) {
+        console.error("Strategy 'remove' deletes the existing LOCAL file or folder before downloading.\nPass --confirm to proceed.");
         process.exit(1);
       }
       print(await drive.download(
@@ -270,8 +280,10 @@ async function run() {
           console.error(`This removes everyone's access to: ${removeAllPath}\nPass --confirm to proceed.`);
           process.exit(1);
         }
-        await drive.shareRemove(removeAllPath, [], true);
-        console.log(`Removed all access to: ${removeAllPath}`);
+        const removedCount = await drive.shareRemoveAll(removeAllPath);
+        console.log(removedCount === 0
+          ? `Nothing to remove: ${removeAllPath} has no members or pending invitations.`
+          : `Removed all access (${removedCount} member/invitation(s)) to: ${removeAllPath}`);
       } else if (sub === "set-url") {
         const setUrlPath = requirePath(rest[0], "share set-url <path> [--role] [--password] [--expiration]");
         const roleRaw = getFlag("--role") ?? "viewer";
@@ -325,8 +337,12 @@ async function run() {
     case "copy": {
       const copySrc = requirePath(sub, "copy <src> <dst>");
       const copyDst = requirePath(rest[0], "copy <src> <dst>");
-      await drive.copy(copySrc, copyDst);
-      console.log(`Copied: ${copySrc} → ${copyDst}`);
+      const rawCopyName = getFlag("--name");
+      let copyName: string | undefined;
+      try { copyName = rawCopyName !== undefined ? validateName(rawCopyName) : undefined; }
+      catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
+      await drive.copy(copySrc, copyDst, copyName);
+      console.log(`Copied: ${copySrc} → ${copyDst}${copyName ? ` as '${copyName}'` : ""}`);
       break;
     }
 
@@ -393,7 +409,7 @@ async function run() {
         console.log(`Album deleted: ${albumPath}`);
       } else if (sub === "photos") {
         const albumPath = requirePath(rest[0], "album photos <path>");
-        print(await drive.listAlbumPhotos(albumPath));
+        print(await drive.listAlbumPhotos(albumPath, args.includes("--load-details")));
       } else if (sub === "add-photo") {
         const albumPath = requirePath(rest[0], "album add-photo <album-path> <photo-path>");
         const photoPath = requirePath(rest[1], "album add-photo <album-path> <photo-path>");
@@ -413,9 +429,10 @@ async function run() {
     case "photo": {
       // Strip --conflict <value> out of a variadic positional list.
       const conflictFlagIdx = rest.indexOf("--conflict");
-      const positionals = conflictFlagIdx === -1
+      const positionals = (conflictFlagIdx === -1
         ? rest
-        : [...rest.slice(0, conflictFlagIdx), ...rest.slice(conflictFlagIdx + 2)];
+        : [...rest.slice(0, conflictFlagIdx), ...rest.slice(conflictFlagIdx + 2)]
+      ).filter((x) => x !== "--confirm" && x !== "--load-details");
       const conflictRaw = getFlag("--conflict") ?? "skip";
 
       if (sub === "timeline") {
@@ -429,6 +446,10 @@ async function run() {
         catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
         if (!["skip", "rename", "remove"].includes(conflictRaw)) {
           console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip, rename, or remove.`);
+          process.exit(1);
+        }
+        if (conflictRaw === "remove" && !args.includes("--confirm")) {
+          console.error("Strategy 'remove' deletes the existing LOCAL file before downloading.\nPass --confirm to proceed.");
           process.exit(1);
         }
         print(await drive.photoDownload(photoPaths, localFolderValidated, conflictRaw as PhotoDownloadConflictStrategy));

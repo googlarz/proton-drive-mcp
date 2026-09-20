@@ -2,179 +2,77 @@
 
 ## Objective
 
-Build an MCP server (+ companion CLI) that exposes Proton Drive operations to Claude and other MCP clients. The user can list, upload, download, manage, and share files on Proton Drive without leaving their AI workflow.
+An MCP server (+ companion CLI) that exposes Proton Drive and Proton Photos to Claude and other MCP clients: list, upload, download, organise, share and trash files without leaving the AI workflow.
 
-Modelled after `proton-mail-bridge-client` in structure and conventions. Wraps the official `proton-drive` CLI binary via subprocess — the CLI handles auth, E2E encryption, and all Proton API calls. This MCP adds the protocol layer on top.
+It wraps the official `proton-drive` CLI binary as a subprocess. The CLI owns authentication (OS keychain), end-to-end encryption and every Proton API call; this project adds the MCP protocol layer, input validation, safety gates and response shaping on top. No credentials pass through this project.
 
-**User:** Claude Code / Claude Desktop users who already have Proton Drive CLI installed.
+**User:** Claude Code / Claude Desktop users who already have the Proton Drive CLI installed and logged in (`proton-drive auth login`).
 
-**Success looks like:**
-- Claude can list, upload, download, share, and trash files on Proton Drive via MCP tools
-- Published to npm as `proton-drive-mcp`
-- Installable in Claude Desktop via one `npx` command
-- Works on macOS, Linux, Windows (where `proton-drive` binary is in PATH)
+## Tech stack
 
----
-
-## Tech Stack
-
-- **Language:** TypeScript (ESM, same as proton-mail-bridge-client)
-- **Runtime:** Node.js 20+
-- **MCP SDK:** `@modelcontextprotocol/sdk`
-- **CLI dependency:** `proton-drive` binary (official Proton Drive CLI, user-installed)
-- **Build:** `tsc`
-- **Test:** Node built-in `node:test`
-- **Package manager:** npm
-
----
+TypeScript (ESM), Node.js >= 20, `@modelcontextprotocol/sdk`, `tsc`, `node:test`, npm. Published as `proton-drive-mcp` (bins: `proton-drive-mcp`, `proton-drive-cli`).
 
 ## Commands
 
 ```
 Build:   npm run build
-Dev:     npm run dev          # tsc --watch
-Test:    npm test
-Start:   node dist/index.js   # MCP server (stdio)
-Install: npm run install:claude-desktop
+Lint:    npm run lint          # tsc --noEmit
+Test:    npm test              # build + all test/*.test.mjs
+Start:   node dist/index.js    # MCP server over stdio
+CLI:     node dist/cli.js <command>
 ```
 
----
-
-## Project Structure
+## Project structure
 
 ```
-proton-drive-mcp/
-├── src/
-│   ├── index.ts              # MCP server entry — registers tools, starts stdio transport
-│   ├── services/
-│   │   └── drive.ts          # DriveService — wraps proton-drive CLI subprocess calls
-│   ├── tools/
-│   │   ├── filesystem.ts     # list, upload, download, move, delete tools
-│   │   ├── sharing.ts        # sharing status, invite, revoke tools
-│   │   └── trash.ts          # trash, restore tools
-│   ├── types/
-│   │   └── index.ts          # Shared types (DriveFile, ShareStatus, etc.)
-│   └── utils/
-│       ├── subprocess.ts     # execFile wrapper with timeout + JSON parsing
-│       └── errors.ts         # Typed error classes
-├── test/
-│   └── drive.test.mjs        # Unit tests (mock subprocess)
-├── package.json
-├── tsconfig.json
-├── SPEC.md                   # This file
-├── README.md
-├── CHANGELOG.md
-└── glama.json
+src/index.ts              MCP server: TOOLS (schemas), tool-surface derivation (gates, pagination),
+                          schema enforcement, dispatch, lifecycle (signals, cancellation)
+src/cli.ts                Companion CLI (mirrors every tool except drive_read_file/drive_write_file)
+src/services/drive.ts     DriveService: one method per operation, CLI argv building, response parsing
+src/utils/subprocess.ts   Runs the CLI: timeouts, process-group kill, cancellation, sanitized errors
+src/utils/validation.ts   Argument validators (flag injection, traversal, types)
+src/utils/localguard.ts   Credential-location denylist / PROTON_DRIVE_LOCAL_ROOT allowlist
+src/utils/syncfs.ts       Symlink-safe read/write inside PROTON_DRIVE_SYNC_PATH
+src/utils/isMainModule.ts Entry-point detection (realpath, so npm's .bin symlink works)
+src/types/index.ts        Shared response types
+test/                     Unit tests (injected runner) + real-process tests (fake CLI over stdio)
 ```
 
----
+## Tools (38)
 
-## Code Style
+- **Auth / meta:** `drive_auth_status`, `drive_auth_logout`, `drive_version`
+- **Filesystem:** `drive_list`, `drive_info`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`
+- **Trash:** `drive_list_trash`, `drive_trash`, `drive_restore`, `drive_delete`, `drive_empty_trash`
+- **Sharing:** `drive_share_status`, `drive_share_invite`, `drive_share_revoke`, `drive_share_remove_all`, `drive_share_set_url`, `drive_share_remove_url`, `drive_share_leave`
+- **Invitations:** `drive_list_invitations`, `drive_invitation_accept`, `drive_invitation_reject`
+- **Photos:** `photos_list_albums`, `photos_create_album`, `photos_update_album`, `photos_delete_album`, `photos_list_album_photos`, `photos_add_to_album`, `photos_remove_from_album`, `photos_list_timeline`, `photos_download`, `photos_upload`
+- **Local sync folder (needs `PROTON_DRIVE_SYNC_PATH`):** `drive_read_file`, `drive_write_file`
 
-Match `proton-mail-bridge-client` conventions. Use `execFile` (not `exec`) to prevent shell injection — user-supplied paths are passed as discrete arguments, never interpolated into a shell string:
+## Design rules learned from the live CLI
 
-```typescript
-// utils/subprocess.ts
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+- The CLI reports per-item success of `move/copy/trash/restore/delete/...` as `[{uid, ok, error}]` with **exit code 0** — every such result must be checked (`assertItemsOk`).
+- Node names, authors etc. are `{ok, value}` verification wrappers, never plain strings.
+- A literal `/` in a node name is escaped as `\/` in CLI paths; names this server creates may not contain `/`, `.`/`..`, a leading `-`, or control characters.
+- Names and paths are not trimmed (trailing spaces are real). Tool arguments are type-checked; non-strings are rejected.
+- `set-url` replaces link settings; `sharing remove` and `album create` do not validate membership/uniqueness themselves, so the service does.
 
-const execFileAsync = promisify(execFile)
+## Safety model
 
-export async function runDrive(args: string[]): Promise<unknown> {
-  const { stdout, stderr } = await execFileAsync(
-    'proton-drive',
-    [...args, '--json'],
-    { timeout: 30_000 }
-  )
-  if (stderr) throw new DriveCliError(stderr)
-  return JSON.parse(stdout)
-}
-```
+- All argv built as arrays for `spawn` (no shell); flag injection blocked by validators.
+- `confirmed: true` required for destructive or outward-facing tools (delete, empty trash, remove-all, album delete, invite, revoke, public links, leave, reject, logout, remove-from-album) and for the `replace` / `remove` conflict strategies and overwriting a sync-folder file. The CLI requires `--confirm` for the destructive ones.
+- Local paths: credential-location denylist (or `PROTON_DRIVE_LOCAL_ROOT` allowlist), symlinks resolved first.
+- Errors never echo the command line; output is truncated.
+- CLI children run in their own process group and are killed on timeout, cancellation, disconnect and SIGTERM/SIGINT.
 
-- ESM modules (`"type": "module"`)
-- Named exports, no default exports except entry points
-- `unknown` return types narrowed at call sites
-- Errors always typed, never swallowed
-- No `any`
+## Testing strategy
 
----
-
-## MCP Tools (v1)
-
-### Filesystem
-| Tool | Maps to CLI |
-|------|------------|
-| `drive_list` | `proton-drive filesystem list <path>` |
-| `drive_upload` | `proton-drive filesystem upload <local> <remote>` |
-| `drive_download` | `proton-drive filesystem download <remote> <local>` |
-| `drive_move` | `proton-drive filesystem move <src> <dst>` |
-| `drive_delete` | `proton-drive filesystem delete <path>` |
-
-### Sharing
-| Tool | Maps to CLI |
-|------|------------|
-| `drive_share_status` | `proton-drive sharing status <path>` |
-| `drive_share_invite` | `proton-drive sharing invite --user <email> --role <role> <path>` |
-| `drive_share_revoke` | `proton-drive sharing revoke --user <email> <path>` |
-
-### Trash
-| Tool | Maps to CLI |
-|------|------------|
-| `drive_trash` | `proton-drive trash <path>` |
-| `drive_restore` | `proton-drive restore <path>` |
-| `drive_empty_trash` | `proton-drive trash empty` |
-
-### Auth
-| Tool | Maps to CLI |
-|------|------------|
-| `drive_auth_status` | `proton-drive auth status` |
-
-(Login excluded from v1 — `proton-drive auth login` is interactive; user must authenticate via terminal before using the MCP server.)
-
----
-
-## Testing Strategy
-
-- **Framework:** Node built-in `node:test`
-- **Unit tests:** Mock subprocess calls; test JSON parsing, error handling, argument construction
-- **Coverage:** All tools must have at least one passing test
-- **No integration tests** against real Proton Drive API (requires auth)
-
----
+- Unit tests drive `DriveService` with an injected runner (argv assertions, response parsing, collision/ambiguity handling).
+- Real-process tests spawn `dist/index.js` / `dist/cli.js` against a fake `PROTON_DRIVE_BIN` over stdio (gates, schema enforcement, error sanitization, lifecycle, symlink launch, parity of tools/README/glama/smithery).
+- `test/live.test.mjs` is an opt-in read-only smoke test against a real account (`PROTON_DRIVE_LIVE=1`).
+- CI: lint, tests on Node 20/22/24, `npm audit`, and a pack-and-install smoke test that launches the real bin symlink.
 
 ## Boundaries
 
-**Always do:**
-- Pass `--json` flag on every CLI call
-- Validate that `proton-drive` binary exists in PATH before starting server
-- Use `execFile` with args array — never interpolate user input into shell strings
-- Commit `SPEC.md` and `CHANGELOG.md` alongside code
-
-**Ask first:**
-- Adding new CLI commands not listed in v1 tools above
-- Publishing under a different npm scope
-- Adding non-CLI dependencies (SDK import instead of subprocess)
-
-**Never do:**
-- Store Proton credentials in the MCP server (auth is handled entirely by the CLI)
-- Use `exec()` or `shell: true` with user-supplied input
-- Commit with unresolved TypeScript errors
-
----
-
-## Success Criteria
-
-- [ ] `npm run build` succeeds with zero TypeScript errors
-- [ ] `npm test` passes all unit tests
-- [ ] MCP server registers all 11 tools and starts on stdio
-- [ ] `drive_list /my-files` returns a parsed file listing when CLI is authenticated
-- [ ] Claude Desktop config snippet documented in README
-- [ ] `npx proton-drive-mcp` starts the server
-- [ ] Published to npm
-
----
-
-## Open Questions
-
-1. npm package name: `proton-drive-mcp` (public) or `@googlarz/proton-drive-mcp` (scoped)?
-2. Should `drive_move` be included in v1 — does the CLI support it? (Need to verify against `proton-drive filesystem --help`)
+- **Always:** validate every argument, check `{ok:false}` results, keep responses bounded (pagination), test against the real CLI before claiming a behaviour.
+- **Ask first:** new tools, changing a tool's response shape, dependency majors, changing CI/publish.
+- **Never:** log or echo secrets, bypass a confirmation gate, run destructive tools against a real account in automated tests.
