@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.38 — 2026-09-21
+
+Dependency refresh only — no source changes.
+
+### Changed
+- `@modelcontextprotocol/sdk` 1.29.0 → 1.30.0 (lockfile; the declared range `^1.29.0` is unchanged).
+- `@types/node` 22.19.20 → 22.20.3 (dev dependency).
+- First release published through the renewed npm token; 1.0.37 carries the review-round changes.
+
 ## 1.0.37 — 2026-09-20
 
 A parallel review of the whole project (security, live testing of every tool group, reliability, token cost, CI/supply chain, test-suite gaps — modelled on the Proton Mail Bridge MCP review rounds), then every finding fixed. Every behaviour change was checked live against a real account (39 end-to-end checks on scratch data) besides the automated tests. 1.0.36 was folded into this release.
