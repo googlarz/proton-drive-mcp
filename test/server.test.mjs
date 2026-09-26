@@ -116,6 +116,32 @@ describe("confirmed gates (unconditional)", () => {
       assert.ok(s.calls().length > before, "expected at least one CLI call");
     });
   }
+
+  // needConfirm() does `a.confirmed === true` (strict). Pin down that confirmed:false
+  // and confirmed omitted both take the *gate's own* refusal path (needConfirm's message,
+  // naming the action) rather than merely erroring for some other reason (e.g. a schema
+  // type error) — confirmed:true (a real boolean) is the only value that gets through.
+  it("drive_share_invite: confirmed:false and confirmed omitted both hit the gate's own message, not a schema error", async () => {
+    const args = { path: P, email: "bob@example.com", role: "viewer" };
+    const before = s.calls().length;
+
+    const omitted = await s.c.call("drive_share_invite", args);
+    assert.equal(omitted.isError, true);
+    assert.match(omitted.text, /immediately emails the invitee and grants them access/);
+    assert.doesNotMatch(omitted.text, /must be a boolean/);
+
+    const withFalse = await s.c.call("drive_share_invite", { ...args, confirmed: false });
+    assert.equal(withFalse.isError, true);
+    assert.match(withFalse.text, /immediately emails the invitee and grants them access/);
+    assert.doesNotMatch(withFalse.text, /must be a boolean/);
+
+    const withStringTrue = await s.c.call("drive_share_invite", { ...args, confirmed: "true" });
+    assert.equal(withStringTrue.isError, true);
+    assert.match(withStringTrue.text, /confirmed must be a boolean/);
+    assert.doesNotMatch(withStringTrue.text, /immediately emails the invitee/);
+
+    assert.equal(s.calls().length, before, "none of the three refused calls may reach the CLI");
+  });
 });
 
 describe("conditional confirmed gates", () => {
@@ -218,6 +244,7 @@ describe("protocol errors and argument validation", () => {
     ["traversal in path", "drive_info", { path: "/my-files/../etc" }, /'\.' or '\.\.'/],
     ["flag-like path", "drive_info", { path: "-rf" }, /must not start with '-'/],
     ["array for a boolean", "photos_list_timeline", { loadDetails: [true] }, /loadDetails must be a boolean/],
+    ["non-string element in a string array", "photos_download", { photoPaths: ["/photos/a.jpg", 123], localFolder: join(TMP, "ph2") }, /photoPaths must be an array of strings/],
   ];
   for (const [label, tool, args, re] of bad) {
     it(`${label} is an isError result and does not call the CLI`, async () => {
@@ -361,6 +388,57 @@ describe("pagination", () => {
     const r = await s.c.call("drive_list_trash", {});
     assert.equal(r.data.limit, 100);
     assert.equal(r.data.total, 5);
+  });
+
+  it("drive_list limit at the lower boundary (1) succeeds and returns exactly one item", async () => {
+    const r = await s.c.call("drive_list", { path: "/my-files", limit: 1 });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(r.data.items.length, 1);
+    assert.equal(r.data.hasMore, true);
+  });
+
+  it("drive_list limit at the upper boundary (1000) succeeds even though it exceeds total", async () => {
+    const r = await s.c.call("drive_list", { path: "/my-files", limit: 1000 });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(r.data.items.length, 5);
+    assert.equal(r.data.hasMore, false);
+  });
+
+  it("drive_list limit one past the upper boundary (1001) is rejected", async () => {
+    const r = await s.c.call("drive_list", { path: "/my-files", limit: 1001 });
+    assert.equal(r.isError, true);
+    assert.match(r.text, /limit must be <= 1000/);
+  });
+
+  it("drive_list offset at the lower boundary (0) succeeds explicitly", async () => {
+    const r = await s.c.call("drive_list", { path: "/my-files", offset: 0 });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(r.data.offset, 0);
+    assert.equal(r.data.items.length, 5);
+  });
+
+  it("drive_list hasMore is false when total is exactly divisible by limit (one full page)", async () => {
+    const r = await s.c.call("drive_list", { path: "/my-files", limit: 5, offset: 0 });
+    assert.equal(r.data.items.length, 5);
+    assert.equal(r.data.hasMore, false);
+  });
+
+  it("drive_list hasMore is still true on a middle page with items remaining after it", async () => {
+    const r = await s.c.call("drive_list", { path: "/my-files", limit: 2, offset: 2 });
+    assert.deepEqual(r.data.items.map((i) => i.name), ["c", "d"]);
+    assert.equal(r.data.hasMore, true);
+  });
+
+  it("drive_list_trash limit at the lower boundary (1) succeeds", async () => {
+    const r = await s.c.call("drive_list_trash", { limit: 1 });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(r.data.items.length, 1);
+  });
+
+  it("drive_list_trash limit one past the upper boundary (1001) is rejected", async () => {
+    const r = await s.c.call("drive_list_trash", { limit: 1001 });
+    assert.equal(r.isError, true);
+    assert.match(r.text, /limit must be <= 1000/);
   });
 
   it("photos_list_timeline defaults to limit 50 and honours limit", async () => {

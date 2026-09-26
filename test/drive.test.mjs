@@ -409,6 +409,28 @@ describe("move", () => {
     assert.deepEqual(t.calls, [["filesystem", "move", "/my-files/raw\\/slash", "/my-files/Archive"]]);
   });
 
+  it("rejects a rename to a destination name containing an escaped slash, before any CLI call", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    let err;
+    try {
+      await drive.move("/my-files/old.pdf", "/my-files/Archive/new\\/name.pdf");
+    } catch (e) {
+      err = e;
+    }
+    assert.ok(err, "expected move() to reject");
+    assert.match(err.message, /destination name must not contain '\/'/);
+    assert.equal(t.calls.length, 0, "must not call the CLI at all when the rename target is invalid");
+  });
+
+  it("allows a same-name cross-folder move even when that name contains an escaped slash", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult(null);
+    await drive.move("/a/x\\/y", "/b/x\\/y");
+    assert.deepEqual(t.calls, [["filesystem", "move", "/a/x\\/y", "/b"]]);
+  });
+
   it("is a no-op when source and destination are identical", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
