@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.39 — 2026-09-26
+
+Test-suite hardening only — no `src/` changes, no behavior change.
+
+A parallel verification round re-tested every claim in the v1.0.37 changelog live against a real account, re-audited its safety mechanisms adversarially, re-checked process lifecycle after the v1.0.38 dependency bump, verified the CI/publish pipeline and package integrity end to end, and mutation-tested the v1.0.37 test suite itself. Verdict: no regressions, no new bugs — but the round surfaced two real gaps in the *tests*, both now closed.
+
+### Fixed
+- **Flaky full test-suite runs.** `node --test test/*.test.mjs` defaulted to unbounded per-file concurrency (14 on a typical machine); several files spawn real `dist/index.js`/`dist/cli.js` processes against a fake CLI over stdio, and running enough of them at once caused occasional resource-contention failures (`server exited before reply`, spurious CLI-call-count assertions) — about 1 run in 10, never on a standalone file. Capped to `--test-concurrency=4`; 20 consecutive full-suite runs since (5 by hand, 15 by the fixing agent) are all clean at 418/418, for about a 1-second cost.
+- **5 of 6 low-severity coverage gaps** found by mutation-testing the v1.0.37 safety code, now covered: the `confirmed`-gate refusal message is asserted distinct from a schema-type error; `checkArgs`'s `limit`/`offset` boundaries (1, 1000, 1001, 0, -1) are exercised exactly at the edge; `paginate()`'s `hasMore` is tested at an exact page boundary, a partial last page, and an empty result; `move()` rejects a rename to a destination name containing an escaped `\/` before any CLI call, while a same-name cross-folder move with `\/` in it still succeeds; a non-string element in `photoPaths` is rejected before reaching the CLI. The sixth gap — a true time-of-check-to-time-of-use race in `syncfs.ts`'s read-size recheck — isn't reproducible as a black-box unit test without instrumenting `src/`, and is left as a known, real but very narrow residual gap.
+
+### Still outstanding (GitHub owner settings, not code)
+- Branch protection on `main` is not enabled.
+- Dependabot security updates are disabled.
+
 ## 1.0.38 — 2026-09-21
 
 Dependency refresh only — no source changes.
