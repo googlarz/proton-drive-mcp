@@ -23,6 +23,7 @@
     "clean": "rm -rf dist",
     "ci": "npm run lint && npm test",
     "pack:check": "npm pack --dry-run",
+    "package:mcpb": "node scripts/build-mcpb.mjs",
     "release:check": "npm run lint && npm test && npm run pack:check"
   },
   "keywords": [
