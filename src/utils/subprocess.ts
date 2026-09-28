@@ -280,8 +280,8 @@ function parseJsonLoose(raw: string): unknown {
 // ended up failing.
 const TRANSIENT_RE = new RegExp([
   "database is locked", "SQLITE_BUSY",
-  "\\b429\\b", "too many (server )?requests", "rate.?limit",
-  "\\b50[234]\\b", "bad gateway", "service unavailable",
+  "(?:http|status|error)[ :]*429\\b", "429 too many", "too many (server )?requests", "rate.?limit",
+  "\\b50[234] (?:bad gateway|service unavailable|gateway)", "(?:http|status|error)[ :]*50[234]\\b", "bad gateway", "service unavailable",
   "request timed out", "timeout error", "network error", "offline error",
   "ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "socket hang up",
 ].join("|"), "i");

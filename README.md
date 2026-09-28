@@ -91,7 +91,7 @@ Add to your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "proton-drive": {
+    "proton-drive-mcp": {
       "command": "npx",
       "args": ["-y", "proton-drive-mcp"],
       "env": { "PROTON_DRIVE_BIN": "/absolute/path/to/proton-drive" }
@@ -102,7 +102,7 @@ Add to your `claude_desktop_config.json`:
 
 Claude Desktop starts servers with a minimal `PATH`, so a `proton-drive` in `~/.local/bin` is usually not found. Set `PROTON_DRIVE_BIN` to the output of `which proton-drive` (the default install location is `~/.local/bin/proton-drive`, written out in full, e.g. `/Users/you/.local/bin/proton-drive`). If `npx` itself is not found, use its absolute path as `command` (`which npx`).
 
-Restart Claude Desktop. Check **`+` → Connectors → proton-drive** to confirm the server is connected.
+Restart Claude Desktop. Check **`+` → Connectors → proton-drive-mcp** to confirm the server is connected.
 
 > **Tip:** Make sure `proton-drive auth login` has been run at least once before starting Claude Desktop.
 
@@ -115,7 +115,7 @@ Instead of editing JSON, download `proton-drive-mcp-<version>.mcpb` from the [la
 ```json
 {
   "mcpServers": {
-    "proton-drive": {
+    "proton-drive-mcp": {
       "command": "proton-drive-mcp"
     }
   }
@@ -139,7 +139,7 @@ proton-drive-cli setup-claude-desktop [--config <path>] [--sync-path <dir>]
 proton-drive-cli setup-claude-desktop --sync-path "$HOME/Proton Drive" --write
 ```
 
-`doctor` exits 1 if any check fails (warnings do not fail). It only ever reports on the `proton-drive-mcp` entry of the config, never on other servers. `setup-claude-desktop` writes the absolute path of the running `node`, of this package's `dist/index.js`, and of the resolved `proton-drive` binary (`PROTON_DRIVE_BIN`). It refuses to run if the CLI cannot be found or the config file is not valid JSON, and re-running it gives the same file.
+`doctor` exits 1 if any check fails (warnings do not fail). It only ever reports on the `proton-drive-mcp` entry of the config, never on other servers. `setup-claude-desktop` writes the absolute path of the running `node`, of this package's `dist/index.js`, and of the resolved `proton-drive` binary (`PROTON_DRIVE_BIN`). It refuses to run if the CLI cannot be found, the config file is not valid JSON, or the package is running from a temporary `npx` cache (install it first with `npm install -g proton-drive-mcp`). The entry pins the current `node` binary, so re-run it after switching Node versions (e.g. with nvm). Re-running with unchanged settings leaves the file alone; otherwise the file is replaced atomically and a timestamped `.bak-…` copy is kept.
 
 The default config location is per OS (macOS `~/Library/Application Support/Claude/`, Windows `%APPDATA%\Claude\`, Linux `$XDG_CONFIG_HOME` or `~/.config/Claude/`); use `--config` or the `CLAUDE_DESKTOP_CONFIG` environment variable to point elsewhere. On Windows the CLI lookup honours `PATHEXT`.
 
@@ -399,9 +399,11 @@ Every tool group was live-tested on 2026-09-28 against a real Proton account, **
 | Variable | Required | Description |
 |---|---|---|
 | `PROTON_DRIVE_SYNC_PATH` | Optional | Absolute path to your local Proton Drive sync folder root (e.g. `/Users/you/Proton Drive`). Required only for `drive_read_file` and `drive_write_file`. The Proton Drive desktop app must be running to sync written files to the cloud. |
-| `PROTON_DRIVE_BIN` | Optional | Override the `proton-drive` binary name or path (default: `proton-drive`). Useful for non-standard installations. |
+| `PROTON_DRIVE_BIN` | Optional | Override the `proton-drive` binary name or path (default: `proton-drive`; an empty value counts as unset). Useful for non-standard installations. |
 | `PROTON_DRIVE_LOCAL_ROOT` | Optional | Path-delimiter-separated list of local directories that upload/download/photos tools may touch. Unset = any path except the built-in credential denylist. |
 | `PROTON_DRIVE_ALLOW_SENSITIVE_PATHS` | Optional | Set to `1` to disable the built-in credential-location denylist (not recommended). |
+| `CLAUDE_DESKTOP_CONFIG` | Optional | Path of the Claude Desktop config that `doctor` and `setup-claude-desktop` read/write instead of the per-OS default. |
+| `PROTON_DRIVE_RETRY_BASE_MS` | Optional | Test hook: base backoff in ms for retrying read-only calls (default 250). |
 | `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 38 tools) or `core` (16 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
 
 ---
@@ -418,7 +420,7 @@ Download from [proton.me/download/drive/cli](https://proton.me/download/drive/cl
 Run `proton-drive auth login` in your terminal. Auth state is stored in your OS keychain and persists across sessions.
 
 **Claude can't see the connector**  
-Restart Claude Desktop fully after changing the MCP config. Check **`+` → Connectors → proton-drive**. The Proton Drive CLI must be in the `PATH` that Claude Desktop inherits (on macOS this may differ from your shell PATH — use the full binary path in config if needed).
+Restart Claude Desktop fully after changing the MCP config. Check **`+` → Connectors → proton-drive-mcp**. The Proton Drive CLI must be in the `PATH` that Claude Desktop inherits (on macOS this may differ from your shell PATH — use the full binary path in config if needed).
 
 **Upload fails on image files**  
 The CLI generates WebP thumbnails by default using Bun's image API. If Bun isn't installed or doesn't support thumbnails on your platform, the MCP passes `--skip-thumbnails` to bypass this. No action needed.
@@ -432,7 +434,7 @@ Or in Claude Desktop config:
 ```json
 {
   "mcpServers": {
-    "proton-drive": {
+    "proton-drive-mcp": {
       "command": "npx",
       "args": ["-y", "proton-drive-mcp"],
       "env": { "PROTON_DRIVE_BIN": "/usr/local/bin/proton-drive" }
@@ -446,7 +448,7 @@ Use the full path to the `proton-drive.exe` binary in your Claude Desktop config
 ```json
 {
   "mcpServers": {
-    "proton-drive": {
+    "proton-drive-mcp": {
       "command": "C:\\path\\to\\proton-drive-mcp.cmd"
     }
   }

@@ -37,7 +37,8 @@ function realResolve(p: string, depth = 0): string {
       return rest.length ? join(real, ...rest.reverse()) : real;
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "ENOTDIR") throw e;
+      // EACCES: an unreadable ancestor (e.g. /var/root) can't be resolved; keep walking up so the denylist still matches by path.
+      if (code !== "ENOENT" && code !== "ENOTDIR" && code !== "EACCES") throw e;
       let linkTarget: string | null = null;
       try {
         if (lstatSync(cur).isSymbolicLink()) linkTarget = readlinkSync(cur);

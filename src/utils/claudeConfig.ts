@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync, copyFileSync } from "node:fs";
+import { accessSync, constants, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,10 +58,19 @@ export function serverEntryPath(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "..", "index.js");
 }
 
+/** npx runs packages from a cache that gets pruned; a config pointing there breaks later. */
+export function isEphemeralInstall(p: string): boolean {
+  return /[\\/]_npx[\\/]/.test(p);
+}
+
 export function buildEntry(cliPath: string, syncPath?: string): McpEntry {
+  const entryPath = serverEntryPath();
+  if (isEphemeralInstall(entryPath)) {
+    throw new Error(`${entryPath} is in a temporary npx cache and would stop working once the cache is pruned. Install it first (npm install -g proton-drive-mcp) and run proton-drive-cli from there.`);
+  }
   const env: Record<string, string> = { PROTON_DRIVE_BIN: cliPath };
   if (syncPath) env["PROTON_DRIVE_SYNC_PATH"] = syncPath;
-  return { command: process.execPath, args: [serverEntryPath()], env };
+  return { command: process.execPath, args: [entryPath], env };
 }
 
 export function isDirectory(p: string): boolean {
@@ -70,7 +79,7 @@ export function isDirectory(p: string): boolean {
 
 function timestamp(d = new Date()): string {
   const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}${String(d.getMilliseconds()).padStart(3, "0")}`;
 }
 
 function parseConfig(file: string): Record<string, unknown> {
@@ -94,15 +103,20 @@ export function writeEntry(file: string, entry: McpEntry): string | undefined {
   if (servers !== undefined && (!servers || typeof servers !== "object" || Array.isArray(servers))) {
     throw new Error(`"mcpServers" in ${file} is not an object; refusing to modify it.`);
   }
+  const target = exists ? realpathSync(file) : file;
+  if (exists && JSON.stringify((servers as Record<string, unknown> | undefined)?.[SERVER_KEY]) === JSON.stringify(entry)) return undefined;
   let backup: string | undefined;
   if (exists) {
-    backup = `${file}.bak-${timestamp()}`;
-    copyFileSync(file, backup);
+    backup = `${target}.bak-${timestamp()}`;
+    copyFileSync(target, backup, constants.COPYFILE_EXCL);
   } else {
     mkdirSync(dirname(file), { recursive: true });
   }
   config["mcpServers"] = { ...(servers as Record<string, unknown> | undefined), [SERVER_KEY]: entry };
-  writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+  // Write beside the target and rename, so a crash or a concurrent reader never sees a truncated config.
+  const tmp = `${target}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n", { mode: exists ? statSync(target).mode & 0o777 : 0o600 });
+  renameSync(tmp, target);
 
   const written = (parseConfig(file)["mcpServers"] as Record<string, unknown>)[SERVER_KEY];
   if (JSON.stringify(written) !== JSON.stringify(entry)) throw new Error(`Verification failed: ${file} does not contain the expected entry.`);

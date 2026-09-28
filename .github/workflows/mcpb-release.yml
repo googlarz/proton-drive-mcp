@@ -21,6 +21,12 @@ jobs:
 
       - run: npm ci
 
+      - name: Release tag must match package version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: test "$TAG" = "v$(node -p "require('./package.json').version")"
+
       - run: npm run package:mcpb
 
       - name: Upload bundle as workflow artifact

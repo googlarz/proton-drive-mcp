@@ -2,7 +2,7 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeSandbox, fakeEnv, DIST_CLI, DIST_INDEX, FAKE_CLI } from "./helpers/mcp-client.mjs";
@@ -128,7 +128,7 @@ describe("setup-claude-desktop", () => {
     const r1 = await run(["setup-claude-desktop", "--config", f, "--sync-path", sync, "--write"]);
     assert.equal(r1.code, 0, r1.stderr);
     assert.match(r1.stdout, /restart Claude Desktop/);
-    const baks = readdirSync(d).filter((n) => /^claude_desktop_config\.json\.bak-\d{14}$/.test(n));
+    const baks = readdirSync(d).filter((n) => /^claude_desktop_config\.json\.bak-\d{17}$/.test(n));
     assert.equal(baks.length, 1);
     assert.equal(readFileSync(join(d, baks[0]), "utf8"), before);
     const j1 = JSON.parse(readFileSync(f, "utf8"));
@@ -139,6 +139,17 @@ describe("setup-claude-desktop", () => {
     assert.ok(text1.endsWith("}\n"));
     await run(["setup-claude-desktop", "--config", f, "--sync-path", sync, "--write"]);
     assert.equal(readFileSync(f, "utf8"), text1);
+    assert.equal(readdirSync(d).filter((n) => n.includes(".bak-")).length, 1, "unchanged re-run must not add backups");
+  });
+  it("--write keeps the file mode and leaves no temp files", async () => {
+    const d = tmp();
+    const f = cfgWith(d, others);
+    chmodSync(f, 0o600);
+    const r = await run(["setup-claude-desktop", "--config", f, "--write"]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(statSync(f).mode & 0o777, 0o600);
+    assert.equal(statSync(join(d, readdirSync(d).find((n) => n.includes(".bak-")))).mode & 0o777, 0o600);
+    assert.deepEqual(readdirSync(d).filter((n) => n.includes(".tmp-")), []);
   });
   it("--write creates missing file and parent dir", async () => {
     const f = join(tmp(), "a", "b", "c.json");
