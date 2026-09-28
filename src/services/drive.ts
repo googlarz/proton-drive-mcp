@@ -390,8 +390,9 @@ export class DriveService {
   // `filesystem delete` permanently deletes — but only items already inside
   // /trash or /photos-trash (the CLI rejects live paths). No --confirm flag
   // exists on the CLI side; our own confirmed-gate lives in the MCP layer.
-  async delete(remotePath: string): Promise<void> {
-    assertItemsOk(await this.run(["filesystem", "delete", remotePath]), "Delete");
+  async delete(remotePath?: string, uid?: string): Promise<void> {
+    const target = await this.resolveTrashTarget(remotePath, uid);
+    assertItemsOk(await this.run(["filesystem", "delete", target]), "Delete");
   }
 
   // Sharing
@@ -539,8 +540,42 @@ export class DriveService {
     assertItemsOk(await this.run(["filesystem", "trash", remotePath]), "Trash");
   }
 
-  async restore(remotePath: string): Promise<void> {
-    assertItemsOk(await this.run(["filesystem", "restore", remotePath]), "Restore");
+  async restore(remotePath?: string, uid?: string): Promise<void> {
+    const target = await this.resolveTrashTarget(remotePath, uid);
+    assertItemsOk(await this.run(["filesystem", "restore", target]), "Restore");
+  }
+
+  // Confirmed live against CLI v0.8.0: restore/delete accept only /trash
+  // paths, and the CLI resolves /trash/<x> by decrypted NAME, taking the
+  // first match — "/trash/<uid>", a bare uid and "/my-files/<uid>" are all
+  // rejected, and renaming a trashed node fails. So a specific item among
+  // same-named duplicates cannot be addressed at all; the only safe move is
+  // to refuse. The uid pins the exact item the caller saw in drive_list_trash
+  // and is translated to its /trash/<name> path once that name is unique.
+  async resolveTrashTarget(remotePath?: string, uid?: string): Promise<string> {
+    if (!remotePath && !uid) throw new Error("Provide path or uid (from drive_list_trash).");
+    const isTrashPath = remotePath !== undefined && /^\/trash\/(?:[^/\\]|\\.)+$/.test(remotePath);
+    if (!uid && !isTrashPath) return remotePath as string;
+    const trashed = await this.listTrash();
+    let target = remotePath as string;
+    if (uid) {
+      const item = trashed.find((f) => f.uid === uid);
+      if (!item) throw new Error(`No item with uid ${uid} in trash. Call drive_list_trash for current uids.`);
+      if (remotePath !== undefined && remotePath !== item.path) {
+        throw new Error(`path ${remotePath} does not match uid ${uid} (which is ${item.path} in trash).`);
+      }
+      target = item.path;
+    }
+    const matches = trashed.filter((f) => f.path === target);
+    if (matches.length > 1) {
+      const list = matches.map((f) => `uid ${f.uid ?? "?"} (trashed ${f.trashedAt ?? "unknown"})`).join("; ");
+      throw new Error(
+        `${matches.length} trashed items share the path ${target}: ${list}. ` +
+        "The proton-drive CLI can only address trashed items by name, so it would act on an arbitrary one — refusing. " +
+        "Restore or delete the intended item in the Proton Drive web or desktop app instead.",
+      );
+    }
+    return target;
   }
 
   async emptyTrash(): Promise<void> {

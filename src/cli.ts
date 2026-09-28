@@ -44,7 +44,7 @@ Commands:
                                            'remove' deletes the existing LOCAL item and needs --confirm)
   rename <path> <new-name>                 Rename in place, no move
   move <src> <dst>                         Move and/or rename
-  delete <path> --confirm                  Delete a file/folder already in trash, permanently
+  delete <path>|--uid <uid> --confirm      Delete a file/folder already in trash, permanently
   share status <path>                      Show sharing info
   share invite <path> <email> <role>       Invite user (viewer/editor/admin)
   share revoke <path> <email>              Revoke one user's access
@@ -56,7 +56,7 @@ Commands:
   trash <path>                             Move to trash
   trash list                               List trash contents
   trash empty --confirm                    Permanently delete all trash
-  restore <path>                           Restore from trash
+  restore <path>|--uid <uid>               Restore from trash (uid from 'trash list')
   invitation list                          List pending invitations
   invitation accept <uid>                  Accept an invitation
   invitation reject <uid>                  Reject an invitation
@@ -238,13 +238,15 @@ async function run() {
       break;
 
     case "delete": {
-      const delPath = requirePath(sub, "delete <path> --confirm");
+      const delUid = getFlag("--uid");
+      const delPath = delUid && (!sub || sub.startsWith("--")) ? undefined : requirePath(sub, "delete <path>|--uid <uid> --confirm");
+      const delLabel = delPath ?? `uid ${delUid}`;
       if (!args.includes("--confirm")) {
-        console.error(`This permanently deletes an item already in trash: ${delPath}\nPass --confirm to proceed.`);
+        console.error(`This permanently deletes an item already in trash: ${delLabel}\nPass --confirm to proceed.`);
         process.exit(1);
       }
-      await drive.delete(delPath);
-      console.log(`Deleted: ${delPath}`);
+      await drive.delete(delPath, delUid);
+      console.log(`Deleted: ${delLabel}`);
       break;
     }
 
@@ -329,10 +331,13 @@ async function run() {
       }
       break;
 
-    case "restore":
-      await drive.restore(requirePath(sub, "restore <path>"));
+    case "restore": {
+      const restoreUid = getFlag("--uid");
+      const restorePath = restoreUid && (!sub || sub.startsWith("--")) ? undefined : requirePath(sub, "restore <path>|--uid <uid>");
+      await drive.restore(restorePath, restoreUid);
       console.log("Restored.");
       break;
+    }
 
     case "copy": {
       const copySrc = requirePath(sub, "copy <src> <dst>");
