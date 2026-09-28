@@ -1294,7 +1294,7 @@ describe("drive_delete confirmed gate", () => {
     const drive = new DriveService(runner);
 
     await drive.delete("/trash/test.txt");
-    assert.deepEqual(calls[0], ["filesystem", "delete", "/trash/test.txt"]);
+    assert.deepEqual(calls.at(-1), ["filesystem", "delete", "/trash/test.txt"]);
   });
 });
 

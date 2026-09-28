@@ -354,7 +354,8 @@ const TOOLS = [
     description:
       "Permanently delete a file or folder that is already in the Proton Drive trash — irreversible. Requires authentication. " +
       "The underlying CLI only allows permanent deletion of items already inside /trash or /photos-trash; it rejects live paths. " +
-      "Use drive_trash first to move a live item into trash, then pass its trash path here — or drive_empty_trash to clear everything at once. " +
+      "Use drive_trash first to move a live item into trash, then pass its trash path (or its uid from drive_list_trash) here — or drive_empty_trash to clear everything at once. " +
+      "If several trashed items share the name, this refuses and lists their uids: the CLI can only address trashed items by name, so it cannot pick one of them (even by uid) — use the Proton Drive web or desktop app for that. " +
       "Requires confirmed=true; always show the exact path to the user and get explicit confirmation before calling.",
     annotations: { destructiveHint: true },
     inputSchema: {
@@ -362,14 +363,18 @@ const TOOLS = [
       properties: {
         path: {
           type: "string",
-          description: "Absolute remote Drive path to permanently delete (must start with '/').",
+          description: "Absolute remote Drive path to permanently delete (must start with '/'). Give path or uid (or both).",
+        },
+        uid: {
+          type: "string",
+          description: "Trash uid from drive_list_trash. Pins the exact item you listed; if both path and uid are given they must refer to the same item.",
         },
         confirmed: {
           type: "boolean",
           description: "Must be true. Confirms the user has acknowledged this deletion is permanent and cannot be undone.",
         },
       },
-      required: ["path", "confirmed"],
+      required: ["confirmed"],
       additionalProperties: false,
     },
   },
@@ -399,7 +404,8 @@ const TOOLS = [
     name: "drive_list_trash",
     description:
       "List all files and folders currently in the Proton Drive trash. Requires authentication. " +
-      "Returns {items, total, offset, limit, hasMore} (default limit 100, newest first when the CLI reports trash times); items are [{name, path, type, size?, modifiedAt?, uid, trashedAt?}]. Names are NOT unique in trash — two items can share one path; use uid to tell them apart. " +
+      "Returns {items, total, offset, limit, hasMore} (default limit 100, newest first when the CLI reports trash times); items are [{name, path, type, size?, modifiedAt?, uid, trashedAt?}]. Names are NOT unique in trash — two items can share one path; uid and trashedAt tell them apart. " +
+      "drive_restore/drive_delete accept the uid to pin the exact item, but refuse when its name is shared (the CLI cannot target one duplicate). " +
       "Use before drive_restore to find a trashed item's exact path, or before drive_empty_trash to show the user what will be permanently deleted. " +
       "Do not use to list active (non-trashed) files — use drive_list instead.",
     annotations: { readOnlyHint: true, idempotentHint: true },
@@ -490,7 +496,8 @@ const TOOLS = [
     name: "drive_restore",
     description:
       "Restore a trashed file or folder back to its original Proton Drive path. Requires authentication. " +
-      "Use drive_list_trash first to find the item's current path in trash. " +
+      "Use drive_list_trash first to find the item's path (or uid) in trash. " +
+      "If several trashed items share the name, this refuses and lists their uids: the CLI can only address trashed items by name, so it cannot pick one of them (even by uid) — use the Proton Drive web or desktop app for that. " +
       "Fails if the original parent folder no longer exists or if a new item with the same name was created at that path since it was trashed. " +
       "Do not use for items not currently in trash — it will return an error.",
     annotations: { destructiveHint: false },
@@ -499,10 +506,14 @@ const TOOLS = [
       properties: {
         path: {
           type: "string",
-          description: "Absolute remote Drive path of the item to restore, as shown in drive_list_trash output (must start with '/').",
+          description: "Absolute remote Drive path of the item to restore, as shown in drive_list_trash output (must start with '/'). Give path or uid (or both).",
+        },
+        uid: {
+          type: "string",
+          description: "Trash uid from drive_list_trash. Pins the exact item you listed; if both path and uid are given they must refer to the same item.",
         },
       },
-      required: ["path"],
+      required: [],
       additionalProperties: false,
     },
   },
@@ -1156,9 +1167,10 @@ export async function main() {
           if (a.confirmed !== true) {
             return fail("drive_delete requires confirmed=true. Ask the user to confirm before deleting.");
           }
-          const deletePath = validateRemotePath(a.path);
-          await drive.delete(deletePath);
-          return ok({ message: `Deleted: ${deletePath}` });
+          const deletePath = a.path === undefined ? undefined : validateRemotePath(a.path);
+          const deleteUid = a.uid ? validateFlagValue(a.uid as string, "uid") : undefined;
+          await drive.delete(deletePath, deleteUid);
+          return ok({ message: `Deleted: ${deletePath ?? `uid ${deleteUid}`}` });
         }
 
         case "drive_list_trash": {
@@ -1207,9 +1219,10 @@ export async function main() {
         }
 
         case "drive_restore": {
-          const restorePath = validateRemotePath(a.path);
-          await drive.restore(restorePath);
-          return ok({ message: `Restored from trash: ${restorePath}` });
+          const restorePath = a.path === undefined ? undefined : validateRemotePath(a.path);
+          const restoreUid = a.uid ? validateFlagValue(a.uid as string, "uid") : undefined;
+          await drive.restore(restorePath, restoreUid);
+          return ok({ message: `Restored from trash: ${restorePath ?? `uid ${restoreUid}`}` });
         }
 
         case "drive_empty_trash":
