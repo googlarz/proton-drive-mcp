@@ -398,7 +398,7 @@ async function run() {
           coverPhotoUid = rawCoverPhotoUid ? validateName(rawCoverPhotoUid) : undefined;
         } catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
         await drive.updateAlbum(albumPath, newName, coverPhotoUid);
-        console.log(`Album updated: ${albumPath}`);
+        console.log(`Album updated: ${newName ? `/albums/${newName}` : albumPath}`);
       } else if (sub === "delete") {
         const albumPath = requirePath(rest[0], "album delete <path> [--force] [--save] --confirm");
         if (!args.includes("--confirm")) {
