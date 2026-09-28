@@ -106,6 +106,10 @@ Restart Claude Desktop. Check **`+` → Connectors → proton-drive** to confirm
 
 > **Tip:** Make sure `proton-drive auth login` has been run at least once before starting Claude Desktop.
 
+### One-click install (MCPB bundle)
+
+Instead of editing JSON, download `proton-drive-mcp-<version>.mcpb` from the [latest GitHub release](https://github.com/googlarz/proton-drive-mcp/releases/latest) and open it (or drag it into **Settings → Extensions** in Claude Desktop). In the extension settings, set **proton-drive CLI path** to the output of `which proton-drive` (usually `~/.local/bin/proton-drive`); optionally set the **Proton Drive sync folder** to enable `drive_read_file` / `drive_write_file`. You still need the official `proton-drive` CLI installed and `proton-drive auth login` done once.
+
 ### If installed globally
 
 ```json
