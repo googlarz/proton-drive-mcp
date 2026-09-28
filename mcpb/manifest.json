@@ -1,0 +1,218 @@
+{
+  "manifest_version": "0.3",
+  "name": "proton-drive-mcp",
+  "display_name": "Proton Drive",
+  "version": "0.0.0",
+  "description": "Give Claude access to your Proton Drive: list, upload, download, share and manage end-to-end encrypted files via the official proton-drive CLI.",
+  "long_description": "Upload, download, search, share, move, trash and manage your Proton Drive files and photos from Claude Desktop. This extension wraps the official proton-drive CLI, so files stay end-to-end encrypted and nothing goes through a third-party relay.\n\nRequires the official proton-drive CLI to be installed and signed in (run `proton-drive auth login` once). Enter the path to the CLI in the settings field below: run `which proton-drive` in a terminal (usually ~/.local/bin/proton-drive).",
+  "author": {
+    "name": "googlarz",
+    "url": "https://github.com/googlarz"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/googlarz/proton-drive-mcp.git"
+  },
+  "homepage": "https://github.com/googlarz/proton-drive-mcp",
+  "documentation": "https://github.com/googlarz/proton-drive-mcp#readme",
+  "support": "https://github.com/googlarz/proton-drive-mcp/issues",
+  "license": "MIT",
+  "keywords": [
+    "proton",
+    "proton-drive",
+    "mcp",
+    "cloud-storage",
+    "encryption"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "launcher.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/launcher.mjs"
+      ],
+      "env": {
+        "PROTON_DRIVE_BIN": "${user_config.proton_drive_bin}",
+        "PROTON_DRIVE_SYNC_PATH": "${user_config.sync_path}"
+      }
+    }
+  },
+  "user_config": {
+    "proton_drive_bin": {
+      "type": "file",
+      "title": "proton-drive CLI path",
+      "description": "Path to the official proton-drive CLI. Run `which proton-drive` in a terminal to find it; usually ~/.local/bin/proton-drive. Leave empty to search PATH (Claude Desktop's PATH is minimal, so setting this is recommended).",
+      "required": false
+    },
+    "sync_path": {
+      "type": "directory",
+      "title": "Proton Drive sync folder",
+      "description": "Optional. Root of your locally synced Proton Drive folder; enables drive_read_file and drive_write_file.",
+      "required": false
+    }
+  },
+  "tools": [
+    {
+      "name": "drive_auth_status",
+      "description": "Check whether the Proton Drive CLI has an active authenticated session."
+    },
+    {
+      "name": "drive_auth_logout",
+      "description": "Clear the stored Proton Drive session from the OS keychain."
+    },
+    {
+      "name": "drive_version",
+      "description": "Return the installed proton-drive CLI version and SDK version as {cli: string, sdk: string}."
+    },
+    {
+      "name": "drive_list",
+      "description": "List the immediate children of a Proton Drive folder."
+    },
+    {
+      "name": "drive_info",
+      "description": "Get full metadata for a single Proton Drive file or folder, including latest revision details."
+    },
+    {
+      "name": "drive_upload",
+      "description": "Upload a local file or folder to Proton Drive with end-to-end encryption."
+    },
+    {
+      "name": "drive_download",
+      "description": "Download a file or folder from Proton Drive to the local filesystem."
+    },
+    {
+      "name": "drive_mkdir",
+      "description": "Create a new empty folder on Proton Drive."
+    },
+    {
+      "name": "drive_rename",
+      "description": "Rename a file or folder in place on Proton Drive, without moving it to a different parent folder."
+    },
+    {
+      "name": "drive_move",
+      "description": "Move or rename a file or folder on Proton Drive."
+    },
+    {
+      "name": "drive_delete",
+      "description": "Permanently delete a file or folder that is already in the Proton Drive trash — irreversible."
+    },
+    {
+      "name": "drive_share_status",
+      "description": "Return the current sharing state of a Proton Drive path."
+    },
+    {
+      "name": "drive_list_trash",
+      "description": "List all files and folders currently in the Proton Drive trash."
+    },
+    {
+      "name": "drive_share_invite",
+      "description": "Invite a person to access a Proton Drive file or folder by email."
+    },
+    {
+      "name": "drive_share_revoke",
+      "description": "Remove a specific person's access to a Proton Drive file or folder."
+    },
+    {
+      "name": "drive_trash",
+      "description": "Move a file or folder to the Proton Drive trash."
+    },
+    {
+      "name": "drive_restore",
+      "description": "Restore a trashed file or folder back to its original Proton Drive path."
+    },
+    {
+      "name": "drive_empty_trash",
+      "description": "Permanently delete ALL items in the Proton Drive trash — irreversible, no recovery."
+    },
+    {
+      "name": "drive_copy",
+      "description": "Copy a file or folder to another location on Proton Drive."
+    },
+    {
+      "name": "drive_list_invitations",
+      "description": "List all pending sharing invitations from other Proton Drive users."
+    },
+    {
+      "name": "drive_invitation_accept",
+      "description": "Accept a pending Proton Drive sharing invitation."
+    },
+    {
+      "name": "drive_invitation_reject",
+      "description": "Reject a pending Proton Drive sharing invitation."
+    },
+    {
+      "name": "drive_share_leave",
+      "description": "Leave a Proton Drive folder that was shared with you by another user."
+    },
+    {
+      "name": "drive_share_set_url",
+      "description": "Create or update a public share link for a Proton Drive file or folder."
+    },
+    {
+      "name": "drive_share_remove_url",
+      "description": "Remove the public share link from a Proton Drive file or folder."
+    },
+    {
+      "name": "drive_share_remove_all",
+      "description": "Remove access for every member and every pending invitation (Proton and non-Proton) on a shared Proton Drive path, in a single call."
+    },
+    {
+      "name": "photos_list_albums",
+      "description": "List all photo albums in Proton Photos."
+    },
+    {
+      "name": "photos_create_album",
+      "description": "Create a new empty photo album in Proton Photos."
+    },
+    {
+      "name": "photos_update_album",
+      "description": "Rename an album or change its cover photo in Proton Photos."
+    },
+    {
+      "name": "photos_delete_album",
+      "description": "Delete a Proton Photos album."
+    },
+    {
+      "name": "photos_list_album_photos",
+      "description": "List the photos in a Proton Photos album."
+    },
+    {
+      "name": "photos_add_to_album",
+      "description": "Add a photo from your Proton Photos library to an album."
+    },
+    {
+      "name": "photos_remove_from_album",
+      "description": "Remove a photo from a Proton Photos album without deleting it from your library."
+    },
+    {
+      "name": "photos_list_timeline",
+      "description": "List photos in your Proton Photos timeline (your full photo library, not scoped to an album)."
+    },
+    {
+      "name": "photos_download",
+      "description": "Download one or more photos from your Proton Photos timeline to a local folder by their /photos/<name> path."
+    },
+    {
+      "name": "photos_upload",
+      "description": "Upload one or more local photo or video files directly into your Proton Photos library (My Photos timeline)."
+    },
+    {
+      "name": "drive_read_file",
+      "description": "Read the text contents of a file from the local Proton Drive sync folder."
+    },
+    {
+      "name": "drive_write_file",
+      "description": "Write text content to a file in the local Proton Drive sync folder (no Proton login needed — this only touches the local synced folder)."
+    }
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=22.0.0"
+    }
+  }
+}

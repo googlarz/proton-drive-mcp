@@ -2,7 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./errors.js";
 
-const CLI_BINARY = process.env["PROTON_DRIVE_BIN"] ?? "proton-drive";
+// An empty value counts as unset: some clients pass "" for an optional setting.
+const CLI_BINARY = process.env["PROTON_DRIVE_BIN"] || "proton-drive";
 const DEFAULT_TIMEOUT_MS = 60_000;
 // Upload and download transfer actual file bytes — use a much longer timeout.
 const TRANSFER_TIMEOUT_MS = 30 * 60_000; // 30 minutes
@@ -266,25 +267,79 @@ function parseJsonLoose(raw: string): unknown {
   throw new Error("no JSON found");
 }
 
-// Seen live with several clients using the CLI at once: its local SQLite cache
-// briefly fails with "database is locked" (SQLITE_BUSY). Read-only commands are
-// safe to re-run; writes are not retried, since a retry could repeat a mutation.
+// Transient failures seen live (several clients on one CLI session, slow API):
+// "database is locked" (SQLite cache), a single API request timing out inside
+// the CLI ("Request timed out: GET https://drive-api.proton.me/..."), and
+// rate limiting. Strings below come from the CLI binary's own text (v0.8.0):
+//   "Too many requests limit reached" / "Too many server requests, please try again later"
+//   "Too many server errors, please try again later", "429 Too Many Requests",
+//   "502 Bad Gateway", "503 Service Unavailable",
+//   ": Timeout error, retrying" / ": Network error, retrying" / ": Offline error, retrying"
+//   and Node/Bun socket codes ECONNRESET, ETIMEDOUT, EAI_AGAIN, "socket hang up".
+// The CLI already retries some of these internally; we only see the ones that
+// ended up failing.
+const TRANSIENT_RE = new RegExp([
+  "database is locked", "SQLITE_BUSY",
+  "(?:http|status|error)[ :]*429\\b", "429 too many", "too many (server )?requests", "rate.?limit",
+  "\\b50[234] (?:bad gateway|service unavailable|gateway)", "(?:http|status|error)[ :]*50[234]\\b", "bad gateway", "service unavailable",
+  "request timed out", "timeout error", "network error", "offline error",
+  "ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "socket hang up",
+].join("|"), "i");
+const RETRY_AFTER_RE = /retry[- ]after\D{0,3}(\d+(?:\.\d+)?)/i;
+const MAX_RETRIES = 2; // 3 attempts total
+const MAX_RETRY_AFTER_MS = 5_000; // never stall the MCP client longer than this per wait
+// Undocumented test hook: shrink the backoff so tests run fast.
+const RETRY_BASE_MS = Number(process.env.PROTON_DRIVE_RETRY_BASE_MS ?? 250);
+
+// The single place that decides which commands may be re-run. Writes (mkdir,
+// upload, move, delete, ...) are never retried: a retry could repeat a mutation.
 const READ_ONLY_COMMANDS = new Set([
   "filesystem list", "filesystem info", "sharing status", "invitation list",
   "album list", "album photos", "photo timeline", "version",
 ]);
-const LOCKED_RE = /database is locked|SQLITE_BUSY/i;
+
+function isTransient(e: ExecError): boolean {
+  if (e.cancelled || e.killed === true) return false; // cancelled, or our own per-call timeout
+  const text = `${e.stderr ?? ""}\n${e.stdout ?? ""}`;
+  if (isAuthError(text)) return false;
+  return TRANSIENT_RE.test(stripAnsi(text));
+}
+
+function retryDelayMs(e: ExecError, attempt: number): number {
+  const m = RETRY_AFTER_RE.exec(stripAnsi(`${e.stderr ?? ""}\n${e.stdout ?? ""}`));
+  if (m) return Math.min(Number(m[1]) * 1000, MAX_RETRY_AFTER_MS);
+  return RETRY_BASE_MS * (attempt + 1) + Math.random() * RETRY_BASE_MS;
+}
+
+// Resolves false if the client cancels while we wait.
+function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve(false);
+    const onAbort = () => { clearTimeout(t); resolve(false); };
+    const t = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(true); }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 async function execCliWithRetry(args: string[], cliArgs: string[]): Promise<{ stdout: string; stderr: string }> {
   const readOnly = READ_ONLY_COMMANDS.has(args.slice(0, 2).join(" "));
+  const signal = callContext.getStore()?.signal;
+  const budget = timeoutFor(args);
+  const started = Date.now();
   for (let attempt = 0; ; attempt++) {
     try {
-      return await execCli(cliArgs, timeoutFor(args));
+      // The whole call, retries included, stays within the per-call budget.
+      return await execCli(cliArgs, Math.max(1, budget - (Date.now() - started)));
     } catch (err) {
       const e = err as ExecError;
-      const locked = LOCKED_RE.test(`${e.stderr ?? ""}\n${e.stdout ?? ""}`);
-      if (!readOnly || !locked || e.cancelled || attempt >= 2) throw err;
-      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1) + Math.random() * 250));
+      if (!readOnly || attempt >= MAX_RETRIES || !isTransient(e)) throw err;
+      const delay = retryDelayMs(e, attempt);
+      if (Date.now() - started + delay >= budget) throw err;
+      if (!(await sleepUnlessAborted(delay, signal))) {
+        const c: ExecError = new Error("cancelled");
+        c.cancelled = true;
+        throw c;
+      }
     }
   }
 }

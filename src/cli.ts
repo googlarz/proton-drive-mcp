@@ -19,6 +19,9 @@ import {
 } from "./services/drive.js";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./utils/errors.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
+import { runDoctor, formatDoctor } from "./utils/doctor.js";
+import { buildEntry, defaultConfigPath, isDirectory, resolveDriveCli, writeEntry, SERVER_KEY } from "./utils/claudeConfig.js";
+import { resolve } from "node:path";
 import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 
 const drive = new DriveService();
@@ -71,6 +74,12 @@ Commands:
   photo download <photo>... <local> [--conflict X] [--confirm]  Download photos (skip/rename/remove; 'remove' needs --confirm)
   photo upload <local>... [--conflict X]   Upload photos to your library (skip/rename)
 
+  doctor [--config <path>]                 Read-only diagnostics: Node, proton-drive CLI, auth, sync path, Claude Desktop config
+                                           (exit 1 if any check fails)
+  setup-claude-desktop [--config <path>] [--sync-path <dir>] [--write]
+                                           Print the Claude Desktop entry for this server (dry run); --write adds it to the
+                                           config (timestamped backup first). Restart Claude Desktop afterwards.
+
 Flags:
   --json                                   Machine-readable JSON output (one line)
 `);
@@ -103,6 +112,29 @@ function print(data: unknown) {
   console.log(jsonMode ? JSON.stringify(data) : JSON.stringify(data, null, 2));
 }
 
+function setupClaudeDesktop() {
+  const configPath = resolve(getFlag("--config") ?? defaultConfigPath());
+  const rawSync = getFlag("--sync-path");
+  const cliPath = resolveDriveCli();
+  if (!cliPath) {
+    console.error("Error: proton-drive CLI not found. Install it from https://proton.me/download/drive/cli/index.html, or set PROTON_DRIVE_BIN to its absolute path (`which proton-drive`).");
+    process.exit(1);
+  }
+  const syncPath = rawSync !== undefined ? resolve(rawSync) : undefined;
+  if (syncPath && !isDirectory(syncPath)) {
+    console.error(`Error: --sync-path ${syncPath} is not an existing directory.`);
+    process.exit(1);
+  }
+  const entry = buildEntry(cliPath, syncPath);
+  const shown = JSON.stringify({ mcpServers: { [SERVER_KEY]: entry } }, null, 2);
+  if (!args.includes("--write")) {
+    console.log(`Dry run: nothing changed. Would set this entry in ${configPath}:\n${shown}\nRe-run with --write to apply.`);
+    return;
+  }
+  const backup = writeEntry(configPath, entry);
+  console.log(`Wrote ${SERVER_KEY} to ${configPath}${backup ? ` (backup: ${backup})` : ""}.\n${shown}\nFully quit and restart Claude Desktop for the change to take effect.`);
+}
+
 async function run() {
   // Strip --json from positional parsing
   const positional = args.filter((a) => a !== "--json");
@@ -118,6 +150,18 @@ async function run() {
 
   if (cmd === "--help" || cmd === "-h") {
     usage();
+    return;
+  }
+
+  if (cmd === "doctor") {
+    const result = await runDoctor(getFlag("--config"));
+    console.log(jsonMode ? JSON.stringify(result) : formatDoctor(result));
+    process.exitCode = result.ok ? 0 : 1;
+    return;
+  }
+
+  if (cmd === "setup-claude-desktop") {
+    setupClaudeDesktop();
     return;
   }
 

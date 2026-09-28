@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.2.0 — 2026-09-28
+
+Setup, packaging and reliability round. Five features were built in parallel on separate branches, merged, then verified live (real account, 3 concurrent servers), on Node 22/24 and on the new Ubuntu + macOS CI matrix, plus an independent code review. Review and CI findings were fixed before release.
+
+**Breaking:** Node 20 is no longer supported (`engines` is `>=22`; Node 20 is past end-of-life). It may still start, but it is not tested and `doctor` fails on it.
+
+### Added
+- **`proton-drive-cli doctor`**: checks Node, the `proton-drive` CLI, login state, sync folder and the Claude Desktop config; `--json` output; exits 1 on failure. It only reports on our own config entry, never other servers' entries.
+- **`proton-drive-cli setup-claude-desktop`**: prints (default) or writes (`--write`) the Claude Desktop entry with absolute paths. Touches only `mcpServers["proton-drive-mcp"]`, keeps a timestamped `.bak`, writes atomically, skips the write if nothing changed, and refuses to run from a temporary `npx` cache or on invalid JSON.
+- **MCPB bundle** (`npm run package:mcpb`): one-click Claude Desktop extension attached to each GitHub release (macOS and Linux only; installing it into Claude Desktop is untested).
+- **`PROTON_DRIVE_TOOL_TIER=core`**: exposes 16 everyday tools (~13 KB of tool definitions instead of ~29 KB). Hidden tools are refused at call time. Tool descriptions were also shortened; every safety note was kept.
+- **Retry of read-only calls** on rate limiting, timeouts and network errors (max 3 attempts, bounded by the call timeout). Mutating and transfer commands are never retried.
+- **CI**: Ubuntu and macOS × Node 22/24, non-blocking Windows probe; publish workflow is ready for npm Trusted Publishing (the `NPM_TOKEN` fallback stays until one OIDC publish has succeeded).
+
+### Fixed
+- An empty `PROTON_DRIVE_BIN` (some clients pass `""` for an optional setting) is now treated as unset.
+- The README Claude Desktop snippets use the same server key as `setup-claude-desktop` (`proton-drive-mcp`), so `doctor` finds it.
+- Local-path guard: an unreadable ancestor directory (such as `/var/root` for a non-root user) no longer aborts the denylist check with a raw `EACCES`.
+
+### Known limitations
+- Windows is not supported (tests never passed there; only probed in CI).
+- `drive_share_leave`, `drive_invitation_accept` and `drive_invitation_reject` have never been tested live (no second Proton account).
+- The MCPB bundle and the npm OIDC publish path have not been exercised against the real Claude Desktop / npm yet.
+
 ## 1.1.0 — 2026-09-28
 
 A "test it like Mail Bridge" round: 6 agents live-tested every tool group against a real account for the first time at scale — full-byte round trips up to 200 MB, the real Proton Drive sync folder, real photo uploads/albums, three MCP servers sharing one CLI session concurrently, official MCP clients (SDK, Inspector, Node 20/22/24, a packed-and-installed tarball), and adversarial edge cases. 3 high-severity and 7 medium-severity bugs were found, fixed by 5 agents working in parallel on separate branches, then the merged result was re-verified live by another 5 agents (one an independent code review) before anything shipped. Every fix below was reproduced from the original bug, not assumed from a commit message.

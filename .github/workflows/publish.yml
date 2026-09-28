@@ -34,6 +34,10 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: npm
 
+      # Trusted Publishing needs npm CLI >=11.5.1; setup-node's bundled npm may be older.
+      - name: Update npm for Trusted Publishing support
+        run: npm install -g npm@11
+
       - name: Install dependencies
         run: npm ci
 
@@ -49,6 +53,11 @@ jobs:
       - name: Packaging smoke test
         run: node scripts/pack-smoke.mjs
 
+      # OWNER ACTION to finish the migration to npm Trusted Publishing (OIDC):
+      #   1. npmjs.com -> package proton-drive-mcp -> Settings -> Trusted publishing:
+      #      repo googlarz/proton-drive-mcp, workflow publish.yml, environment npm-publish.
+      #   2. Delete the NPM_TOKEN secret and remove the env block below.
+      # Until then NODE_AUTH_TOKEN remains as a fallback; npm tries OIDC first.
       - name: Publish
         run: npm publish --provenance --access public
         env:
