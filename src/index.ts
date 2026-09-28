@@ -966,7 +966,7 @@ const TOOLS = [
       "Read the text contents of a file from the local Proton Drive sync folder. " +
       "Requires the PROTON_DRIVE_SYNC_PATH environment variable to point to the root of the synced folder (e.g. /Users/alice/Proton Drive). " +
       "The Proton Drive desktop app must be running and the file must be synced locally. " +
-      "Limited to text files up to 1 MB — returns an error for binary files or larger files (use drive_download instead). " +
+      "Limited to UTF-8 text files up to 1 MB — returns an error for binary, non-UTF-8 or larger files (use drive_download instead). " +
       "Do not use for files not yet synced locally, binary files, or files over 1 MB — use drive_download instead.",
     annotations: { readOnlyHint: true },
     inputSchema: {
@@ -974,7 +974,7 @@ const TOOLS = [
       properties: {
         path: {
           type: "string",
-          description: "Absolute remote Drive path of the file to read (must start with '/'). Mapped to the local sync folder. E.g. /my-files/notes.txt",
+          description: "Absolute remote Drive path of the file to read (must start with '/'). /my-files/<rest> maps to <PROTON_DRIVE_SYNC_PATH>/<rest> (the sync folder's top level is /my-files). Other Drive roots (/photos, /albums, /trash, /photos-trash, /shared-with-me, /shared-by-me, /devices) are rejected — only /my-files is synced. Legacy: a path not starting with a Drive root is taken relative to the sync folder. E.g. /my-files/notes.txt",
         },
       },
       required: ["path"],
@@ -996,7 +996,7 @@ const TOOLS = [
       properties: {
         path: {
           type: "string",
-          description: "Absolute remote Drive path of the file to write (must start with '/'). Mapped to the local sync folder. E.g. /my-files/notes.txt",
+          description: "Absolute remote Drive path of the file to write (must start with '/'). /my-files/<rest> maps to <PROTON_DRIVE_SYNC_PATH>/<rest> (the sync folder's top level is /my-files). Other Drive roots (/photos, /albums, /trash, /photos-trash, /shared-with-me, /shared-by-me, /devices) are rejected — only /my-files is synced. Legacy: a path not starting with a Drive root is taken relative to the sync folder. E.g. /my-files/notes.txt",
         },
         content: {
           type: "string",

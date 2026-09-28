@@ -17,9 +17,21 @@ function isInside(root: string, target: string): boolean {
   return rel !== ".." && !rel.startsWith(".." + sep);
 }
 
-/** Map a remote Drive path to an absolute local path inside syncRoot. Lexical only; rejects traversal. */
+// Drive roots other than /my-files are not part of the desktop sync folder.
+const UNSYNCED_ROOTS = ["photos", "albums", "trash", "photos-trash", "shared-with-me", "shared-by-me", "devices"];
+
+/**
+ * Map a remote Drive path to an absolute local path inside syncRoot. Lexical only; rejects traversal.
+ * The sync folder's top level is Drive's /my-files, so `/my-files/<rest>` maps to `<syncRoot>/<rest>`.
+ * Paths not under a known Drive root are (legacy) relative to the sync root.
+ */
 export function resolveSyncPath(syncRoot: string, remotePath: string): string {
-  const rel = remotePath.replace(/^\//, "");
+  const trimmed = remotePath.replace(/^\//, "");
+  const first = trimmed.split("/", 1)[0];
+  if (UNSYNCED_ROOTS.includes(first)) {
+    throw new Error(`only /my-files is synced to the local folder; /${first} is not: ${remotePath}`);
+  }
+  const rel = first === "my-files" ? trimmed.slice("my-files".length).replace(/^\//, "") : trimmed;
   const resolved = resolve(join(syncRoot, rel));
   const root = resolve(syncRoot);
   if (!isInside(root, resolved)) {
@@ -123,7 +135,11 @@ export async function readSyncFile(syncRoot: string, remotePath: string): Promis
     if (data.includes(0)) {
       throw new Error(`${remotePath} appears to be a binary file. Use drive_download instead.`);
     }
-    return data.toString("utf8");
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(data);
+    } catch {
+      throw new Error(`${remotePath} is not valid UTF-8 text. Use drive_download instead.`);
+    }
   } finally {
     await fh.close();
   }
