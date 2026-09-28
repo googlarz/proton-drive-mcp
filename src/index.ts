@@ -818,7 +818,7 @@ const TOOLS = [
     name: "photos_list_album_photos",
     description:
       "List the photos in a Proton Photos album. Requires authentication. " +
-      "Returns {items, total, offset, limit, hasMore} (default limit 100, newest capture first, ties by nodeUid); items are [{nodeUid}], or with loadDetails=true also name, mediaType, sizes, captureTime and tags. Items come in a stable sorted order; each page is a fresh read, so changes made between page calls can still shift items. " +
+      "Returns {items, total, offset, limit, hasMore} (default limit 100, newest capture first, ties by nodeUid — without loadDetails there is no captureTime, so the order is by nodeUid); items are [{nodeUid}], or with loadDetails=true also name, mediaType, sizes, captureTime and tags. Items come in a stable sorted order; each page is a fresh read, so changes made between page calls can still shift items. " +
       "albumPath must start with /albums/. " +
       "To add or remove photos, use their Drive path under /photos/ (not the nodeUid).",
     annotations: { readOnlyHint: true, idempotentHint: true },

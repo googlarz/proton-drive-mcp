@@ -5,12 +5,14 @@
 //   FAKE_ARGV_LOG     file that receives one JSON line per invocation: {argv, pid}
 //   FAKE_MODE         json | shuffle | empty | undefined-literal | garbage | ansi-prefixed-json |
 //                     fail-stderr | fail-stderr-echo | fail-stdout-crash | hang |
-//                     big-stderr | auth-fail | ok-false-results
+//                     big-stderr | auth-fail | ok-false-results | locked-then-json
+//   FAKE_COUNTER      locked-then-json: file holding the number of calls so far
+//   FAKE_LOCKED_TIMES locked-then-json: how many calls fail with "database is locked" (default 2)
 //   FAKE_STDOUT       payload printed in json / ansi-prefixed-json mode (default "[]")
 //   FAKE_SLEEP_MS     delay before answering in json mode
 //   FAKE_PIDFILE      hang mode appends {role,pid,argv0} lines (child + grandchild)
 //   FAKE_HANG_VERSION 1 = `version` obeys FAKE_MODE (hang); otherwise it always prints version text
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 
 const argv = process.argv.slice(2);
@@ -99,6 +101,20 @@ switch (mode) {
     process.stderr.write("You need to login first\n");
     process.exit(1);
     break;
+  case "locked-then-json": {
+    // First FAKE_LOCKED_TIMES calls fail like the real CLI's SQLite cache under
+    // concurrent use; later calls succeed. FAKE_COUNTER holds the call count.
+    const counter = process.env.FAKE_COUNTER;
+    const n = counter && existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;
+    if (counter) writeFileSync(counter, String(n + 1));
+    if (n < Number(process.env.FAKE_LOCKED_TIMES ?? 2)) {
+      process.stderr.write("SQLiteError: database is locked (SQLITE_BUSY_RECOVERY)\n");
+      process.exit(1);
+    }
+    process.stdout.write(payload + "\n");
+    process.exit(0);
+    break;
+  }
   case "ok-false-results":
     process.stdout.write(JSON.stringify([{ uid: "u1", ok: false, error: { name: "NodeWithSameNameExistsValidationError", code: 2500 } }]) + "\n");
     process.exit(0);

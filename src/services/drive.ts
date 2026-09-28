@@ -376,7 +376,8 @@ export class DriveService {
       return;
     }
 
-    const dstNames = new Set((await this.list(dst.parent)).map((f) => f.name));
+    const dstItems = await this.list(dst.parent);
+    const dstNames = new Set(dstItems.map((f) => f.name));
     if (dstNames.has(dst.name)) {
       // Only checked on this error path (costs a call): a missing source was
       // otherwise misreported as "Destination already exists".
@@ -388,7 +389,10 @@ export class DriveService {
         }
         throw err;
       }
-      throw new Error(`Destination already exists: ${destinationPath}`);
+      // Seen in live testing: passing the target folder itself as destinationPath is an easy mistake.
+      const isFolder = dstItems.find((f) => f.name === dst.name)?.type === "folder";
+      const hint = isFolder ? ` — it is a folder; to move into it, pass the full new path, e.g. ${joinRemote(destinationPath, src.name)}` : "";
+      throw new Error(`Destination already exists: ${destinationPath}${hint}`);
     }
 
     if (!dstNames.has(unescapeName(src.name))) {
@@ -585,11 +589,15 @@ export class DriveService {
   // same-named duplicates cannot be addressed at all; the only safe move is
   // to refuse. The uid pins the exact item the caller saw in drive_list_trash
   // and is translated to its /trash/<name> path once that name is unique.
+  // /photos-trash gets the same duplicate check: it holds the user's trashed
+  // photos, where a same-named pair is easy to end up with.
+  // The lookup and the CLI call are two steps, so an item trashed under the
+  // same name in between is not detected.
   async resolveTrashTarget(remotePath?: string, uid?: string): Promise<string> {
     if (!remotePath && !uid) throw new Error("Provide path or uid (from drive_list_trash).");
-    const isTrashPath = remotePath !== undefined && /^\/trash\/(?:[^/\\]|\\.)+$/.test(remotePath);
-    if (!uid && !isTrashPath) return remotePath as string;
-    const trashed = await this.listTrash();
+    const root = remotePath?.match(/^\/(trash|photos-trash)\/(?:[^/\\]|\\.)+$/)?.[1];
+    if (!uid && !root) return remotePath as string;
+    const trashed = await this.list(`/${root ?? "trash"}`, { includeUid: true });
     let target = remotePath as string;
     if (uid) {
       const item = trashed.find((f) => f.uid === uid);
@@ -709,9 +717,13 @@ export class DriveService {
     // CLI 0.8.0 deletes a non-empty album even without --force (confirmed live).
     if (!force) {
       const name = unescapeName(albumPath.replace(/^\/albums\//, ""));
-      const count = (await this.listAlbums()).find((a) => a.name === name)?.photoCount ?? 0;
-      if (count > 0) {
-        throw new Error(`Album ${albumPath} still contains ${count} photo(s). Pass force to delete it anyway (the photos stay in your timeline).`);
+      const album = (await this.listAlbums()).find((a) => a.name === name);
+      // Fail closed: if the album can't be matched, emptiness can't be checked.
+      if (!album) {
+        throw new Error(`Could not find album ${albumPath} in the album list to check that it is empty. Check the name with photos_list_albums, or pass force to delete it anyway.`);
+      }
+      if (album.photoCount > 0) {
+        throw new Error(`Album ${albumPath} still contains ${album.photoCount} photo(s). Pass force to delete it anyway (the photos stay in your timeline).`);
       }
     }
     const args = ["album", "delete", albumPath];

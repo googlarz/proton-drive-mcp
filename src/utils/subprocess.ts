@@ -266,9 +266,32 @@ function parseJsonLoose(raw: string): unknown {
   throw new Error("no JSON found");
 }
 
+// Seen live with several clients using the CLI at once: its local SQLite cache
+// briefly fails with "database is locked" (SQLITE_BUSY). Read-only commands are
+// safe to re-run; writes are not retried, since a retry could repeat a mutation.
+const READ_ONLY_COMMANDS = new Set([
+  "filesystem list", "filesystem info", "sharing status", "invitation list",
+  "album list", "album photos", "photo timeline", "version",
+]);
+const LOCKED_RE = /database is locked|SQLITE_BUSY/i;
+
+async function execCliWithRetry(args: string[], cliArgs: string[]): Promise<{ stdout: string; stderr: string }> {
+  const readOnly = READ_ONLY_COMMANDS.has(args.slice(0, 2).join(" "));
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await execCli(cliArgs, timeoutFor(args));
+    } catch (err) {
+      const e = err as ExecError;
+      const locked = LOCKED_RE.test(`${e.stderr ?? ""}\n${e.stdout ?? ""}`);
+      if (!readOnly || !locked || e.cancelled || attempt >= 2) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1) + Math.random() * 250));
+    }
+  }
+}
+
 export async function runDrive(args: string[]): Promise<unknown> {
   try {
-    const { stdout, stderr } = await execCli([...args, "--json"], timeoutFor(args));
+    const { stdout, stderr } = await execCliWithRetry(args, [...args, "--json"]);
 
     const raw = stdout.trim();
 
@@ -307,7 +330,7 @@ export async function runDrive(args: string[]): Promise<unknown> {
 // print plain text. This runs without appending --json and returns raw stdout.
 export async function runDriveRaw(args: string[]): Promise<string> {
   try {
-    const { stdout, stderr } = await execCli(args, timeoutFor(args));
+    const { stdout, stderr } = await execCliWithRetry(args, args);
     if (!stdout.trim() && stderr && stderr.trim() && isAuthError(stderr)) {
       throw new DriveNotAuthenticatedError();
     }

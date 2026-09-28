@@ -36,7 +36,11 @@ describe("confirmation flags", () => {
       assert.equal(r.calls.length, 0);
     });
     it(`${label} proceeds with --confirm`, async () => {
-      const r = await runCli([...args, "--confirm"]);
+      // album delete now checks the album is empty first (fail-closed if it can't
+      // find it in the list, which the shared "[]" fake CLI never returns) — force
+      // it here since this test is only about the --confirm gate, not that check.
+      const extra = label === "album delete" ? ["--force"] : [];
+      const r = await runCli([...args, "--confirm", ...extra]);
       assert.equal(r.code, 0, r.stderr);
       assert.ok(r.calls.length > 0);
     });

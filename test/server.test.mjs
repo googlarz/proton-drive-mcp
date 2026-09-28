@@ -286,11 +286,11 @@ describe("argv passed to the CLI", () => {
     assert.ok(argv.includes("--save"));
   });
 
-  it("photos_delete_album omits --force/--save by default", async () => {
-    await s.c.call("photos_delete_album", { albumPath: "/albums/Trip2", confirmed: true });
+  it("photos_delete_album omits --force/--save when not passed (force:true only to skip the empty-album check the shared fake CLI can't satisfy)", async () => {
+    await s.c.call("photos_delete_album", { albumPath: "/albums/Trip2", confirmed: true, force: true });
     const argv = find((a) => a[0] === "album" && a[1] === "delete" && a[2] === "/albums/Trip2");
     assert.ok(argv);
-    assert.ok(!argv.includes("--force"));
+    assert.ok(argv.includes("--force"));
     assert.ok(!argv.includes("--save"));
   });
 

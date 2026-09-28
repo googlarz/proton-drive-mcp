@@ -346,6 +346,8 @@ These come from the upstream `proton-drive` CLI (v0.8.0), not from this server:
 - Upload/download counts include folders, not only files.
 - `/albums/...` paths cannot be downloaded — download a photo via `/photos/<name>`.
 - A name ending in a backslash (e.g. `tail\`, created by another client) cannot be used as a parent in a path: the CLI reads `tail\/child` as an escaped `/`, and has no escape for a literal backslash (`\\` does not work either). The folder itself is reachable; its children are not reachable by path.
+- Trashed items are addressed by name only. When two items in `/trash` or `/photos-trash` share a name, `drive_restore` and `drive_delete` refuse (listing the uids) instead of acting on an arbitrary one — restore or delete that item in the Proton Drive web or desktop app.
+- When several programs use the CLI at the same moment (e.g. Claude Desktop and Claude Code), its local cache can briefly report `database is locked`. Read-only calls are retried automatically; writes are not (a retry could repeat the change), so just run the write again.
 
 ## Testing status
 
