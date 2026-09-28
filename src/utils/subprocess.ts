@@ -2,7 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./errors.js";
 
-const CLI_BINARY = process.env["PROTON_DRIVE_BIN"] ?? "proton-drive";
+// An empty value counts as unset: some clients pass "" for an optional setting.
+const CLI_BINARY = process.env["PROTON_DRIVE_BIN"] || "proton-drive";
 const DEFAULT_TIMEOUT_MS = 60_000;
 // Upload and download transfer actual file bytes — use a much longer timeout.
 const TRANSFER_TIMEOUT_MS = 30 * 60_000; // 30 minutes
