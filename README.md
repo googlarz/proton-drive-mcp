@@ -120,6 +120,29 @@ Restart Claude Desktop. Check **`+` → Connectors → proton-drive** to confirm
 
 ---
 
+## Setup and diagnostics
+
+Two commands of the companion CLI help when Claude Desktop reports "proton-drive CLI not found" (it starts servers with a minimal `PATH`):
+
+```bash
+# Read-only checks: Node >= 22, proton-drive CLI + version, auth, PROTON_DRIVE_SYNC_PATH, your Claude Desktop entry
+proton-drive-cli doctor [--json] [--config <path>]
+
+# Dry run: prints the entry it would add and the target file, changes nothing
+proton-drive-cli setup-claude-desktop [--config <path>] [--sync-path <dir>]
+
+# Apply it (timestamped backup first; only mcpServers["proton-drive-mcp"] is touched)
+proton-drive-cli setup-claude-desktop --sync-path "$HOME/Proton Drive" --write
+```
+
+`doctor` exits 1 if any check fails (warnings do not fail). It only ever reports on the `proton-drive-mcp` entry of the config, never on other servers. `setup-claude-desktop` writes the absolute path of the running `node`, of this package's `dist/index.js`, and of the resolved `proton-drive` binary (`PROTON_DRIVE_BIN`). It refuses to run if the CLI cannot be found or the config file is not valid JSON, and re-running it gives the same file.
+
+The default config location is per OS (macOS `~/Library/Application Support/Claude/`, Windows `%APPDATA%\Claude\`, Linux `$XDG_CONFIG_HOME` or `~/.config/Claude/`); use `--config` or the `CLAUDE_DESKTOP_CONFIG` environment variable to point elsewhere. On Windows the CLI lookup honours `PATHEXT`.
+
+**Claude Desktop only reads its config at startup: fully quit and restart it afterwards** (closing the window is not enough).
+
+---
+
 ## Try it: example Claude prompts
 
 **Backup a build artifact**
