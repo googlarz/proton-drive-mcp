@@ -76,10 +76,17 @@ describe("live read-only smoke", { skip: LIVE ? false : "set PROTON_DRIVE_LIVE=1
     assert.ok(r.data.items.length <= 3);
   });
 
-  it("drive_share_status on a never-shared path returns isShared:false", async () => {
-    const r = await c.call("drive_share_status", { path: "/my-files" }, opts);
+  it("drive_share_status refuses a root and works on a folder inside it", async () => {
+    const root = await c.call("drive_share_status", { path: "/my-files" }, opts);
+    assert.equal(root.isError, true);
+    assert.match(root.text, /Roots cannot be shared/);
+    const list = await c.call("drive_list", { path: "/my-files" }, opts);
+    assert.equal(list.isError, false, list.text);
+    const folder = list.data.items.find((i) => i.type === "folder");
+    if (!folder) return; // nothing to check without a folder
+    const r = await c.call("drive_share_status", { path: folder.path }, opts);
     assert.equal(r.isError, false, r.text);
-    assert.equal(r.data.isShared, false);
+    assert.equal(typeof r.data.isShared, "boolean");
   });
 
   it("drive_info on a nonexistent path is an error", async () => {

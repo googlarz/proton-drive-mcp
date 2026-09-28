@@ -254,11 +254,10 @@ const TOOLS = [
     name: "drive_download",
     description:
       "Download a file or folder from Proton Drive to the local filesystem. Requires authentication. " +
-      "localPath is a destination FOLDER, not the file's exact final path — the CLI creates it automatically if missing and places the downloaded item inside it under its original remote name. " +
-      "E.g. downloading /my-files/report.pdf with localPath '/tmp/out' produces /tmp/out/report.pdf, not /tmp/out itself as a file — confirmed live against the real CLI (v0.8.0). " +
-      "For folders, downloads recursively. " +
-      "Conflict strategies are set separately for files and folders (CLI v0.8.0+) — both default to 'skip'. " +
-      "Returns {downloaded, skipped, failed} counts — not the actual local path; construct it as localPath + the remote item's basename if you need it. Fails the call if any file failed to download. " +
+      "localPath is a destination FOLDER, not the file's final path — created if missing; the item is placed inside it under its remote name. " +
+      "E.g. /my-files/report.pdf with localPath '/tmp/out' produces /tmp/out/report.pdf. " +
+      "Folders download recursively. File and folder conflict strategies are separate; both default to 'skip'. " +
+      "Returns {downloaded, skipped, failed} counts (folders count as items), not the local path — it is localPath + the remote basename. Fails the call if any file failed. " +
       "Do not use to move files within Drive (use drive_move) or to read a small text file's contents (use drive_read_file if PROTON_DRIVE_SYNC_PATH is set).",
     annotations: { openWorldHint: true },
     inputSchema: {
@@ -452,7 +451,7 @@ const TOOLS = [
         },
         message: {
           type: "string",
-          description: "Optional message included in the invitation email (max 2000 characters).",
+          description: "Optional message included in the invitation email (max 500 characters — Proton rejects longer ones).",
         },
       },
       required: ["path", "email", "role"],
@@ -706,6 +705,7 @@ const TOOLS = [
     description:
       "Remove access for every member and every pending invitation (Proton and non-Proton) on a shared Proton Drive path, in a single call. Requires authentication and confirmed=true. " +
       "Use drive_share_status first to show the user who currently has access. " +
+      "Does NOT remove a public link — the result says if one is still active; remove it with drive_share_remove_url. " +
       "For removing one specific person, use drive_share_revoke instead — it is cheaper and less error-prone.",
     annotations: { destructiveHint: true },
     inputSchema: {
@@ -1309,8 +1309,9 @@ export async function main() {
             return fail("drive_share_remove_all requires confirmed=true. Use drive_share_status first to show the user who has access.");
           }
           const removeAllPath = validateRemotePath(a.path);
-          const removedCount = await drive.shareRemoveAll(removeAllPath);
-          return ok({ message: removedCount === 0 ? `Nothing to remove: ${removeAllPath} has no members or pending invitations.` : `Removed all access (${removedCount} member/invitation(s)) to: ${removeAllPath}` });
+          const removeAll = await drive.shareRemoveAll(removeAllPath);
+          const linkNote = removeAll.publicLink ? " A public link is still active — anyone with it keeps access; remove it with drive_share_remove_url." : "";
+          return ok({ message: (removeAll.removed === 0 ? `Nothing to remove: ${removeAllPath} has no members or pending invitations.` : `Removed all members and invitations (${removeAll.removed}) from: ${removeAllPath}.`) + linkNote });
         }
 
         case "photos_list_albums":
@@ -1466,7 +1467,7 @@ export async function main() {
     if (!cliCheck.available) {
       logger.error(cliCheck.reason === "not_executable"
         ? "proton-drive CLI found but not executable. Run: chmod +x $(which proton-drive)"
-        : "proton-drive CLI not found. Download from https://proton.me/download/drive/cli/index.html");
+        : "proton-drive CLI not found. Download from https://proton.me/download/drive/cli/index.html, or set PROTON_DRIVE_BIN to its absolute path (find it with `which proton-drive`).");
     }
   });
 }

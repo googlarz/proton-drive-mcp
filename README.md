@@ -93,11 +93,14 @@ Add to your `claude_desktop_config.json`:
   "mcpServers": {
     "proton-drive": {
       "command": "npx",
-      "args": ["-y", "proton-drive-mcp"]
+      "args": ["-y", "proton-drive-mcp"],
+      "env": { "PROTON_DRIVE_BIN": "/absolute/path/to/proton-drive" }
     }
   }
 }
 ```
+
+Claude Desktop starts servers with a minimal `PATH`, so a `proton-drive` in `~/.local/bin` is usually not found. Set `PROTON_DRIVE_BIN` to the output of `which proton-drive` (the default install location is `~/.local/bin/proton-drive`, written out in full, e.g. `/Users/you/.local/bin/proton-drive`). If `npx` itself is not found, use its absolute path as `command` (`which npx`).
 
 Restart Claude Desktop. Check **`+` → Connectors → proton-drive** to confirm the server is connected.
 
@@ -329,6 +332,24 @@ proton-drive-cli share status /my-files/Projects
 - `drive_auth_status` has no native CLI equivalent — it probes by resolving `/my-files` and reports authenticated based on whether that succeeds.
 - Paths are always Drive-absolute: `/my-files/folder/file.pdf`. Relative paths are not supported.
 - All calls include `--json` automatically, except `drive_version`, whose underlying CLI command ignores `--json` and always prints plain text — this MCP parses it directly.
+
+## Known limitations
+
+These come from the upstream `proton-drive` CLI (v0.8.0), not from this server:
+
+- Big folders cannot be copied yet (`drive_copy` fails with `InvalidRequirementsAPIError` code 2000).
+- A `"` in a name becomes `_` when the item is downloaded locally.
+- Public-link expiration can be at most ~90 days ahead, to the minute.
+- `drive_share_status` only reports sharing set directly on the item — access inherited from a shared parent folder is not shown.
+- Roots (`/my-files`, `/photos`, …) cannot be shared; `drive_share_status` on a root returns an error.
+- `photos_list_timeline` pages are not a snapshot: photos added or removed between calls shift later pages.
+- Upload/download counts include folders, not only files.
+- `/albums/...` paths cannot be downloaded — download a photo via `/photos/<name>`.
+- A name ending in a backslash (e.g. `tail\`, created by another client) cannot be used as a parent in a path: the CLI reads `tail\/child` as an escaped `/`, and has no escape for a literal backslash (`\\` does not work either). The folder itself is reachable; its children are not reachable by path.
+
+## Testing status
+
+Every tool group was live-tested on 2026-09-28 against a real Proton account, **except** `drive_share_leave`, `drive_invitation_accept` and `drive_invitation_reject`. Those three have never been tested against a real account, because the maintainer has no second Proton account to share from; they are only unit-tested against a fake CLI.
 
 ---
 

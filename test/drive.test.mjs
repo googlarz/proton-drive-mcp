@@ -369,12 +369,12 @@ describe("move", () => {
   it("fails before touching anything when the destination name is already taken", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);
-    t.queue([{ name: { ok: true, value: "new.pdf" }, type: "file" }]);
+    t.queue([{ name: { ok: true, value: "new.pdf" }, type: "file" }], { uid: "src" });
     await assert.rejects(
       () => drive.move("/my-files/old.pdf", "/my-files/Archive/new.pdf"),
       /Destination already exists/
     );
-    assert.equal(t.calls.length, 1, "only the destination listing may run");
+    assert.deepEqual(t.calls.map((c) => c[1]), ["list", "info"], "only read-only calls may run");
   });
 
   it("renames first, then moves, when the source's own name is taken in the destination folder", async () => {
@@ -398,7 +398,7 @@ describe("move", () => {
       null,
       [{ uid: "n1", ok: false, error: { name: "InvalidRequirementsAPIError", code: 2000 } }],
     );
-    await assert.rejects(() => drive.move("/my-files/old.pdf", "/my-files/Archive/new.pdf"), /Move failed: InvalidRequirementsAPIError/);
+    await assert.rejects(() => drive.move("/my-files/old.pdf", "/my-files/Archive/new.pdf"), /Move failed: .*InvalidRequirementsAPIError/);
     assert.deepEqual(t.lastCall(), ["filesystem", "rename", "/my-files/new.pdf", "old.pdf"]);
   });
 
@@ -1197,12 +1197,12 @@ describe("validateMessage", () => {
     assert.throws(() => validateMessage("hello\x00world"), /control characters/);
   });
 
-  it("throws when message exceeds 2000 characters", () => {
-    assert.throws(() => validateMessage("a".repeat(2001)), /2000 characters/);
+  it("throws when message exceeds 500 characters", () => {
+    assert.throws(() => validateMessage("a".repeat(501)), /500 characters/);
   });
 
-  it("accepts message of exactly 2000 characters", () => {
-    assert.equal(validateMessage("a".repeat(2000)).length, 2000);
+  it("accepts message of exactly 500 characters", () => {
+    assert.equal(validateMessage("a".repeat(500)).length, 500);
   });
 });
 
