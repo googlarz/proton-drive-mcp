@@ -122,14 +122,14 @@ describe("shareRemoveAll()", () => {
   it("does not call the CLI and returns 0 for an unshared item", async () => {
     const t = makeRunner();
     t.queue(null);
-    assert.equal(await new DriveService(t.runner).shareRemoveAll("/my-files/x"), 0);
+    assert.deepEqual(await new DriveService(t.runner).shareRemoveAll("/my-files/x"), { removed: 0, publicLink: false });
     assert.equal(t.calls.length, 1);
   });
 
   it("removes everyone and returns the number of members + invitations", async () => {
     const t = makeRunner();
     t.queue({ members: [{ inviteeEmail: "a@pm.me" }], nonProtonInvitations: [{ inviteeEmail: "b@x.com" }] }, null);
-    assert.equal(await new DriveService(t.runner).shareRemoveAll("/my-files/x"), 2);
+    assert.deepEqual(await new DriveService(t.runner).shareRemoveAll("/my-files/x"), { removed: 2, publicLink: false });
     assert.deepEqual(t.calls[1], ["sharing", "remove", "--everyone", "/my-files/x"]);
   });
 });

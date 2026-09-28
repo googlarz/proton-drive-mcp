@@ -39,7 +39,9 @@ export function validateMessage(message: unknown): string {
   const m = asString(message, "message").trim();
   if (m.startsWith("-")) throw new Error(`message must not start with '-': ${m}`);
   if (CONTROL_RE.test(m)) throw new Error("message contains control characters");
-  if (m.length > 2000) throw new Error("message must be 2000 characters or fewer");
+  // Proton rejects invitation messages over 500 characters (confirmed live);
+  // count code points, not UTF-16 units, so emoji count once.
+  if ([...m].length > 500) throw new Error("message must be 500 characters or fewer");
   return m;
 }
 

@@ -176,6 +176,10 @@ function describeFailure(e: ExecError): string {
       if (!line) continue;
       if (/^[=\-_*\s]+$/.test(line)) continue; // banner rules
       if (/^at\s/.test(line)) continue; // stack frames
+      // Bundled CLI source excerpts ("20075 |   code…" plus a "^" marker line)
+      // and an empty "Error details: {}" say nothing about what went wrong.
+      if (/^\d+\s*\|/.test(line) || /^\^+$/.test(line)) continue;
+      if (/^Error details:\s*(\{\})?$/.test(line) || line === "{}") continue;
       if (!lines.includes(line)) lines.push(line);
     }
   };

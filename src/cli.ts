@@ -125,7 +125,7 @@ async function run() {
   if (!cliCheck.available) {
     const msg = cliCheck.reason === "not_executable"
       ? "Error: proton-drive CLI found but not executable.\nRun: chmod +x $(which proton-drive)"
-      : "Error: proton-drive CLI not found in PATH.\nDownload from https://proton.me/download/drive/cli/index.html";
+      : "Error: proton-drive CLI not found in PATH.\nDownload from https://proton.me/download/drive/cli/index.html, or set PROTON_DRIVE_BIN to its absolute path (find it with `which proton-drive`).";
     console.error(msg);
     process.exit(1);
   }
@@ -280,10 +280,11 @@ async function run() {
           console.error(`This removes everyone's access to: ${removeAllPath}\nPass --confirm to proceed.`);
           process.exit(1);
         }
-        const removedCount = await drive.shareRemoveAll(removeAllPath);
-        console.log(removedCount === 0
+        const removeAll = await drive.shareRemoveAll(removeAllPath);
+        console.log((removeAll.removed === 0
           ? `Nothing to remove: ${removeAllPath} has no members or pending invitations.`
-          : `Removed all access (${removedCount} member/invitation(s)) to: ${removeAllPath}`);
+          : `Removed all members and invitations (${removeAll.removed}) from: ${removeAllPath}`) +
+          (removeAll.publicLink ? " A public link is still active — remove it with: share remove-url <path>" : ""));
       } else if (sub === "set-url") {
         const setUrlPath = requirePath(rest[0], "share set-url <path> [--role] [--password] [--expiration]");
         const roleRaw = getFlag("--role") ?? "viewer";

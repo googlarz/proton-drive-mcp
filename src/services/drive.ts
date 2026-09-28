@@ -15,6 +15,7 @@ import type {
 } from "../types/index.js";
 import { runDrive as defaultRunDrive, runDriveRaw as defaultRunDriveRaw } from "../utils/subprocess.js";
 import { DriveNotAuthenticatedError, DriveParseError } from "../utils/errors.js";
+import { validateName } from "../utils/validation.js";
 
 type Runner = (args: string[]) => Promise<unknown>;
 type RawRunner = (args: string[]) => Promise<string>;
@@ -89,6 +90,15 @@ function joinRemote(parent: string, escapedName: string): string {
 // went on to rename whatever OTHER item happened to already be sitting at the
 // computed destination path — silently renaming an unrelated file while the
 // real source never moved.
+// The API's bare codes are opaque; these meanings were confirmed live
+// (2026-09-28) for the action they are keyed by.
+const READABLE_ERRORS: Record<string, string> = {
+  "Copy|InvalidRequirementsAPIError|2000": "Proton cannot copy this item: big folders cannot be copied yet (CLI limitation), or the destination is inside the source",
+  "Move|InvalidRequirementsAPIError|2000": "the destination is inside the source, or the source no longer exists",
+  "Restore|APICodeError|2511": "its original parent folder is still in the trash — restore the parent first",
+  "Add to album|APICodeError|2500": "that photo is already in the album",
+};
+
 function assertItemsOk(result: unknown, action: string): void {
   if (!Array.isArray(result)) return;
   for (const item of result as Record<string, unknown>[]) {
@@ -97,6 +107,8 @@ function assertItemsOk(result: unknown, action: string): void {
       const name = String(err.name ?? "unknown error");
       const code = typeof err.code !== "undefined" ? ` (code ${err.code})` : "";
       const message = typeof err.message === "string" && err.message ? `: ${err.message}` : "";
+      const readable = READABLE_ERRORS[`${action}|${name}|${err.code}`];
+      if (readable) throw new Error(`${action} failed: ${readable} (${name}${code}${message})`);
       // Only a real collision deserves the collision hint — the same wrapper also
       // reports move-into-itself, restore-with-trashed-parent, etc.
       const hint = name === "NodeWithSameNameExistsValidationError"
@@ -106,6 +118,10 @@ function assertItemsOk(result: unknown, action: string): void {
     }
   }
 }
+
+// Confirmed live: `sharing status /my-files` fails with "Error decrypting
+// session keys" — roots are not shareable nodes.
+const ROOT_PATHS = new Set(["/my-files", "/photos", "/albums", "/trash", "/photos-trash", "/shared-with-me", "/shared-by-me", "/devices"]);
 
 // Strips "<package-name>@" and "+<hash>" from a version token like
 // "cli-drive@0.8.0+06e8c605", leaving "0.8.0". Falls back to the raw
@@ -300,6 +316,7 @@ export class DriveService {
     if (name.includes("\\/")) {
       throw new Error(`folder name must not contain '/': ${remotePath}`);
     }
+    validateName(name);
     await this.run(["filesystem", "create-folder", parent, name]);
   }
 
@@ -352,6 +369,16 @@ export class DriveService {
 
     const dstNames = new Set((await this.list(dst.parent)).map((f) => f.name));
     if (dstNames.has(dst.name)) {
+      // Only checked on this error path (costs a call): a missing source was
+      // otherwise misreported as "Destination already exists".
+      try {
+        await this.info(sourcePath);
+      } catch (err) {
+        if (err instanceof Error && /not found/i.test(err.message)) {
+          throw new Error(`Source not found: ${sourcePath}`);
+        }
+        throw err;
+      }
       throw new Error(`Destination already exists: ${destinationPath}`);
     }
 
@@ -399,6 +426,9 @@ export class DriveService {
   // nonProtonInvitations, not members — reading only `members` made a real,
   // successfully-sent invite completely invisible from this tool.
   async shareStatus(remotePath: string): Promise<ShareStatus> {
+    if (ROOT_PATHS.has(remotePath)) {
+      throw new Error(`Roots cannot be shared — pass a file or folder inside it: ${remotePath}`);
+    }
     const result = await this.run(["sharing", "status", remotePath]);
     const r = (result ?? {}) as Record<string, unknown>;
     const VALID_ROLES = new Set(["viewer", "editor", "admin"]);
@@ -456,13 +486,15 @@ export class DriveService {
     await this.shareRemove(remotePath, [match.email], false);
   }
 
-  // Removes every member and pending invitation. Returns how many there were —
-  // 0 means the item wasn't shared and nothing was sent to the CLI.
-  async shareRemoveAll(remotePath: string): Promise<number> {
+  // Removes every member and pending invitation. `removed` is how many there
+  // were — 0 means nothing was sent to the CLI. `--everyone` does not touch the
+  // public link, so `publicLink` reports whether one is still active.
+  async shareRemoveAll(remotePath: string): Promise<{ removed: number; publicLink: boolean }> {
     const status = await this.shareStatus(remotePath);
-    if (status.members.length === 0) return 0;
+    const publicLink = Boolean(status.shareUrl);
+    if (status.members.length === 0) return { removed: 0, publicLink };
     await this.shareRemove(remotePath, [], true);
-    return status.members.length;
+    return { removed: status.members.length, publicLink };
   }
 
   // General form of remove: specific emails, or --everyone to strip all
@@ -477,7 +509,8 @@ export class DriveService {
 
   // NOTE: set-url REPLACES the link's settings. Confirmed live: re-running it
   // without a password/expiration silently turned a password-protected link
-  // into an open one (same URL). When that is about to happen, say so.
+  // into an open one (same URL), and setting only a password cleared an
+  // existing expiration. When that is about to happen, say so.
   async shareSetUrl(
     remotePath: string,
     role: Exclude<ShareRole, "admin"> = "viewer",
@@ -485,9 +518,9 @@ export class DriveService {
     expiration?: string
   ): Promise<PublicLink> {
     let droppedProtection = false;
-    if (!password && !expiration) {
+    if (!password || !expiration) {
       const before = await this.shareStatus(remotePath).catch(() => undefined);
-      droppedProtection = Boolean(before?.sharePasswordProtected || before?.shareUrlExpiresAt);
+      droppedProtection = Boolean((!password && before?.sharePasswordProtected) || (!expiration && before?.shareUrlExpiresAt));
     }
     const args = ["sharing", "set-url", remotePath, "--role", role];
     if (password) args.push("--password", password);
@@ -495,7 +528,7 @@ export class DriveService {
     const result = await this.run(args);
     const link = this.parsePublicLink(result);
     if (droppedProtection) {
-      link.warning = "This link previously had a password and/or expiration; set_url replaces link settings, so they were removed. Pass password/expiration again to keep them.";
+      link.warning = "This link previously had a password and/or expiration; set_url replaces link settings, so whichever of them you did not pass again was removed. Pass both password and expiration to keep them.";
     }
     return link;
   }
