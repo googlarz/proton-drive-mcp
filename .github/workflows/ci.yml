@@ -15,11 +15,12 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20, 22, 24]
+        os: [ubuntu-latest, macos-latest]
+        node-version: [22, 24]
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,7 +43,34 @@ jobs:
         run: npm test
 
       - name: Audit dependencies
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == 24
         run: npm audit --audit-level=high
 
       - name: Packaging smoke test
         run: node scripts/pack-smoke.mjs
+
+  # Non-blocking probe: the fake-CLI tests use POSIX shebang scripts, so
+  # failures are expected. Purely to learn what breaks on Windows.
+  windows-experimental:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test

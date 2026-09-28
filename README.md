@@ -12,7 +12,7 @@
 [![npm version](https://img.shields.io/npm/v/proton-drive-mcp?color=%236d4aff&label=npm)](https://www.npmjs.com/package/proton-drive-mcp)
 [![CI](https://github.com/googlarz/proton-drive-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/googlarz/proton-drive-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node.js 20+](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
+[![Node.js 22+](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet)](https://modelcontextprotocol.io)
 [![GitHub stars](https://img.shields.io/github/stars/googlarz/proton-drive-mcp?style=social)](https://github.com/googlarz/proton-drive-mcp)
@@ -60,7 +60,7 @@ proton-drive auth login
 
 This opens a browser for Proton's standard sign-in flow. Credentials are stored in your OS keychain — not on disk, not in config files.
 
-**3. Node.js 20 or later** — `node --version` to check.
+**3. Node.js 22 or later** — `node --version` to check.
 
 ---
 
