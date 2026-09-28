@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.1.0 — 2026-09-28
+
+A "test it like Mail Bridge" round: 6 agents live-tested every tool group against a real account for the first time at scale — full-byte round trips up to 200 MB, the real Proton Drive sync folder, real photo uploads/albums, three MCP servers sharing one CLI session concurrently, official MCP clients (SDK, Inspector, Node 20/22/24, a packed-and-installed tarball), and adversarial edge cases. 3 high-severity and 7 medium-severity bugs were found, fixed by 5 agents working in parallel on separate branches, then the merged result was re-verified live by another 5 agents (one an independent code review) before anything shipped. Every fix below was reproduced from the original bug, not assumed from a commit message.
+
+**Behavior changes:** `drive_list`/`drive_list_trash`/`photos_list_timeline`/`photos_list_album_photos` now return items in a stable sorted order; `drive_list`'s `size` is the real file size (the old value is `storageSize`); `drive_restore`/`drive_delete` accept an optional `uid`; `drive_read_file`/`drive_write_file` interpret a `/my-files/...` path as documented.
+
+### Fixed — high severity
+- **`drive_list` pagination lost and duplicated items.** Each page re-ran the CLI, whose item order isn't stable, so a page slice could return the same item twice or skip one entirely while `total` still looked correct. Confirmed live: walking a 1,000-file folder returned 998 of 1,000 unique items. `drive_list`, `drive_list_trash`, `photos_list_timeline` and `photos_list_album_photos` now sort deterministically before paginating (name, then trash time, then capture time — each with a uid tie-break) and their descriptions say each page is a fresh read.
+- **`drive_restore`/`drive_delete` could act on the wrong item when a trash name repeated.** `drive_list_trash` documents using `uid` to tell duplicates apart, but neither tool accepted one. Confirmed live: restoring/deleting `/trash/x.txt` with two items named `x.txt` picked an arbitrary one — the delete case is irreversible. Both tools now accept `uid`, refuse an ambiguous path (listing every matching uid and trash time instead of guessing), and the same check now also covers `/photos-trash`. The underlying CLI can only address a trashed item by name, so a genuinely ambiguous duplicate still can't be targeted — resolve it in the Proton Drive web or desktop app.
+- **`drive_read_file`/`drive_write_file` didn't map the documented `/my-files/...` path.** Following the example in the tool description created a local folder literally named `my-files`, which then synced to Drive as `/my-files/my-files/...`. `/my-files/<rest>` now maps to the sync root correctly; every other Drive root (`/photos`, `/trash`, ...) is rejected with a clear message, since only `/my-files` is synced locally.
+
+### Fixed — medium severity
+- **`photos_delete_album` deleted non-empty albums** despite its description promising a refusal without `force` — the check never existed. Now enforced, and fails closed (refuses) if the album's photo count can't be looked up at all, rather than assuming empty.
+- **`photos_download` advertised `/albums/<album>/<photo>` paths that the CLI can't resolve.** Now rejected up front with a message pointing at the `/photos/<name>` form.
+- **`drive_list`'s `size` was the encrypted storage size summed across every revision**, not the file's real size (a 1-byte file showed 79; it doubled after a new revision). Real size is now `size`; the old value is `storageSize`.
+- **`drive_move` misreported a missing source as "Destination already exists"**, because the destination was checked before the source. Now reports "Source not found" correctly, and hints at the fix when the "existing destination" is actually the target folder itself (a path/parent mix-up seen in live testing).
+- **`drive_share_status` on a Drive root (`/my-files`, etc.) failed with a raw CLI decryption error**, which also broke this project's own live smoke test. Roots now get a clear "cannot be shared" error without calling the CLI.
+- **A folder name ending in a backslash made its children unaddressable** (`tail\` + child `\/` is read as an escaped slash by the CLI, which has no way to escape a literal backslash). No fix exists upstream; documented as a known limitation.
+- **The Claude Desktop config example didn't set `PROTON_DRIVE_BIN`**, and Claude Desktop launches servers with a minimal `PATH` that usually can't find `proton-drive`. The example now sets it, and the "CLI not found" error mentions the variable.
+
+### Also fixed
+- Non-UTF-8 text read through the sync folder was silently corrupted (replacement characters, no warning) — now a clear error.
+- The invite-message limit was 2000 characters; the CLI enforces 500 — now matched.
+- `drive_mkdir` accepted a spaces-only name while `drive_rename` rejected one — now consistent.
+- `drive_share_remove_all` said "Removed all access" while an active public link stayed live — now says so, and how to remove it.
+- Raw upstream error codes (`InvalidRequirementsAPIError` 2000, `APICodeError` 2511/2500) are now mapped to a readable sentence, with the code kept in parentheses; bundled CLI source lines and bare `Error details: {}` are stripped from error text.
+- Read-only CLI calls now retry (up to twice) on the CLI's own `database is locked` error, seen live when multiple MCP clients share one CLI session concurrently; writes are never retried.
+- `photos_list_album_photos` without `loadDetails` has no `captureTime`, so its description now says the order is by `nodeUid`, not capture time.
+
+### Verified with no changes needed
+Data integrity (sha256 round-trips up to 200 MB, 500+ file trees, every upload/download conflict strategy, `drive_copy`), the real sync folder end to end, 3 concurrent MCP server processes sharing one CLI session, a 20+ minute long-running session (no memory or process leaks), server-kill-mid-upload recovery, the official MCP SDK client and MCP Inspector, Node 20/22/24, a packed-and-installed npm tarball launched via its real `.bin` symlink, and dozens of adversarial edge cases (special Drive roots, Unicode name tricks, 40-level nesting, etc.).
+
+### Known, not fixed (upstream CLI limitations, now documented in README)
+Big folders can't be copied; a `"` in a name becomes `_` on local download; a public link's expiration caps at ~90 days; sharing inherited from a parent folder isn't reported by `drive_share_status`; upload/download counts include folders.
+
+### Testing status
+`drive_share_leave`, `drive_invitation_accept` and `drive_invitation_reject` have never been tested against a real account — they need a second Proton account, which the maintainer doesn't have. Only unit-tested against a fake CLI. Documented in README.
+
 ## 1.0.39 — 2026-09-26
 
 Test-suite hardening only — no `src/` changes, no behavior change.
