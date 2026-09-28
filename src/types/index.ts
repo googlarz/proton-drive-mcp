@@ -4,7 +4,10 @@ export interface DriveFile {
   name: string;
   path: string;
   type: DriveFileType;
+  // Real byte size of the active revision.
   size?: number;
+  // Encrypted storage used, summed over all revisions.
+  storageSize?: number;
   modifiedAt?: string;
   mimeType?: string;
   // Only set for trash listings, where names are not unique.

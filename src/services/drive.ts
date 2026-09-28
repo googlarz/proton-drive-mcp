@@ -215,26 +215,35 @@ export class DriveService {
     const result = await this.run(["filesystem", "list", remotePath]);
     if (result === null) return [];
     if (!Array.isArray(result)) throw new DriveParseError(`Expected array from list, got: ${JSON.stringify(result).slice(0, 100)}`);
-    return result.map((item: Record<string, unknown>) => {
-      if (item.name === undefined && typeof item.path === "string") {
-        return { name: item.path.replace(/^\//, ""), path: item.path, type: "folder" as const };
-      }
-      const name = unwrapResult(item.name, "[unnamed]");
-      const file: DriveFile = {
-        name,
-        path: joinRemote(remotePath, escapeNameForPath(name)),
-        type: item.type === "folder" || item.type === "album" ? "folder" : "file",
-        size: typeof item.totalStorageSize === "number" ? item.totalStorageSize : undefined,
-        modifiedAt: typeof item.modificationTime === "string" ? item.modificationTime : undefined,
-        mimeType: typeof item.mediaType === "string" ? item.mediaType : undefined,
-      };
-      if (opts.includeUid) {
-        file.uid = typeof item.uid === "string" ? item.uid : undefined;
-        const trashed = item.trashTime ?? item.trashedTime;
-        file.trashedAt = typeof trashed === "string" ? trashed : undefined;
-      }
-      return file;
-    });
+    // The CLI's order changes between calls and callers page by re-listing, so
+    // impose a total order: name, then uid (names are not unique).
+    const uidOf = (item: Record<string, unknown>) => (typeof item.uid === "string" ? item.uid : "");
+    const entries = result.map((item: Record<string, unknown>) => ({ item, file: this.mapListItem(item, remotePath, opts) }));
+    entries.sort((x, y) => x.file.name.localeCompare(y.file.name) || (uidOf(x.item) < uidOf(y.item) ? -1 : uidOf(x.item) > uidOf(y.item) ? 1 : 0));
+    return entries.map((e) => e.file);
+  }
+
+  private mapListItem(item: Record<string, unknown>, remotePath: string, opts: { includeUid?: boolean }): DriveFile {
+    if (item.name === undefined && typeof item.path === "string") {
+      return { name: item.path.replace(/^\//, ""), path: item.path, type: "folder" as const };
+    }
+    const name = unwrapResult(item.name, "[unnamed]");
+    const rev = (item.activeRevision ?? {}) as Record<string, unknown>;
+    const file: DriveFile = {
+      name,
+      path: joinRemote(remotePath, escapeNameForPath(name)),
+      type: item.type === "folder" || item.type === "album" ? "folder" : "file",
+      size: typeof rev.claimedSize === "number" ? rev.claimedSize : undefined,
+      storageSize: typeof item.totalStorageSize === "number" ? item.totalStorageSize : undefined,
+      modifiedAt: typeof item.modificationTime === "string" ? item.modificationTime : undefined,
+      mimeType: typeof item.mediaType === "string" ? item.mediaType : undefined,
+    };
+    if (opts.includeUid) {
+      file.uid = typeof item.uid === "string" ? item.uid : undefined;
+      const trashed = item.trashTime ?? item.trashedTime;
+      file.trashedAt = typeof trashed === "string" ? trashed : undefined;
+    }
+    return file;
   }
 
   async upload(

@@ -3,7 +3,7 @@
 //
 // Env:
 //   FAKE_ARGV_LOG     file that receives one JSON line per invocation: {argv, pid}
-//   FAKE_MODE         json | empty | undefined-literal | garbage | ansi-prefixed-json |
+//   FAKE_MODE         json | shuffle | empty | undefined-literal | garbage | ansi-prefixed-json |
 //                     fail-stderr | fail-stderr-echo | fail-stdout-crash | hang |
 //                     big-stderr | auth-fail | ok-false-results
 //   FAKE_STDOUT       payload printed in json / ansi-prefixed-json mode (default "[]")
@@ -45,6 +45,17 @@ switch (mode) {
   case "json": {
     const ms = Number(process.env.FAKE_SLEEP_MS ?? 0);
     setTimeout(() => { process.stdout.write(payload + "\n"); process.exit(0); }, ms);
+    break;
+  }
+  case "shuffle": {
+    // Same items, different random order on every call (like the real CLI).
+    const arr = JSON.parse(payload);
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    process.stdout.write(JSON.stringify(arr) + "\n");
+    process.exit(0);
     break;
   }
   case "empty":

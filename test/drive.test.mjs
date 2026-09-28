@@ -159,15 +159,16 @@ describe("list", () => {
     ]);
     const files = await drive.list("/my-files");
     assert.equal(files.length, 2);
-    assert.equal(files[0].name, "report.pdf");
-    assert.equal(files[0].path, "/my-files/report.pdf");
-    assert.equal(files[0].type, "file");
-    assert.equal(files[0].size, 1024);
-    assert.equal(files[0].mimeType, "application/pdf");
-    assert.equal(files[0].modifiedAt, "2026-03-17T12:27:11.000Z");
-    assert.equal(files[1].name, "Archive");
-    assert.equal(files[1].path, "/my-files/Archive");
-    assert.equal(files[1].type, "folder");
+    // sorted by name
+    assert.equal(files[1].name, "report.pdf");
+    assert.equal(files[1].path, "/my-files/report.pdf");
+    assert.equal(files[1].type, "file");
+    assert.equal(files[1].storageSize, 1024);
+    assert.equal(files[1].mimeType, "application/pdf");
+    assert.equal(files[1].modifiedAt, "2026-03-17T12:27:11.000Z");
+    assert.equal(files[0].name, "Archive");
+    assert.equal(files[0].path, "/my-files/Archive");
+    assert.equal(files[0].type, "folder");
     assert.deepEqual(t.lastCall(), ["filesystem", "list", "/my-files"]);
   });
 
@@ -710,7 +711,7 @@ describe("listTrash", () => {
     assert.equal(items.length, 1);
     assert.equal(items[0].name, "old.pdf");
     assert.equal(items[0].path, "/trash/old.pdf");
-    assert.equal(items[0].size, 512);
+    assert.equal(items[0].storageSize, 512);
     assert.deepEqual(t.lastCall(), ["filesystem", "list", "/trash"]);
   });
 

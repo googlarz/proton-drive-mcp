@@ -29,6 +29,7 @@ import {
 import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
 import { getSyncRoot, readSyncFile, writeSyncFile, syncFileExists } from "./utils/syncfs.js";
+import type { AlbumPhoto } from "./types/index.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version?: string };
@@ -81,6 +82,18 @@ function paginate<T>(all: T[], a: Record<string, unknown>, defaultLimit: number)
   const items = all.slice(offset, offset + limit);
   return { total: all.length, offset, limit, hasMore: offset + items.length < all.length, items };
 }
+
+// Every page re-runs the CLI, whose order is not stable, so paginated lists
+// must be put in a total order before slicing or pages lose/duplicate items.
+function byTimeDescThenId<T>(time: (x: T) => string | undefined, id: (x: T) => string | undefined) {
+  return (x: T, y: T) => {
+    const t = (time(y) ?? "").localeCompare(time(x) ?? "");
+    if (t) return t;
+    const a = id(x) ?? "", b = id(y) ?? "";
+    return a < b ? -1 : a > b ? 1 : 0;
+  };
+}
+const photoOrder = byTimeDescThenId<AlbumPhoto>((p) => p.captureTime, (p) => p.nodeUid);
 
 type JsonSchemaProp = { type?: string; enum?: readonly unknown[]; items?: { type?: string }; minimum?: number; maximum?: number };
 type ToolDef = {
@@ -156,7 +169,7 @@ const TOOLS = [
     name: "drive_list",
     description:
       "List the immediate children of a Proton Drive folder. Requires authentication. " +
-      "Returns {items, total, offset, limit, hasMore} (default limit 200); items are [{name, path, type ('file'|'folder'), size?, modifiedAt?, mimeType?}]. Listing '/' returns the top-level roots. " +
+      "Returns {items, total, offset, limit, hasMore} (default limit 200, sorted by name); items are [{name, path, type ('file'|'folder'), size? (real file size in bytes), storageSize? (encrypted storage used by all revisions), modifiedAt?, mimeType?}]. Items come in a stable sorted order; each page is a fresh read, so changes made between page calls can still shift items. Listing '/' returns the top-level roots. " +
       "Not recursive — one directory level only. " +
       "Use before drive_upload to confirm the destination exists, or before drive_download to verify the remote path. " +
       "Do not use to list trash — use drive_list_trash instead.",
@@ -399,7 +412,7 @@ const TOOLS = [
     name: "drive_list_trash",
     description:
       "List all files and folders currently in the Proton Drive trash. Requires authentication. " +
-      "Returns {items, total, offset, limit, hasMore} (default limit 100, newest first when the CLI reports trash times); items are [{name, path, type, size?, modifiedAt?, uid, trashedAt?}]. Names are NOT unique in trash — two items can share one path; use uid to tell them apart. " +
+      "Returns {items, total, offset, limit, hasMore} (default limit 100, newest first, ties by uid); items are [{name, path, type, size?, storageSize?, modifiedAt?, uid, trashedAt?}]. Items come in a stable sorted order; each page is a fresh read, so changes made between page calls can still shift items. Names are NOT unique in trash — two items can share one path; use uid to tell them apart. " +
       "Use before drive_restore to find a trashed item's exact path, or before drive_empty_trash to show the user what will be permanently deleted. " +
       "Do not use to list active (non-trashed) files — use drive_list instead.",
     annotations: { readOnlyHint: true, idempotentHint: true },
@@ -794,7 +807,7 @@ const TOOLS = [
     name: "photos_list_album_photos",
     description:
       "List the photos in a Proton Photos album. Requires authentication. " +
-      "Returns {items, total, offset, limit, hasMore} (default limit 100); items are [{nodeUid}], or with loadDetails=true also name, mediaType, sizes, captureTime and tags. " +
+      "Returns {items, total, offset, limit, hasMore} (default limit 100, newest capture first, ties by nodeUid); items are [{nodeUid}], or with loadDetails=true also name, mediaType, sizes, captureTime and tags. Items come in a stable sorted order; each page is a fresh read, so changes made between page calls can still shift items. " +
       "albumPath must start with /albums/. " +
       "To add or remove photos, use their Drive path under /photos/ (not the nodeUid).",
     annotations: { readOnlyHint: true, idempotentHint: true },
@@ -861,7 +874,7 @@ const TOOLS = [
     name: "photos_list_timeline",
     description:
       "List photos in your Proton Photos timeline (your full photo library, not scoped to an album). Requires authentication. " +
-      "Returns {items, total, offset, limit, hasMore} (default limit 50, newest first); items are [{nodeUid, captureTime, tags}], or with loadDetails=true also {name, mediaType, creationTime, totalStorageSize} (about 50% more tokens). " +
+      "Returns {items, total, offset, limit, hasMore} (default limit 50, newest first, ties by nodeUid; each page is a fresh read, so changes between page calls can still shift items); items are [{nodeUid, captureTime, tags}], or with loadDetails=true also {name, mediaType, creationTime, totalStorageSize} (about 50% more tokens). " +
       "Use photos_download to download items by path, or photos_add_to_album to add them to an album.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
@@ -1163,7 +1176,7 @@ export async function main() {
 
         case "drive_list_trash": {
           const trashed = await drive.listTrash();
-          if (trashed.some((f) => f.trashedAt)) trashed.sort((x, y) => (y.trashedAt ?? "").localeCompare(x.trashedAt ?? ""));
+          trashed.sort(byTimeDescThenId((f) => f.trashedAt, (f) => f.uid));
           return ok(paginate(trashed, a, PAGE_DEFAULTS.drive_list_trash));
         }
 
@@ -1317,7 +1330,7 @@ export async function main() {
         case "photos_list_album_photos": {
           const albumListPath = validateRemotePath(a.albumPath);
           if (!albumListPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
-          return ok(paginate(await drive.listAlbumPhotos(albumListPath, a.loadDetails === true), a, PAGE_DEFAULTS.photos_list_album_photos));
+          return ok(paginate((await drive.listAlbumPhotos(albumListPath, a.loadDetails === true)).sort(photoOrder), a, PAGE_DEFAULTS.photos_list_album_photos));
         }
 
         case "photos_add_to_album": {
@@ -1341,7 +1354,7 @@ export async function main() {
         }
 
         case "photos_list_timeline":
-          return ok(paginate(await drive.photoTimeline(a.loadDetails === true), a, PAGE_DEFAULTS.photos_list_timeline));
+          return ok(paginate((await drive.photoTimeline(a.loadDetails === true)).sort(photoOrder), a, PAGE_DEFAULTS.photos_list_timeline));
 
         case "photos_download": {
           if (!Array.isArray(a.photoPaths) || a.photoPaths.length === 0) return fail("photoPaths must be a non-empty array of strings");
