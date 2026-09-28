@@ -785,8 +785,8 @@ const TOOLS = [
     name: "photos_delete_album",
     description:
       "Delete a Proton Photos album. Requires authentication and confirmed=true. " +
-      "By default refuses to delete an album that still contains photos — pass force=true to override. " +
-      "Photos live in your timeline independently of albums. save maps to the CLI's --save option (its exact effect is undocumented upstream) — leave it off unless the user asks. " +
+      "Refuses to delete an album that still contains photos unless force=true. " +
+      "Deleting an album never deletes your own photos — they stay in your timeline. save maps to the CLI's --save option (undocumented upstream; live testing showed no observable difference for your own photos) — leave it off unless the user asks. " +
       "albumPath must start with /albums/. " +
       "Always show the user the album name and photo count (from photos_list_albums) before calling.",
     annotations: { destructiveHint: true },
@@ -807,7 +807,7 @@ const TOOLS = [
         },
         save: {
           type: "boolean",
-          description: "If true, save album photos to your timeline before deleting. Default false.",
+          description: "Passes the CLI's --save option (undocumented; no observable effect for your own photos, which always stay in the timeline). Default false.",
         },
       },
       required: ["albumPath", "confirmed"],
@@ -903,7 +903,8 @@ const TOOLS = [
   {
     name: "photos_download",
     description:
-      "Download one or more photos from Proton Photos (timeline, an album, or shared-with-me) to a local folder. Requires authentication. " +
+      "Download one or more photos from your Proton Photos timeline to a local folder by their /photos/<name> path. Requires authentication. " +
+      "/albums/<album>/<photo> paths are not supported (the CLI rejects them) — download an album's photos via their /photos/<name> paths. " +
       "Multiple timeline photos can share the same filename — with conflictStrategy 'remove' or 'skip' only one copy survives locally; use 'rename' to keep all. " +
       "Fails if any item fails to download. " +
       "Do not use for regular Drive files — use drive_download instead.",
@@ -937,7 +938,7 @@ const TOOLS = [
     name: "photos_upload",
     description:
       "Upload one or more local photo or video files directly into your Proton Photos library (My Photos timeline). Requires authentication. " +
-      "Non-photo/video files are silently skipped. Folders are recursed but flattened into My Photos — folder structure is not preserved. " +
+      "Non-photo/video files are skipped and counted in skippedItems (alongside duplicate skips). Folders are recursed but flattened into My Photos — folder structure is not preserved. " +
       "Never overwrites — duplicates (matched by name + content hash) resolve to 'rename' or 'skip' only. " +
       "Do not use for regular Drive files — use drive_upload instead.",
     annotations: { openWorldHint: true },
@@ -1329,7 +1330,7 @@ export async function main() {
           const coverPhotoUid = typeof a.coverPhotoUid === "string" && a.coverPhotoUid.trim() ? validateName(a.coverPhotoUid) : undefined;
           if (!newName && !coverPhotoUid) return fail("At least one of name or coverPhotoUid must be provided");
           await drive.updateAlbum(updateAlbumPath, newName, coverPhotoUid);
-          return ok({ message: `Album updated: ${updateAlbumPath}` });
+          return ok({ message: `Album updated: ${newName ? `/albums/${newName}` : updateAlbumPath}` });
         }
 
         case "photos_delete_album": {

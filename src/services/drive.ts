@@ -673,6 +673,14 @@ export class DriveService {
 
   async deleteAlbum(albumPath: string, force: boolean, save: boolean): Promise<void> {
     await this.assertAlbumUnambiguous(albumPath);
+    // CLI 0.8.0 deletes a non-empty album even without --force (confirmed live).
+    if (!force) {
+      const name = unescapeName(albumPath.replace(/^\/albums\//, ""));
+      const count = (await this.listAlbums()).find((a) => a.name === name)?.photoCount ?? 0;
+      if (count > 0) {
+        throw new Error(`Album ${albumPath} still contains ${count} photo(s). Pass force to delete it anyway (the photos stay in your timeline).`);
+      }
+    }
     const args = ["album", "delete", albumPath];
     if (force) args.push("--force");
     if (save) args.push("--save");
@@ -719,6 +727,12 @@ export class DriveService {
     localFolder: string,
     conflictStrategy: PhotoDownloadConflictStrategy = "skip"
   ): Promise<TransferSummary> {
+    // CLI 0.8.0 treats everything after /albums/ as the album name
+    // ("Album not found: <album>/<photo>"), so album paths never work.
+    const albumPath = remotePaths.find((p) => p.startsWith("/albums/"));
+    if (albumPath) {
+      throw new Error(`Cannot download ${albumPath}: album paths are not supported by photo download. Use the photo's /photos/<name> path instead.`);
+    }
     const result = await this.run([
       "photo", "download", ...remotePaths, localFolder,
       "--conflict-strategy", conflictStrategy,
