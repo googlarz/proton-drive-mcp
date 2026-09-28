@@ -333,6 +333,14 @@ proton-drive-cli share status /my-files/Projects
 - Paths are always Drive-absolute: `/my-files/folder/file.pdf`. Relative paths are not supported.
 - All calls include `--json` automatically, except `drive_version`, whose underlying CLI command ignores `--json` and always prints plain text — this MCP parses it directly.
 
+### Token cost
+
+`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` 29.5 KB (38 tools; 39.5 KB before description trimming), `core` 13.3 KB (16 tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
+
+`drive_auth_status`, `drive_version`, `drive_list`, `drive_info`, `drive_list_trash`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`, `drive_trash`, `drive_restore`, `drive_share_status`, `photos_list_timeline`, `photos_download`.
+
+Left out of `core` (use `full`): permanent deletion (`drive_delete`, `drive_empty_trash`), `drive_auth_logout`, public links, invitations and invites, album management, `photos_upload` and the sync-file tools. A call to a hidden tool returns an error asking for `PROTON_DRIVE_TOOL_TIER=full`; no CLI command runs.
+
 ## Known limitations
 
 These come from the upstream `proton-drive` CLI (v0.8.0), not from this server:
@@ -363,6 +371,7 @@ Every tool group was live-tested on 2026-09-28 against a real Proton account, **
 | `PROTON_DRIVE_BIN` | Optional | Override the `proton-drive` binary name or path (default: `proton-drive`). Useful for non-standard installations. |
 | `PROTON_DRIVE_LOCAL_ROOT` | Optional | Path-delimiter-separated list of local directories that upload/download/photos tools may touch. Unset = any path except the built-in credential denylist. |
 | `PROTON_DRIVE_ALLOW_SENSITIVE_PATHS` | Optional | Set to `1` to disable the built-in credential-location denylist (not recommended). |
+| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 38 tools) or `core` (16 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
 
 ---
 
