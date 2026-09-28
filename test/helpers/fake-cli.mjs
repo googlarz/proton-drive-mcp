@@ -5,9 +5,11 @@
 //   FAKE_ARGV_LOG     file that receives one JSON line per invocation: {argv, pid}
 //   FAKE_MODE         json | shuffle | empty | undefined-literal | garbage | ansi-prefixed-json |
 //                     fail-stderr | fail-stderr-echo | fail-stdout-crash | hang |
-//                     big-stderr | auth-fail | ok-false-results | locked-then-json
+//                     big-stderr | auth-fail | ok-false-results | locked-then-json | transient-then-json
 //   FAKE_COUNTER      locked-then-json: file holding the number of calls so far
 //   FAKE_LOCKED_TIMES locked-then-json: how many calls fail with "database is locked" (default 2)
+//   FAKE_TRANSIENT_KIND   transient-then-json: ratelimit | timeout | reset | retryafter | notfound (counter via FAKE_COUNTER)
+//   FAKE_TRANSIENT_TIMES  transient-then-json: how many calls fail first (default 1)
 //   FAKE_STDOUT       payload printed in json / ansi-prefixed-json mode (default "[]")
 //   FAKE_SLEEP_MS     delay before answering in json mode
 //   FAKE_PIDFILE      hang mode appends {role,pid,argv0} lines (child + grandchild)
@@ -109,6 +111,25 @@ switch (mode) {
     if (counter) writeFileSync(counter, String(n + 1));
     if (n < Number(process.env.FAKE_LOCKED_TIMES ?? 2)) {
       process.stderr.write("SQLiteError: database is locked (SQLITE_BUSY_RECOVERY)\n");
+      process.exit(1);
+    }
+    process.stdout.write(payload + "\n");
+    process.exit(0);
+    break;
+  }
+  case "transient-then-json": {
+    const counter = process.env.FAKE_COUNTER;
+    const n = counter && existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;
+    if (counter) writeFileSync(counter, String(n + 1));
+    if (n < Number(process.env.FAKE_TRANSIENT_TIMES ?? 1)) {
+      const msgs = {
+        ratelimit: "Too many server requests, please try again later (429 Too Many Requests)",
+        timeout: "Request timed out: GET https://drive-api.proton.me/core/v4/users",
+        reset: "read ECONNRESET",
+        retryafter: "429 Too Many Requests, Retry-After: 30",
+        notfound: "Item not found: /nope",
+      };
+      process.stderr.write((msgs[process.env.FAKE_TRANSIENT_KIND ?? "ratelimit"]) + "\n");
       process.exit(1);
     }
     process.stdout.write(payload + "\n");
