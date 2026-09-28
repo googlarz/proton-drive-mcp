@@ -87,11 +87,14 @@ describe("assertItemsOk readable errors", () => {
   const cases = [
     ["copy", (d) => d.copy("/a", "/b"), "InvalidRequirementsAPIError", 2000, /Copy failed: Proton cannot copy this item: big folders cannot be copied yet.*\(InvalidRequirementsAPIError \(code 2000\)/],
     ["move", (d) => d.move("/a/x", "/b/x"), "InvalidRequirementsAPIError", 2000, /Move failed: the destination is inside the source, or the source no longer exists \(InvalidRequirementsAPIError/],
-    ["restore", (d) => d.restore("/trash/x"), "APICodeError", 2511, /Restore failed: its original parent folder is still in the trash — restore the parent first \(APICodeError \(code 2511\)/],
+    // restore() first looks the item up in the trash (to refuse ambiguous names), so the listing comes first.
+    ["restore", (d) => d.restore("/trash/x"), "APICodeError", 2511, /Restore failed: its original parent folder is still in the trash — restore the parent first \(APICodeError \(code 2511\)/,
+      [{ uid: "u1", name: { ok: true, value: "x" }, type: "file" }]],
   ];
-  for (const [label, fn, name, code, re] of cases) {
+  for (const [label, fn, name, code, re, trashListing] of cases) {
     it(`maps ${name} ${code} on ${label}`, async () => {
       const t = makeRunner();
+      if (trashListing) t.queue(trashListing);
       t.queue([{ uid: "n", ok: false, error: { name, code } }]);
       await assert.rejects(() => fn(new DriveService(t.runner)), re);
     });

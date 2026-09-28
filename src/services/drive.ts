@@ -93,7 +93,7 @@ function joinRemote(parent: string, escapedName: string): string {
 // The API's bare codes are opaque; these meanings were confirmed live
 // (2026-09-28) for the action they are keyed by.
 const READABLE_ERRORS: Record<string, string> = {
-  "Copy|InvalidRequirementsAPIError|2000": "Proton cannot copy this item: big folders cannot be copied yet (CLI limitation), or the destination is inside the source",
+  "Copy|InvalidRequirementsAPIError|2000": "Proton cannot copy this item: big folders cannot be copied yet (CLI limitation)",
   "Move|InvalidRequirementsAPIError|2000": "the destination is inside the source, or the source no longer exists",
   "Restore|APICodeError|2511": "its original parent folder is still in the trash — restore the parent first",
   "Add to album|APICodeError|2500": "that photo is already in the album",
