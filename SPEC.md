@@ -38,10 +38,10 @@ src/types/index.ts        Shared response types
 test/                     Unit tests (injected runner) + real-process tests (fake CLI over stdio)
 ```
 
-## Tools (38)
+## Tools (40)
 
 - **Auth / meta:** `drive_auth_status`, `drive_auth_logout`, `drive_version`
-- **Filesystem:** `drive_list`, `drive_info`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`
+- **Filesystem:** `drive_list`, `drive_info`, `drive_tree`, `drive_search`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`
 - **Trash:** `drive_list_trash`, `drive_trash`, `drive_restore`, `drive_delete`, `drive_empty_trash`
 - **Sharing:** `drive_share_status`, `drive_share_invite`, `drive_share_revoke`, `drive_share_remove_all`, `drive_share_set_url`, `drive_share_remove_url`, `drive_share_leave`
 - **Invitations:** `drive_list_invitations`, `drive_invitation_accept`, `drive_invitation_reject`

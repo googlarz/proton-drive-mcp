@@ -70,6 +70,14 @@
       "description": "List the immediate children of a Proton Drive folder."
     },
     {
+      "name": "drive_tree",
+      "description": "Show a Proton Drive folder as a tree with per-folder file counts and size totals."
+    },
+    {
+      "name": "drive_search",
+      "description": "Find files and folders under a Proton Drive path by name, type, extension, size or modified date."
+    },
+    {
       "name": "drive_info",
       "description": "Get full metadata for a single Proton Drive file or folder, including latest revision details."
     },

@@ -49,6 +49,8 @@ tools:
   - photos_download
   - photos_upload
   - drive_info
+  - drive_tree
+  - drive_search
   - drive_rename
 startCommand:
   type: stdio

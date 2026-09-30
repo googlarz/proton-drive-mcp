@@ -30,7 +30,7 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
 - **Proton Photos album management** — list albums, create/delete albums, add and remove photos
-- **Full CLI** — same 38 operations, scriptable and pipeable, works in cron and shell scripts
+- **Full CLI** — same 40 operations, scriptable and pipeable, works in cron and shell scripts
 - **100% CLI coverage** — every scriptable Proton Drive CLI command has a matching tool (verified against the CLI's own source; `auth login` is the one command excluded, since it's an interactive browser flow)
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
 - **Shell injection safe** — all CLI calls use `execFile` with discrete argument arrays, never string interpolation
@@ -266,7 +266,7 @@ proton-drive-cli share status /my-files/Projects
 `drive_auth_status` · `drive_auth_logout` · `drive_version`
 
 ### Filesystem
-`drive_list` · `drive_info` · `drive_mkdir` · `drive_upload` · `drive_download` · `drive_rename` · `drive_move` · `drive_delete`
+`drive_list` · `drive_info` · `drive_tree` · `drive_search` · `drive_mkdir` · `drive_upload` · `drive_download` · `drive_rename` · `drive_move` · `drive_delete`
 
 ### Sharing
 `drive_share_status` · `drive_share_invite` · `drive_share_revoke` · `drive_share_remove_all` · `drive_share_set_url` · `drive_share_remove_url`
@@ -297,6 +297,8 @@ proton-drive-cli share status /my-files/Projects
 | `drive_version` | CLI and SDK version info | — |
 | `drive_list` | List files and folders at a path (paginated, default 200; `/` lists the roots) | `path`, `limit?`, `offset?` |
 | `drive_info` | Get metadata for one file/folder, including revision details (noise trimmed) | `path`, `verbose?` (raw CLI node) |
+| `drive_tree` | Folder overview: per-folder file counts and size totals (largest first), depth-limited, cached 5 min | `path?`, `depth?` (default 2, max 10), `limit?`, `foldersOnly?`, `refresh?` |
+| `drive_search` | Find files/folders under a path in one cached walk: name (substring/glob/regex), type, extension, MIME prefix, size, modified date; sortable, paginated. Reports `walk.complete` — false means the walk was cut short and matches may be missing. Regex runs on the unprotected V8 engine: length-capped, avoid nested quantifiers | `query?`, `glob?`, `regex?`, `path?`, `type?`, `mediaType?`, `extensions?`, `minSize?`, `maxSize?`, `modifiedAfter?`, `modifiedBefore?`, `sort?`, `limit?` (default 50, max 500), `offset?`, `refresh?` |
 | `drive_mkdir` | Create a new empty folder | `path` |
 | `drive_upload` | Upload local file or folder | `localPath`, `remotePath`, `fileConflictStrategy?` (skip/create-new-revision/rename/replace), `folderConflictStrategy?` (skip/merge/rename/replace), `confirmed?` (**required for `replace`** — it trashes the existing remote item) |
 | `drive_download` | Download to local path | `remotePath`, `localPath`, `fileConflictStrategy?` (skip/rename/remove), `folderConflictStrategy?` (skip/merge/rename/remove), `confirmed?` (**required for `remove`** — it deletes the existing local item) |
@@ -362,9 +364,9 @@ proton-drive-cli share status /my-files/Projects
 
 ### Token cost
 
-`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` 29.5 KB (38 tools; 39.5 KB before description trimming), `core` 13.3 KB (16 tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
+`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` 32.2 KB (40 tools), `core` 15.9 KB (18 tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
 
-`drive_auth_status`, `drive_version`, `drive_list`, `drive_info`, `drive_list_trash`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`, `drive_trash`, `drive_restore`, `drive_share_status`, `photos_list_timeline`, `photos_download`.
+`drive_auth_status`, `drive_version`, `drive_list`, `drive_info`, `drive_list_trash`, `drive_search`, `drive_tree`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`, `drive_trash`, `drive_restore`, `drive_share_status`, `photos_list_timeline`, `photos_download`.
 
 Left out of `core` (use `full`): permanent deletion (`drive_delete`, `drive_empty_trash`), `drive_auth_logout`, public links, invitations and invites, album management, `photos_upload` and the sync-file tools. A call to a hidden tool returns an error asking for `PROTON_DRIVE_TOOL_TIER=full`; no CLI command runs.
 
@@ -404,7 +406,8 @@ Every tool group was live-tested on 2026-09-28 against a real Proton account, **
 | `PROTON_DRIVE_ALLOW_SENSITIVE_PATHS` | Optional | Set to `1` to disable the built-in credential-location denylist (not recommended). |
 | `CLAUDE_DESKTOP_CONFIG` | Optional | Path of the Claude Desktop config that `doctor` and `setup-claude-desktop` read/write instead of the per-OS default. |
 | `PROTON_DRIVE_RETRY_BASE_MS` | Optional | Test hook: base backoff in ms for retrying read-only calls (default 250). |
-| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 38 tools) or `core` (16 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
+| `PROTON_DRIVE_WALK_TTL_MS` | Optional | How long `drive_tree`/`drive_search` reuse a cached folder walk, in ms (default 300000; 0 disables the cache). The cache is also dropped for any path this server writes to. |
+| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 40 tools) or `core` (18 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
 
 ---
 

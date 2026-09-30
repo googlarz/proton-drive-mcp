@@ -28,6 +28,7 @@ import {
 } from "./utils/errors.js";
 import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
+import { driveSearch, driveTree } from "./services/find.js";
 import { getSyncRoot, readSyncFile, writeSyncFile, syncFileExists } from "./utils/syncfs.js";
 import type { AlbumPhoto } from "./types/index.js";
 
@@ -187,6 +188,52 @@ const TOOLS = [
         },
       },
       required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_tree",
+    description:
+      "Folder overview with per-folder file counts and size totals, largest first. Returns {files, folders, size, complete, unexpanded?, skipped?, tree}. Totals cover opened folders only; 'unexpanded' counts folders not opened (depth limit, .git/node_modules, failures). complete=false: part of the tree failed to load. Cached 5 min; refresh=true re-reads.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Default /my-files." },
+        depth: { type: "integer", minimum: 1, maximum: 10, description: "Levels (default 2)." },
+        limit: { type: "integer", minimum: 1, maximum: 1000, description: "Max entries (default 200); rest counted in 'more'." },
+        foldersOnly: { type: "boolean", description: "Hide files (totals still count them)." },
+        refresh: { type: "boolean", description: "Bypass the cache." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_search",
+    description:
+      "Find files/folders under a path by name, type, extension, size or date in one walk. Filters are ANDed. Returns {total, hasMore, items [{path, type, size?, mtime?, sha1?}], walk {complete, fromCache, skipped?}}; walk.complete=false means matches may be missing. Cached 5 min; refresh=true re-reads; skips .git/node_modules.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Name substring, case-insensitive." },
+        glob: { type: "string", description: "Name pattern, e.g. *.pdf (* ? **)." },
+        regex: { type: "string", description: "Regex on the name, case-insensitive, max 200 chars." },
+        path: { type: "string", description: "Default /my-files." },
+        type: { type: "string", enum: ["file", "folder"], description: "Only files or folders." },
+        mediaType: { type: "string", description: "MIME prefix, e.g. image/." },
+        extensions: { type: "array", items: { type: "string" }, description: "e.g. ['pdf','docx']." },
+        minSize: { type: "integer", minimum: 0, description: "Bytes (files only)." },
+        maxSize: { type: "integer", minimum: 0, description: "Bytes (files only)." },
+        modifiedAfter: { type: "string", description: "ISO date (original mtime, else upload time)." },
+        modifiedBefore: { type: "string", description: "ISO date." },
+        sort: { type: "string", enum: ["name", "size", "mtime"], description: "Default name; size and mtime sort descending." },
+        limit: { type: "integer", minimum: 1, maximum: 500, description: "Default 50." },
+        offset: { type: "integer", minimum: 0, description: "Items to skip." },
+        refresh: { type: "boolean", description: "Bypass the cache." },
+      },
+      required: [],
       additionalProperties: false,
     },
   },
@@ -925,6 +972,7 @@ const TOOL_DEFS: ToolDef[] = TOOLS.map((t) => {
 export const CORE_TOOL_NAMES = new Set([
   "drive_auth_status", "drive_version", // session check and CLI diagnostics
   "drive_list", "drive_info", "drive_list_trash", // reading
+  "drive_search", "drive_tree", // finding things without listing folder by folder
   "drive_mkdir", "drive_upload", "drive_download", // basic file I/O
   "drive_rename", "drive_move", "drive_copy", // reorganising
   "drive_trash", "drive_restore", // reversible removal
@@ -994,6 +1042,12 @@ export async function main() {
 
         case "drive_info":
           return ok(await drive.info(validateRemotePath(a.path), a.verbose === true));
+
+        case "drive_tree":
+          return ok(await driveTree(drive, a));
+
+        case "drive_search":
+          return ok(await driveSearch(drive, a));
 
         case "drive_mkdir": {
           const mkdirPath = validateRemotePath(a.path);

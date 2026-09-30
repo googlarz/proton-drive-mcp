@@ -16,6 +16,7 @@ import type {
 import { runDrive as defaultRunDrive, runDriveRaw as defaultRunDriveRaw } from "../utils/subprocess.js";
 import { DriveNotAuthenticatedError, DriveParseError } from "../utils/errors.js";
 import { validateName } from "../utils/validation.js";
+import { invalidatePath } from "./walk.js";
 
 type Runner = (args: string[]) => Promise<unknown>;
 type RawRunner = (args: string[]) => Promise<string>;
@@ -228,6 +229,12 @@ export class DriveService {
   // Exception: listing "/" returns the roots as [{path:"/my-files"}, ...] with
   // no name at all — previously every root came out as "[unnamed]".
   async list(remotePath: string, opts: { includeUid?: boolean } = {}): Promise<DriveFile[]> {
+    return (await this.listEntries(remotePath, opts)).map((e) => e.file);
+  }
+
+  // list() plus each item's raw CLI node, for callers (the tree walker) that need
+  // fields DriveFile drops: uid chain, revision mtime, claimed sha1, share flags.
+  async listEntries(remotePath: string, opts: { includeUid?: boolean } = {}): Promise<{ item: Record<string, unknown>; file: DriveFile }[]> {
     const result = await this.run(["filesystem", "list", remotePath]);
     if (result === null) return [];
     if (!Array.isArray(result)) throw new DriveParseError(`Expected array from list, got: ${JSON.stringify(result).slice(0, 100)}`);
@@ -236,7 +243,7 @@ export class DriveService {
     const uidOf = (item: Record<string, unknown>) => (typeof item.uid === "string" ? item.uid : "");
     const entries = result.map((item: Record<string, unknown>) => ({ item, file: this.mapListItem(item, remotePath, opts) }));
     entries.sort((x, y) => x.file.name.localeCompare(y.file.name) || (uidOf(x.item) < uidOf(y.item) ? -1 : uidOf(x.item) > uidOf(y.item) ? 1 : 0));
-    return entries.map((e) => e.file);
+    return entries;
   }
 
   private mapListItem(item: Record<string, unknown>, remotePath: string, opts: { includeUid?: boolean }): DriveFile {
@@ -283,6 +290,7 @@ export class DriveService {
     // {uploaded, skipped, failed} field names never existed, so failures
     // were silently reported as 0 regardless of what actually happened.
     const summary = this.parseTransferSummary(result);
+    invalidatePath(remotePath);
     return {
       path: remotePath,
       uploaded: summary.transferredItems,
@@ -327,6 +335,7 @@ export class DriveService {
     }
     validateName(name);
     await this.run(["filesystem", "create-folder", parent, name]);
+    invalidatePath(remotePath);
   }
 
   // Returns metadata (including latest revision details) for a single file or
@@ -340,7 +349,9 @@ export class DriveService {
   // Renames in place — does not move to a different folder. Returns the
   // renamed node (raw pass-through).
   async rename(remotePath: string, newName: string): Promise<unknown> {
-    return this.run(["filesystem", "rename", remotePath, newName]);
+    const renamed = await this.run(["filesystem", "rename", remotePath, newName]);
+    invalidatePath(remotePath);
+    return renamed;
   }
 
   // The CLI has no single "move to any full path" command — `move` only
@@ -354,6 +365,11 @@ export class DriveService {
   //  - the source's *own* name taken in the destination folder (the interim
   //    name after `move`) -> rename first, then move, instead
   async move(sourcePath: string, destinationPath: string): Promise<void> {
+    // finally: a half-done move (moved, rename failed) also changes the tree.
+    try { await this.moveImpl(sourcePath, destinationPath); } finally { invalidatePath(sourcePath); invalidatePath(destinationPath); }
+  }
+
+  private async moveImpl(sourcePath: string, destinationPath: string): Promise<void> {
     const src = splitRemotePath(sourcePath);
     const dst = splitRemotePath(destinationPath);
     // Only a *rename* to a slash-containing name is unsupported; moving an item
@@ -424,6 +440,7 @@ export class DriveService {
   async delete(remotePath?: string, uid?: string): Promise<void> {
     const target = await this.resolveTrashTarget(remotePath, uid);
     assertItemsOk(await this.run(["filesystem", "delete", target]), "Delete");
+    invalidatePath(target);
   }
 
   // Sharing
@@ -575,11 +592,13 @@ export class DriveService {
 
   async trash(remotePath: string): Promise<void> {
     assertItemsOk(await this.run(["filesystem", "trash", remotePath]), "Trash");
+    invalidatePath(remotePath);
   }
 
   async restore(remotePath?: string, uid?: string): Promise<void> {
     const target = await this.resolveTrashTarget(remotePath, uid);
     assertItemsOk(await this.run(["filesystem", "restore", target]), "Restore");
+    invalidatePath("/"); // the original location is unknown, so drop every cached walk
   }
 
   // Confirmed live against CLI v0.8.0: restore/delete accept only /trash
@@ -621,6 +640,7 @@ export class DriveService {
 
   async emptyTrash(): Promise<void> {
     await this.run(["filesystem", "empty-trash"]);
+    invalidatePath("/trash");
   }
 
   // The destination is the target PARENT folder (unlike move). `newName` maps to
@@ -629,6 +649,7 @@ export class DriveService {
   async copy(remoteSrc: string, remoteDst: string, newName?: string): Promise<void> {
     const args = ["filesystem", "copy", ...(newName ? ["--name", newName] : []), remoteSrc, remoteDst];
     assertItemsOk(await this.run(args), "Copy");
+    invalidatePath(remoteDst);
   }
 
   async listInvitations(): Promise<DriveInvitation[]> {

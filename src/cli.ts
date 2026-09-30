@@ -22,6 +22,7 @@ import { checkCliAvailable } from "./utils/subprocess.js";
 import { runDoctor, formatDoctor } from "./utils/doctor.js";
 import { buildEntry, defaultConfigPath, isDirectory, resolveDriveCli, writeEntry, SERVER_KEY } from "./utils/claudeConfig.js";
 import { resolve } from "node:path";
+import { driveSearch, driveTree } from "./services/find.js";
 import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 
 const drive = new DriveService();
@@ -38,6 +39,12 @@ Commands:
   version                                  Show CLI/SDK version
   list <path>                              List files at path
   info <path> [--verbose]                  Show node metadata (--verbose = raw CLI node)
+  tree [path] [--depth N] [--limit N] [--folders-only] [--refresh]
+                                           Folder overview with per-folder counts and sizes (default /my-files, depth 2)
+  search [path] [--query S] [--glob G] [--regex R] [--type file|folder] [--media-type P] [--ext pdf,docx]
+         [--min-size B] [--max-size B] [--after DATE] [--before DATE] [--sort name|size|mtime]
+         [--limit N] [--offset N] [--refresh]
+                                           Find files/folders under path (default /my-files) in one walk
   mkdir <path>                             Create a new folder
   upload <local> <remote> [--file-conflict X] [--folder-conflict X] [--confirm]
                                            Upload file/folder (files: skip/create-new-revision/rename/replace; folders: skip/merge/rename/replace;
@@ -106,6 +113,17 @@ function getFlag(flag: string): string | undefined {
     process.exit(1);
   }
   return args[idx + 1];
+}
+
+function numFlag(flag: string): number | undefined {
+  const v = getFlag(flag);
+  if (v === undefined) return undefined;
+  if (!/^\d+$/.test(v)) { console.error(`${flag} must be a non-negative integer`); process.exit(1); }
+  return Number(v);
+}
+
+function numFlags(...names: string[]): Record<string, number | undefined> {
+  return Object.fromEntries(names.map((n) => [n, numFlag(`--${n}`)]));
 }
 
 function print(data: unknown) {
@@ -193,6 +211,23 @@ async function run() {
 
     case "list":
       print(await drive.list(requirePath(sub, "list <path>")));
+      break;
+
+    case "tree":
+      print(await driveTree(drive, { path: sub && !sub.startsWith("--") ? sub : undefined, ...numFlags("depth", "limit"), foldersOnly: args.includes("--folders-only") || undefined, refresh: args.includes("--refresh") || undefined }));
+      break;
+
+    case "search":
+      print(await driveSearch(drive, {
+        path: sub && !sub.startsWith("--") ? sub : undefined,
+        query: getFlag("--query"), glob: getFlag("--glob"), regex: getFlag("--regex"),
+        type: getFlag("--type"), mediaType: getFlag("--media-type"),
+        extensions: getFlag("--ext")?.split(","),
+        ...numFlags("limit", "offset"),
+        minSize: numFlag("--min-size"), maxSize: numFlag("--max-size"),
+        modifiedAfter: getFlag("--after"), modifiedBefore: getFlag("--before"),
+        sort: getFlag("--sort"), refresh: args.includes("--refresh") || undefined,
+      }));
       break;
 
     case "info":

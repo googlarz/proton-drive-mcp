@@ -69,6 +69,8 @@ const CLI_COMMAND = {
   drive_version: "version",
   drive_list: "list <path>",
   drive_info: "info <path>",
+  drive_tree: "tree [path]",
+  drive_search: "search [path]",
   drive_mkdir: "mkdir <path>",
   drive_upload: "upload <local> <remote>",
   drive_download: "download <remote> <local>",
