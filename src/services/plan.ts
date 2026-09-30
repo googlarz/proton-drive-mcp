@@ -202,7 +202,7 @@ export function planBulkMove(sources: string[], destination: string, listing: Li
   if (destination === "/") {
     problems.push({ problem: "destination must be a folder, not '/'" });
   } else if (!destNames) {
-    problems.push({ problem: `destination folder not found: ${destination}` });
+    problems.push({ problem: `destination folder not found (or not a folder): ${destination}` });
   }
   const already = new Set(problems.map((p) => p.source));
   const names = new Map<string, string>();
@@ -222,9 +222,10 @@ export function planBulkMove(sources: string[], destination: string, listing: Li
   };
 }
 
-const isNotFound = (err: unknown) => err instanceof Error && /not found/i.test(err.message);
+// "Invalid link type": the path resolves to a file, so it cannot be listed as a folder.
+const isNotFound = (err: unknown) => err instanceof Error && /not found|invalid link type/i.test(err.message);
 
-/** One `filesystem list` per distinct folder, a few at a time; a not-found folder maps to null. */
+/** One `filesystem list` per distinct folder, a few at a time; a not-found (or not-a-folder) path maps to null. */
 export async function loadListing(svc: DriveService, folders: string[]): Promise<Listing> {
   const listing: Listing = new Map();
   for (let i = 0; i < folders.length; i += 4) {

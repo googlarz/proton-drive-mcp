@@ -99,6 +99,7 @@ export async function driveUsage(
   o: { path: string; top?: number; olderThanDays?: number; refresh?: boolean },
   deps: { walk?: WalkFn; now?: number } = {}
 ) {
+  if (o.path === "/") throw new Error("path must be a folder such as /my-files, not '/'");
   const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh });
   let trash: unknown;
   try {

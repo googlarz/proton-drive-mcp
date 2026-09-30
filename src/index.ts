@@ -1154,6 +1154,12 @@ function bulkPrompt(tool: string, verb: string, paths: string[], destination?: s
     paths.slice(0, 5).map((p) => `- ${showValue(p)}`).join("\n") + (paths.length > 5 ? `\n(+${paths.length - 5} more)` : "");
 }
 
+// The SDK's prompts/get schema types arguments as string-only, and a violation surfaces as -32603.
+// Accept any JSON value here so getPromptText can reject it as InvalidParams (-32602).
+const GetPromptLooseSchema = GetPromptRequestSchema.extend({
+  params: GetPromptRequestSchema.shape.params.extend({ arguments: CallToolRequestSchema.shape.params.shape.arguments }),
+});
+
 async function elicitApproval(server: Server, message: string, signal?: AbortSignal): Promise<boolean> {
   try {
     const res = await server.elicitInput(
@@ -1213,7 +1219,7 @@ export async function main() {
     prompts: activePrompts.map(({ requires: _requires, ...p }) => ({ ...p, arguments: [...p.arguments] })),
   }));
 
-  server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+  server.setRequestHandler(GetPromptLooseSchema, async (req) => {
     const { name, arguments: args = {} } = req.params;
     let text: string | undefined;
     try {

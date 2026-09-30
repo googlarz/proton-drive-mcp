@@ -631,7 +631,14 @@ export class DriveService {
   }
 
   private async runBatch(args: string[], action: string, total: number): Promise<void> {
-    const result = await this.run(args);
+    let result;
+    try {
+      result = await this.run(args);
+    } catch (err) {
+      // A failure of the whole call (e.g. a missing source) is rejected by the CLI before anything is applied.
+      if (err instanceof Error) err.message += ` [the CLI rejected the whole batch: nothing was ${action === "Trash" ? "trashed" : "moved"}]`;
+      throw err;
+    }
     try {
       assertItemsOk(result, action);
     } catch (err) {

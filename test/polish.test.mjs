@@ -119,6 +119,14 @@ describe("prompts", () => {
       assert.equal(extra.error.code, -32602);
       const badPath = await c.request("prompts/get", { name: "organise-folder", arguments: { path: "/my-files/../x" } });
       assert.equal(badPath.error.code, -32602);
+      const rootPath = await c.request("prompts/get", { name: "organise-folder", arguments: { path: "/" } });
+      assert.equal(rootPath.error.code, -32602);
+      const longDesc = await c.request("prompts/get", { name: "find-files", arguments: { description: "x".repeat(501) } });
+      assert.equal(longDesc.error.code, -32602);
+      for (const bad of [{ path: 5 }, { path: { a: 1 } }, { path: null }]) {
+        const r = await c.request("prompts/get", { name: "organise-folder", arguments: bad });
+        assert.equal(r.error.code, -32602, JSON.stringify(bad));
+      }
     } finally { await c.close(); sb.cleanup(); }
   });
 });

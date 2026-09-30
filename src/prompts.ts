@@ -37,6 +37,7 @@ export const PROMPTS = [
 const TEXTS: Record<string, (a: Record<string, string>) => string> = {
   "organise-folder": (a) => {
     const path = validateRemotePath(a.path);
+    if (path === "/") throw new Error("path must be a folder such as /my-files, not '/'");
     return `Help me organise my Proton Drive folder ${path}.
 1. Survey it with drive_tree and drive_usage. Do not change anything yet.
 2. Propose a clearer folder structure and explain the reasoning briefly.
@@ -47,6 +48,7 @@ Never permanently delete anything; use drive_trash (reversible) if something mus
   "find-files": (a) => {
     const description = a.description;
     if (!description.trim()) throw new Error("description must not be empty");
+    if (description.length > 500) throw new Error("description must be 500 characters or fewer");
     return `Find files in my Proton Drive matching this description: ${description}
 Use drive_search with the most selective name, extension and date filters the description suggests. If there are too many or no results, refine the filters and search again rather than guessing. Report the paths of the best matches with size and modified date, and say how confident you are.`;
   },

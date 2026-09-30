@@ -60,6 +60,23 @@ describe("loadListing + plan with the injected runner (plan step never mutates)"
     assert.equal(planBulkTrash(["/my-files/a/x.txt"], listing).problems.length, 0);
   });
 
+  it("a FILE as destination becomes a structured problem, not a raw CLI error", async () => {
+    const svc = new DriveService(async (args) => {
+      if (args[1] === "list" && args[2] === "/my-files/a/x.txt") throw new Error("CLI error: Invalid link type");
+      return runner().fn(args);
+    });
+    const srcs = ["/my-files/a/y.txt"];
+    const listing = await loadListing(svc, foldersToList(srcs, "/my-files/a/x.txt"));
+    const p = planBulkMove(srcs, "/my-files/a/x.txt", listing);
+    assert.match(p.problems[0].problem, /destination folder not found \(or not a folder\)/);
+  });
+
+  it("a whole-batch CLI failure says nothing was trashed/moved", async () => {
+    const svc = new DriveService(async () => { throw new Error("CLI error: Node not found"); });
+    await assert.rejects(svc.bulkTrash(["/my-files/a/x.txt"]), /nothing was trashed/);
+    await assert.rejects(svc.bulkMove(["/my-files/a/x.txt"], "/my-files/dst"), /nothing was moved/);
+  });
+
   it("propagates non-not-found list errors instead of treating them as missing", async () => {
     const svc = new DriveService(async () => { throw new Error("CLI exploded"); });
     await assert.rejects(loadListing(svc, ["/my-files"]), /CLI exploded/);

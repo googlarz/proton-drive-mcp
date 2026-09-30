@@ -231,6 +231,10 @@ describe("auditShareStatus", () => {
 });
 
 describe("driveUsage", () => {
+  it("rejects path '/' like drive_search", async () => {
+    await assert.rejects(driveUsage(new DriveService(async () => []), { path: "/" }, { walk: fakeWalk([]), now: NOW }), /not '\/'/);
+  });
+
   it("combines the walk with one /trash list call", async () => {
     const calls = [];
     const drive = new DriveService(async (args) => { calls.push(args); return [{ uid: "t", name: { ok: true, value: "gone" }, type: "file", activeRevision: { claimedSize: 7 }, trashTime: "2026-09-01T00:00:00Z" }]; });

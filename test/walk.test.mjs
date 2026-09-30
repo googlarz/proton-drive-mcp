@@ -81,6 +81,15 @@ describe("walkTree", () => {
     assert.equal(r2.complete, true);
   });
 
+  it("a nonexistent subpath is not answered from a cached ancestor walk: same 'Node not found' as cold", async () => {
+    const { svc, stats } = makeSvc(small());
+    await walkTree(svc, "/my-files");
+    await assert.rejects(walkTree(svc, "/my-files/nope"), /Node not found/);
+    await assert.rejects(walkTree(svc, "/my-files/root.txt"), /Node not found/); // a file is not a folder either
+    assert.ok(stats.calls.includes("/my-files/nope"));
+    assert.equal((await walkTree(svc, "/my-files/a")).fromCache, true); // a real folder is still served from cache
+  });
+
   it("never exceeds the concurrency bound, and uses it", async () => {
     const tree = { "/r": Array.from({ length: 30 }, (_, i) => folder(`f${i}`, i)) };
     for (let i = 0; i < 30; i++) tree[`/r/f${i}`] = [file(`a${i}`, 1)];
