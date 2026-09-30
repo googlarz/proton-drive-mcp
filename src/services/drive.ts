@@ -636,7 +636,7 @@ export class DriveService {
       result = await this.run(args);
     } catch (err) {
       // A failure of the whole call (e.g. a missing source) is rejected by the CLI before anything is applied.
-      if (err instanceof Error) err.message += ` [the CLI rejected the whole batch: nothing was ${action === "Trash" ? "trashed" : "moved"}]`;
+      if (err instanceof Error) err.message += " [the batch call failed; the CLI normally rejects a whole batch before applying anything, but list the folders before retrying]";
       throw err;
     }
     try {
