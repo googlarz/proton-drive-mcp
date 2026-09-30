@@ -1228,7 +1228,7 @@ export async function main() {
 
   const handleCall = async (req: { params: { name: string; arguments?: Record<string, unknown> } }): Promise<ToolResult> => {
     const { name, arguments: args = {} } = req.params;
-    const a = args as Record<string, unknown>;
+    let a = args as Record<string, unknown>;
 
     const def = TOOL_DEFS.find((t) => t.name === name);
     // A client may remember a name from a fuller tools/list; refuse before any CLI call.
@@ -1237,7 +1237,13 @@ export async function main() {
     }
     if (def) {
       const problem = checkArgs(def, a);
-      if (problem) return fail(problem);
+      if (problem) {
+        // `confirmed` is schema-required on the destructive tools. For a client that can ask the human, a missing
+        // `confirmed` must still reach the gate (which prompts); any other validation failure stays an error.
+        const asConfirmFalse = { ...a, confirmed: false };
+        if (a.confirmed !== undefined && a.confirmed !== null || !canElicit() || checkArgs(def, asConfirmFalse)) return fail(problem);
+        a = asConfirmFalse;
+      }
     }
 
     try {

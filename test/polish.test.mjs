@@ -210,6 +210,28 @@ describe("elicitation for gated tools", () => {
     });
   }
 
+  it("confirmed ABSENT: accept runs the gated call, decline refuses, no capability keeps the schema error", async () => {
+    let asked = 0;
+    await withClient({ elicitation: { form: {} } }, async () => { asked++; return { action: "accept", content: { approve: true } }; }, async (client, sb) => {
+      const r = await client.callTool({ name: "drive_delete", arguments: { path: "/trash/a.txt" } });
+      assert.notEqual(r.isError, true);
+      assert.equal(asked, 1);
+      assert.ok(nonVersionCalls(sb.argvLog).length > 0);
+    });
+    await withClient({ elicitation: { form: {} } }, async () => ({ action: "decline" }), async (client, sb) => {
+      const r = await client.callTool({ name: "drive_empty_trash", arguments: {} });
+      assert.equal(r.isError, true);
+      assert.match(text(r), /confirmed=true/);
+      assert.deepEqual(nonVersionCalls(sb.argvLog), []);
+    });
+    await withClient({}, null, async (client, sb) => {
+      const r = await client.callTool({ name: "drive_delete", arguments: { path: "/trash/a.txt" } });
+      assert.equal(r.isError, true);
+      assert.match(text(r), /Missing required argument 'confirmed'/);
+      assert.deepEqual(nonVersionCalls(sb.argvLog), []);
+    });
+  });
+
   it("a throwing elicitation handler falls back to the refusal", async () => {
     await withClient({ elicitation: { form: {} } }, async () => { throw new Error("boom"); }, async (client, sb) => {
       const r = await client.callTool({ name: "drive_empty_trash", arguments: { confirmed: false } });
@@ -232,7 +254,7 @@ describe("elicitation for gated tools", () => {
     let asked = 0;
     await withClient({ elicitation: { form: {} } }, async () => { asked++; return { action: "accept", content: { approve: true } }; }, async (client) => {
       await client.callTool({ name: "drive_list", arguments: { path: "/my-files" } });
-      await client.callTool({ name: "drive_delete", arguments: {} }); // schema validation fails first
+      await client.callTool({ name: "drive_delete", arguments: { path: 123 } }); // schema validation fails first
       assert.equal(asked, 0);
     });
   });
