@@ -27,7 +27,7 @@ CLI:     node dist/cli.js <command>
 ```
 src/index.ts              MCP server: TOOLS (schemas), tool-surface derivation (gates, pagination),
                           schema enforcement, dispatch, lifecycle (signals, cancellation)
-src/cli.ts                Companion CLI (mirrors every tool except drive_read_file/drive_write_file)
+src/cli.ts                Companion CLI (mirrors 44 of 46 tools; drive_read_file/drive_write_file are MCP-only)
 src/services/drive.ts     DriveService: one method per operation, CLI argv building, response parsing
 src/utils/subprocess.ts   Runs the CLI: timeouts, process-group kill, cancellation, sanitized errors
 src/utils/validation.ts   Argument validators (flag injection, traversal, types)

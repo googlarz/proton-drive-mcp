@@ -30,8 +30,8 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
 - **Proton Photos album management** — list albums, create/delete albums, add and remove photos
-- **Full CLI** — same 46 operations, scriptable and pipeable, works in cron and shell scripts
-- **100% CLI coverage** — every scriptable Proton Drive CLI command has a matching tool (verified against the CLI's own source; `auth login` is the one command excluded, since it's an interactive browser flow)
+- **Companion CLI** — 44 of the 46 operations, scriptable and pipeable, works in cron and shell scripts (the two sync-folder tools, `drive_read_file` and `drive_write_file`, are MCP-only)
+- **Full Proton Drive CLI coverage** — every scriptable Proton Drive CLI command has a matching tool (verified against the CLI's own source; `auth login` is the one command excluded, since it's an interactive browser flow)
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
 - **Shell injection safe** — all CLI calls use `execFile` with discrete argument arrays, never string interpolation
 - **Privacy-native** — end-to-end encryption is handled by Proton's own CLI; this server is just a thin MCP wrapper
@@ -229,8 +229,27 @@ proton-drive-cli restore /my-files/old-draft.pdf       # restore from trash
 proton-drive-cli trash empty --confirm                  # permanently delete all trashed items
 ```
 
-### Analytics
-`drive_usage` · `drive_find_duplicates` · `drive_sharing_audit`
+### Search, analytics and cleanup
+`drive_search` · `drive_tree` · `drive_usage` · `drive_find_duplicates` · `drive_sharing_audit` · `drive_sync_plan` · `drive_bulk_move` · `drive_bulk_trash`
+
+```bash
+proton-drive-cli tree /my-files --depth 2
+proton-drive-cli search /my-files --ext pdf --min-size 1000000
+proton-drive-cli usage /my-files --top 20 --older-than 365
+proton-drive-cli duplicates /my-files --min-size 1000000 [--verify]
+proton-drive-cli share audit /my-files
+proton-drive-cli sync-plan ./local /my-files/backup --direction up
+proton-drive-cli bulk-move /my-files/Archive /my-files/a.pdf /my-files/b.pdf          # plan only
+proton-drive-cli bulk-trash /my-files/old1.txt /my-files/old2.txt --confirm           # apply
+```
+
+- The first walk of a large drive can take minutes (measured ~25 s per 1,200 files at concurrency 8). Later calls reuse a 5-minute cache; `refresh` bypasses it.
+- Walks skip `.git` and `node_modules` by default.
+- Read-only tools (`drive_search`, `drive_tree`, `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_sync_plan`) change nothing. `drive_bulk_move` and `drive_bulk_trash` are two-step: call without `confirmed` for the plan, then with `confirmed: true` to apply. Bulk trash is reversible with `drive_restore`.
+- Duplicate detection uses the sha1 the uploader claimed, which is unverified. `verify: true` downloads the candidates and hashes them.
+- The sharing audit flags an invitee as external when the address is outside Proton domains, so Proton users on a custom domain are over-flagged.
+- Sizes are sums of file sizes, not your account quota.
+- `drive_usage` trash stats always make one uncached `/trash` listing (~2.5 s), even when the walk is cached.
 
 ### Photos
 
@@ -260,6 +279,12 @@ proton-drive-cli download /my-files/Contracts ./audit/contracts
 # Check who has access before a team change
 proton-drive-cli share status /my-files/Projects
 ```
+
+---
+
+## Prompts
+
+The server offers four MCP prompts (also declared in the MCPB manifest): `organise-folder` (`path`), `find-files` (`description`), `storage-audit` and `sharing-audit`. In Claude Code they are listed as `/servername:promptname (MCP)`, and `/mcp__servername__promptname` also runs them. Other clients show them as prompts. A prompt is hidden when a tool it needs is outside the active tool tier: with `PROTON_DRIVE_TOOL_TIER=core` only `find-files` is offered.
 
 ---
 
@@ -370,7 +395,7 @@ proton-drive-cli share status /my-files/Projects
 - Error messages come from the CLI's own output; the command line (and therefore any `--password`) is never echoed back.
 - `drive_move` accepts a full destination path (parent + new name) for a familiar interface, but the underlying CLI only has separate `move` (change parent) and `rename` (change name) commands — this MCP translates automatically, issuing one or both as needed.
 - `drive_delete` only works on items already in `/trash` or `/photos-trash` — the CLI rejects live paths. Trash an item first with `drive_trash`, or use `drive_empty_trash` to clear everything at once.
-- If the client declares MCP elicitation (form mode), a refused `confirmed` gate is put to the human instead, and `drive_bulk_move` / `drive_bulk_trash` ask before applying a `confirmed: true` call. Only an explicit approval runs the call; decline, cancel, timeout or error keep the refusal, and after 5 declined prompts in a minute the server stops prompting. This only upgrades refusals and bulk applies: a compromised model that supplies `confirmed: true` on any other tool is **not** stopped by it. Clients without elicitation behave as before.
+- If the client declares MCP elicitation (form mode), a refused `confirmed` gate is put to the human instead, and `drive_bulk_move` / `drive_bulk_trash` ask before applying a `confirmed: true` call. Only an explicit approval runs the call; decline, cancel, timeout or error keep the refusal, and after 5 declined prompts in a minute the server stops prompting. This only upgrades refusals and bulk applies: a compromised model that supplies `confirmed: true` on any other tool is **not** stopped by it. Clients without elicitation behave as before. Confirmation prompts need a client that supports elicitation (Claude Code CLI today; Claude Desktop is unverified).
 - Walk-based tools (`drive_tree`, `drive_search`, `drive_usage`, `drive_find_duplicates`) read from a cache up to 5 minutes old; changes made by other clients or processes are not seen until it expires or you pass `refresh: true`. The first walk of a large drive can take minutes (measured about 25 s per 1200 files at concurrency 8).
 - `drive_auth_status` has no native CLI equivalent — it probes by resolving `/my-files` and reports authenticated based on whether that succeeds.
 - Paths are always Drive-absolute: `/my-files/folder/file.pdf`. Relative paths are not supported.

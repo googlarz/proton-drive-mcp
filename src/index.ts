@@ -986,7 +986,7 @@ const TOOLS = [
   {
     name: "drive_usage",
     description:
-      "Storage analytics for a subtree: totals, largest files/folders, extension and media-type breakdown, old files, trash stats. Sizes are summed file sizes, not the account quota. Walks the tree; results come from a cache up to 5 min old (other clients' changes unseen until expiry or refresh=true); a first walk of a large drive can take minutes. `complete` flags partial results.",
+      "Storage analytics for a subtree: totals, largest files/folders, extension and media-type breakdown, old files, trash stats (always uncached, ~2.5 s). Sizes are summed file sizes, not the account quota. Walks the tree; results come from a cache up to 5 min old (other clients' changes unseen until expiry or refresh=true); a first walk of a large drive can take minutes. `complete` flags partial results.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: "object",
@@ -1205,15 +1205,19 @@ export async function main() {
     })),
   }));
 
+  // A prompt is offered only when every tool it tells the model to call is in the active tier.
+  const activeToolNames = new Set(activeDefs.map((t) => t.name));
+  const activePrompts = PROMPTS.filter((p) => p.requires.every((r) => activeToolNames.has(r)));
+
   server.setRequestHandler(ListPromptsRequestSchema, async () => ({
-    prompts: PROMPTS.map((p) => ({ ...p, arguments: [...p.arguments] })),
+    prompts: activePrompts.map(({ requires: _requires, ...p }) => ({ ...p, arguments: [...p.arguments] })),
   }));
 
   server.setRequestHandler(GetPromptRequestSchema, async (req) => {
     const { name, arguments: args = {} } = req.params;
     let text: string | undefined;
     try {
-      text = getPromptText(name, args);
+      text = activePrompts.some((p) => p.name === name) ? getPromptText(name, args) : undefined;
     } catch (err) {
       throw new McpError(ErrorCode.InvalidParams, err instanceof Error ? err.message : String(err));
     }

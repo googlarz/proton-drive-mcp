@@ -1,30 +1,35 @@
 import { validateRemotePath } from "./utils/validation.js";
 
 // Prompts are plain instructions for the model. They may name tools that ship in
-// the same release; the model simply sees them in tools/list (or not).
+// the same release. `requires` lists the tools a prompt tells the model to call; the server
+// hides a prompt when any of them is outside the active tool tier.
 export const PROMPTS = [
   {
     name: "organise-folder",
     title: "Organise a Drive folder",
     description: "Survey a Proton Drive folder and propose a cleaner structure, applying it only after you approve.",
+    requires: ["drive_tree", "drive_usage", "drive_bulk_move", "drive_trash"],
     arguments: [{ name: "path", description: "Absolute Drive path of the folder, e.g. /my-files/Documents.", required: true }],
   },
   {
     name: "find-files",
     title: "Find files in Drive",
     description: "Locate files in Proton Drive from a plain-language description.",
+    requires: ["drive_search"],
     arguments: [{ name: "description", description: "What you are looking for, e.g. 'the 2024 tax PDF from my accountant'.", required: true }],
   },
   {
     name: "storage-audit",
     title: "Audit Drive storage",
     description: "Find what uses your Proton Drive space: biggest items, duplicates and trash, with a short action list.",
+    requires: ["drive_usage", "drive_find_duplicates", "drive_list_trash"],
     arguments: [],
   },
   {
     name: "sharing-audit",
     title: "Audit Drive sharing",
     description: "Review what is shared from your Proton Drive and explain the risks.",
+    requires: ["drive_sharing_audit"],
     arguments: [],
   },
 ] as const;

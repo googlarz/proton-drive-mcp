@@ -334,3 +334,35 @@ describe("elicitation for gated tools", () => {
     });
   });
 });
+
+describe("prompts follow the tool tier", () => {
+  it("core tier hides prompts whose tools are hidden; unknown name is the same error", async () => {
+    const sb = makeSandbox();
+    const c = await startServer("json", sb, { PROTON_DRIVE_TOOL_TIER: "core" });
+    try {
+      await c.initialize();
+      const { prompts } = (await c.request("prompts/list", {})).result;
+      assert.deepEqual(prompts.map((p) => p.name), ["find-files"]);
+      assert.ok(prompts.every((p) => !("requires" in p)));
+      const tools = new Set((await c.listTools()).map((t) => t.name));
+      assert.ok(tools.has("drive_search"));
+      const hidden = await c.request("prompts/get", { name: "storage-audit" });
+      assert.equal(hidden.error.code, -32602);
+      assert.match(hidden.error.message, /Unknown prompt/);
+      const ok = await c.request("prompts/get", { name: "find-files", arguments: { description: "x" } });
+      assert.ok(ok.result.messages[0].content.text);
+    } finally { await c.close(); sb.cleanup(); }
+  });
+
+  it("full tier: every prompt's required tools exist in tools/list", async () => {
+    const sb = makeSandbox();
+    const c = await startServer("json", sb);
+    try {
+      await c.initialize();
+      const tools = new Set((await c.listTools()).map((t) => t.name));
+      const { PROMPTS } = await import("../dist/prompts.js");
+      for (const p of PROMPTS) for (const r of p.requires) assert.ok(tools.has(r), `${p.name} requires ${r}`);
+      assert.equal((await c.request("prompts/list", {})).result.prompts.length, PROMPTS.length);
+    } finally { await c.close(); sb.cleanup(); }
+  });
+});
