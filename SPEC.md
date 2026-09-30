@@ -69,7 +69,7 @@ test/                     Unit tests (injected runner) + real-process tests (fak
 - Unit tests drive `DriveService` with an injected runner (argv assertions, response parsing, collision/ambiguity handling).
 - Real-process tests spawn `dist/index.js` / `dist/cli.js` against a fake `PROTON_DRIVE_BIN` over stdio (gates, schema enforcement, error sanitization, lifecycle, symlink launch, parity of tools/README/glama/smithery).
 - `test/live.test.mjs` is an opt-in read-only smoke test against a real account (`PROTON_DRIVE_LIVE=1`).
-- CI: lint + tests on Ubuntu and macOS × Node 22/24 (Windows is only probed, non-blocking), `npm audit`, and a pack-and-install smoke test that launches the real bin symlink.
+- CI: lint + tests on Ubuntu and macOS × Node 22/24 (Windows is not tested), `npm audit`, and a pack-and-install smoke test that launches the real bin symlink.
 
 ## Boundaries
 

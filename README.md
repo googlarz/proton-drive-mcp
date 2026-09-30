@@ -386,7 +386,7 @@ These come from the upstream `proton-drive` CLI (v0.8.0), not from this server:
 
 ## Platform support
 
-Developed and live-tested on **macOS**. CI runs the test suite on Ubuntu and macOS (Node 22 and 24). **Windows is not supported yet**: the test suite has never passed there (CI runs it only as a non-blocking probe), and the Windows paths in `doctor` / `setup-claude-desktop` (`%APPDATA%`, `PATHEXT` lookup) are untested. The system-PATH warning in `doctor` only knows POSIX directories. Linux is covered by CI with the fake CLI but has not been live-tested against a real Proton account.
+Developed and live-tested on **macOS**. CI runs the test suite on Ubuntu and macOS (Node 22 and 24). **Windows is not supported yet**: the test suite has never passed there and CI does not run it, and the Windows paths in `doctor` / `setup-claude-desktop` (`%APPDATA%`, `PATHEXT` lookup) are untested. The system-PATH warning in `doctor` only knows POSIX directories. Linux is covered by CI with the fake CLI but has not been live-tested against a real Proton account.
 
 ## Testing status
 
