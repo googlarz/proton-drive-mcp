@@ -71,8 +71,12 @@ describe("drive_search", () => {
     assert.deepEqual(paths(await search({ type: "folder" })), ["/my-files/.git", "/my-files/Broken", "/my-files/Docs", "/my-files/Docs/Old", "/my-files/Pics"]);
     assert.equal((await search({ mediaType: "image/" })).total, 2);
     assert.deepEqual(paths(await search({ minSize: 3000, maxSize: 4000 })), ["/my-files/Docs/a.docx", "/my-files/Pics/cat.jpg"]);
-    assert.equal((await search({ glob: "Docs/**" })).total, 0); // a glob with '/' is matched against the full path
-    assert.equal((await search({ glob: "/my-files/Docs/*" })).total, 4);
+    assert.equal((await search({ glob: "/my-files/Docs/*" })).total, 0); // a glob with '/' is relative to path: no leading slash
+    assert.equal((await search({ glob: "Docs/**" })).total, 5);
+    assert.deepEqual(paths(await search({ glob: "Docs/*" })), ["/my-files/Docs/a.docx", "/my-files/Docs/Old", "/my-files/Docs/Report.PDF", "/my-files/Docs/small.pdf"]);
+    assert.deepEqual(paths(await search({ glob: "*/*/*.pdf" })), ["/my-files/Docs/Old/report-2019.pdf"]);
+    assert.deepEqual(paths(await search({ path: "/my-files/Docs", glob: "Old/*" })), ["/my-files/Docs/Old/report-2019.pdf"]);
+    assert.deepEqual(paths(await search({ glob: "**/*.pdf" })), ["/my-files/Docs/Old/report-2019.pdf", "/my-files/Docs/Report.PDF", "/my-files/Docs/small.pdf"]);
   });
 
   it("date filters use claimed mtime and fall back to upload time", async () => {

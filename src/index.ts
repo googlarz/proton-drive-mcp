@@ -239,7 +239,7 @@ const TOOLS = [
       type: "object",
       properties: {
         query: { type: "string", description: "Name substring, case-insensitive." },
-        glob: { type: "string", description: "Name pattern, e.g. *.pdf (* ? **)." },
+        glob: { type: "string", description: "Name pattern, e.g. *.pdf (* ? **). A pattern containing '/' matches the path relative to `path` (no leading slash), e.g. Docs/*/*.pdf." },
         path: { type: "string", description: "Default /my-files." },
         type: { type: "string", enum: ["file", "folder"], description: "Only files or folders." },
         mediaType: { type: "string", description: "MIME prefix, e.g. image/." },

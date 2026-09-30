@@ -105,7 +105,7 @@ export async function driveSearch(svc: DriveService, a: Args) {
     const name = baseName(n.path);
     if (extensions && !extensions.some((e) => name.toLowerCase().endsWith(e))) continue;
     if (query && !name.toLowerCase().includes(query)) continue;
-    if (globRaw !== undefined && !globMatch(globRaw, globRaw.includes("/") ? n.path : name, true)) continue;
+    if (globRaw !== undefined && !globMatch(globRaw, globRaw.includes("/") ? n.path.slice(path.length + 1) : name, true)) continue;
     hits.push(n);
   }
 
