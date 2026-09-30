@@ -229,6 +229,9 @@ proton-drive-cli restore /my-files/old-draft.pdf       # restore from trash
 proton-drive-cli trash empty --confirm                  # permanently delete all trashed items
 ```
 
+### Analytics
+`drive_usage` · `drive_find_duplicates` · `drive_sharing_audit`
+
 ### Photos
 
 ```bash
@@ -311,6 +314,9 @@ proton-drive-cli share status /my-files/Projects
 | `drive_delete` | Permanently delete an item already in trash ⚠️ | `path`, `confirmed: true` |
 | `drive_list_trash` | List items currently in trash (paginated, default 100; includes `uid` — names are not unique in trash) | `limit?`, `offset?` |
 | `drive_share_status` | Get sharing members and URL | `path` |
+| `drive_usage` | Storage analytics for a subtree: totals, largest files/folders, extension and media-type breakdown, old files, trash stats (sum of file sizes, not the account quota) | `path?`, `top?`, `olderThanDays?`, `refresh?` |
+| `drive_find_duplicates` | Likely duplicate groups (claimed sha1 / same size; `verify` downloads and sha256s candidates), wasted bytes, suggested keeper — never deletes | `path?`, `minSize?`, `verify?`, `maxVerifyBytes?`, `limit?`, `refresh?` |
+| `drive_sharing_audit` | Public links (no URL), invitees, pending invitations and risk flags for shared items (max 100) | `path?`, `refresh?` |
 | `drive_share_invite` | Invite a user (sends an email) ⚠️ | `path`, `email`, `role` (viewer/editor/admin), `message?`, `confirmed: true` |
 | `drive_share_revoke` | Revoke one person's access (fails if not a member) ⚠️ | `path`, `email`, `confirmed: true` |
 | `drive_share_remove_all` | Remove every member + pending invitation at once ⚠️ | `path`, `confirmed: true` |
@@ -414,6 +420,7 @@ Every tool group was live-tested on 2026-09-28 against a real Proton account, **
 | `PROTON_DRIVE_RETRY_BASE_MS` | Optional | Test hook: base backoff in ms for retrying read-only calls (default 250). |
 | `PROTON_DRIVE_WALK_TTL_MS` | Optional | How long `drive_tree`/`drive_search` reuse a cached folder walk, in ms (default 300000; 0 disables the cache). The cache is also dropped for any path this server writes to. |
 | `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 40 tools) or `core` (18 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
+| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 41 tools) or `core` (16 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
 
 ---
 

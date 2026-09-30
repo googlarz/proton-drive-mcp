@@ -55,6 +55,9 @@ tools:
   - drive_tree
   - drive_search
   - drive_rename
+  - drive_usage
+  - drive_find_duplicates
+  - drive_sharing_audit
 startCommand:
   type: stdio
   configSchema:

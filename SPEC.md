@@ -45,6 +45,7 @@ test/                     Unit tests (injected runner) + real-process tests (fak
 - **Trash:** `drive_list_trash`, `drive_trash`, `drive_restore`, `drive_delete`, `drive_empty_trash`
 - **Sharing:** `drive_share_status`, `drive_share_invite`, `drive_share_revoke`, `drive_share_remove_all`, `drive_share_set_url`, `drive_share_remove_url`, `drive_share_leave`
 - **Invitations:** `drive_list_invitations`, `drive_invitation_accept`, `drive_invitation_reject`
+- **Analytics:** `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`
 - **Photos:** `photos_list_albums`, `photos_create_album`, `photos_update_album`, `photos_delete_album`, `photos_list_album_photos`, `photos_add_to_album`, `photos_remove_from_album`, `photos_list_timeline`, `photos_download`, `photos_upload`
 - **Local sync folder (needs `PROTON_DRIVE_SYNC_PATH`):** `drive_read_file`, `drive_write_file`
 

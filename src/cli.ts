@@ -25,6 +25,8 @@ import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type
 import { invalidatePath } from "./services/walk.js";
 import { resolve } from "node:path";
 import { driveSearch, driveTree } from "./services/find.js";
+import { driveUsage, driveFindDuplicates, driveSharingAudit } from "./services/analytics.js";
+import { validateRemotePath, validateRemotePathList, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 
 const drive = new DriveService();
 const args = process.argv.slice(2);
@@ -57,6 +59,7 @@ Commands:
   move <src> <dst>                         Move and/or rename
   delete <path>|--uid <uid> --confirm      Delete a file/folder already in trash, permanently
   share status <path>                      Show sharing info
+  share audit [path] [--refresh]           Audit public links, invitees and risk flags under a path (default /my-files)
   share invite <path> <email> <role>       Invite user (viewer/editor/admin)
   share revoke <path> <email>              Revoke one user's access
   share remove-all <path> --confirm        Remove everyone's access + pending invitations
@@ -70,6 +73,10 @@ Commands:
   bulk-move <dst-folder> <src>... [--confirm]  Move many items into an existing folder; without --confirm prints the plan only
   bulk-trash <path>... [--confirm]         Trash many items; without --confirm prints the plan only
   trash list                               List trash contents
+  usage [path] [--top N] [--older-than DAYS] [--refresh]
+                                           Storage analytics: totals, largest files/folders, breakdowns, trash (sum of file sizes, not the quota)
+  duplicates [path] [--min-size B] [--verify] [--max-verify-bytes B] [--limit N] [--refresh]
+                                           Likely duplicate files; --verify downloads and hashes candidates. Never deletes.
   trash empty --confirm                    Permanently delete all trash
   restore <path>|--uid <uid>               Restore from trash (uid from 'trash list')
   invitation list                          List pending invitations
@@ -102,6 +109,17 @@ function requirePath(value: string | undefined, usage: string): string {
   try { return validateRemotePath(value); }
   catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); }
   return "" as never; // unreachable; process.exit(1) above always terminates
+}
+
+function pathOrRoot(value: string | undefined): string {
+  return value && !value.startsWith("--") ? requirePath(value, "<command> [path]") : "/my-files";
+}
+
+function intFlag(flag: string): number | undefined {
+  const v = getFlag(flag);
+  if (v === undefined) return undefined;
+  if (!/^\d+$/.test(v)) { console.error(`${flag} must be a non-negative integer`); process.exit(1); }
+  return Number(v);
 }
 
 function requireEmail(value: string): string {
@@ -337,6 +355,8 @@ async function run() {
     case "share":
       if (sub === "status") {
         print(await drive.shareStatus(requirePath(rest[0], "share status <path>")));
+      } else if (sub === "audit") {
+        print(await driveSharingAudit(drive, { path: pathOrRoot(rest[0]), refresh: args.includes("--refresh") }));
       } else if (sub === "invite") {
         const [rawPath, rawEmail, role] = rest;
         if (!rawPath || !rawEmail || !role) {
@@ -395,6 +415,26 @@ async function run() {
         console.error(`Unknown share subcommand: ${sub}`);
         process.exit(1);
       }
+      break;
+
+    case "usage":
+      print(await driveUsage(drive, {
+        path: pathOrRoot(sub),
+        top: intFlag("--top"),
+        olderThanDays: intFlag("--older-than"),
+        refresh: args.includes("--refresh"),
+      }));
+      break;
+
+    case "duplicates":
+      print(await driveFindDuplicates(drive, {
+        path: pathOrRoot(sub),
+        minSize: intFlag("--min-size"),
+        verify: args.includes("--verify"),
+        maxVerifyBytes: intFlag("--max-verify-bytes"),
+        limit: intFlag("--limit"),
+        refresh: args.includes("--refresh"),
+      }));
       break;
 
     case "trash":
