@@ -44,7 +44,7 @@ Commands:
   info <path> [--verbose]                  Show node metadata (--verbose = raw CLI node)
   tree [path] [--depth N] [--limit N] [--folders-only] [--refresh]
                                            Folder overview with per-folder counts and sizes (default /my-files, depth 2)
-  search [path] [--query S] [--glob G] [--regex R] [--type file|folder] [--media-type P] [--ext pdf,docx]
+  search [path] [--query S] [--glob G] [--type file|folder] [--media-type P] [--ext pdf,docx]
          [--min-size B] [--max-size B] [--after DATE] [--before DATE] [--sort name|size|mtime]
          [--limit N] [--offset N] [--refresh]
                                            Find files/folders under path (default /my-files) in one walk
@@ -75,7 +75,7 @@ Commands:
   trash list                               List trash contents
   usage [path] [--top N] [--older-than DAYS] [--refresh]
                                            Storage analytics: totals, largest files/folders, breakdowns, trash (sum of file sizes, not the quota)
-  duplicates [path] [--min-size B] [--verify] [--max-verify-bytes B] [--limit N] [--refresh]
+  duplicates [path] [--min-size B] [--verify] [--max-verify-bytes B] [--max-verify-total-bytes B] [--limit N] [--refresh]
                                            Likely duplicate files; --verify downloads and hashes candidates. Never deletes.
   trash empty --confirm                    Permanently delete all trash
   restore <path>|--uid <uid>               Restore from trash (uid from 'trash list')
@@ -243,7 +243,7 @@ async function run() {
     case "search":
       print(await driveSearch(drive, {
         path: sub && !sub.startsWith("--") ? sub : undefined,
-        query: getFlag("--query"), glob: getFlag("--glob"), regex: getFlag("--regex"),
+        query: getFlag("--query"), glob: getFlag("--glob"),
         type: getFlag("--type"), mediaType: getFlag("--media-type"),
         extensions: getFlag("--ext")?.split(","),
         ...numFlags("limit", "offset"),
@@ -432,6 +432,7 @@ async function run() {
         minSize: intFlag("--min-size"),
         verify: args.includes("--verify"),
         maxVerifyBytes: intFlag("--max-verify-bytes"),
+        maxVerifyTotalBytes: intFlag("--max-verify-total-bytes"),
         limit: intFlag("--limit"),
         refresh: args.includes("--refresh"),
       }));

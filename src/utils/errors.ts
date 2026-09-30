@@ -35,3 +35,11 @@ export class DriveParseError extends Error {
     this.name = "DriveParseError";
   }
 }
+
+/** A destructive/outward gate refused because confirmed=true was missing. The message is shown to the model unchanged. */
+export class NeedsConfirmationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NeedsConfirmationError";
+  }
+}

@@ -7,6 +7,7 @@ import type { DriveFile, ShareStatus } from "../types/index.js";
 import type { DriveService } from "./drive.js";
 import { walkTree, type WalkNode, type WalkOptions, type WalkResult } from "./walk.js";
 import { validateLocalPath } from "../utils/validation.js";
+import { callContext } from "../utils/subprocess.js";
 
 export type WalkFn = (svc: DriveService, root: string, opts?: WalkOptions) => Promise<WalkResult>;
 
@@ -156,6 +157,10 @@ async function pool<T>(items: T[], concurrency: number, fn: (x: T) => Promise<vo
   );
 }
 
+const DEFAULT_VERIFY_TOTAL_BYTES = 500_000_000;
+export const MAX_VERIFY_TOTAL_BYTES = 2_000_000_000;
+const MAX_VERIFY_MEMBERS = 200;
+
 export type Hasher = (node: WalkNode) => Promise<string>;
 
 /**
@@ -165,23 +170,37 @@ export type Hasher = (node: WalkNode) => Promise<string>;
 export async function verifyGroups(
   groups: DuplicateGroup[],
   hash: Hasher,
-  o: { maxVerifyBytes: number; concurrency?: number }
+  o: { maxVerifyBytes: number; maxTotalBytes?: number; maxMembers?: number; concurrency?: number; signal?: AbortSignal }
 ): Promise<(DuplicateGroup & { verifyNote?: string })[]> {
   const out: (DuplicateGroup & { verifyNote?: string })[] = [];
+  const maxTotal = o.maxTotalBytes ?? DEFAULT_VERIFY_TOTAL_BYTES;
+  const maxMembers = o.maxMembers ?? MAX_VERIFY_MEMBERS;
+  let totalBytes = 0, totalMembers = 0;
+  const stop = () => { if (o.signal?.aborted) throw o.signal.reason instanceof Error ? o.signal.reason : new Error("verification aborted"); };
   for (const g of groups) {
+    stop();
     if (g.members.some((m) => byteSize(m) > o.maxVerifyBytes)) {
       out.push({ ...g, verifyNote: `skipped: member over maxVerifyBytes (${o.maxVerifyBytes})` });
       continue;
     }
+    const groupBytes = g.members.reduce((s, m) => s + byteSize(m), 0);
+    if (totalBytes + groupBytes > maxTotal || totalMembers + g.members.length > maxMembers) {
+      out.push({ ...g, verifyNote: `skipped: total verify budget reached (maxVerifyTotalBytes ${maxTotal}, ${maxMembers} files)` });
+      continue;
+    }
+    totalBytes += groupBytes;
+    totalMembers += g.members.length;
     const digests = new Map<WalkNode, string>();
     const failed: string[] = [];
     await pool(g.members, o.concurrency ?? 4, async (m) => {
+      if (o.signal?.aborted) return;
       try {
         digests.set(m, await hash(m));
       } catch (e) {
         failed.push(`${m.path}: ${e instanceof Error ? e.message : String(e)}`);
       }
     });
+    stop(); // the hasher's own finally already removed any temp dir
     if (failed.length) {
       out.push({ ...g, verifyNote: `not verified, download/hash failed: ${failed.join("; ")}` });
       continue;
@@ -226,9 +245,12 @@ function reportGroup(g: DuplicateGroup & { verifyNote?: string }) {
 
 export async function driveFindDuplicates(
   drive: DriveService,
-  o: { path: string; minSize?: number; verify?: boolean; maxVerifyBytes?: number; limit?: number; refresh?: boolean },
+  o: { path: string; minSize?: number; verify?: boolean; maxVerifyBytes?: number; maxVerifyTotalBytes?: number; limit?: number; refresh?: boolean; signal?: AbortSignal },
   deps: { walk?: WalkFn; hash?: Hasher } = {}
 ) {
+  if (o.maxVerifyTotalBytes !== undefined && (!Number.isInteger(o.maxVerifyTotalBytes) || o.maxVerifyTotalBytes < 1 || o.maxVerifyTotalBytes > MAX_VERIFY_TOTAL_BYTES)) {
+    throw new Error(`maxVerifyTotalBytes must be an integer between 1 and ${MAX_VERIFY_TOTAL_BYTES}`);
+  }
   const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh });
   const limit = o.limit ?? 20;
   let groups: (DuplicateGroup & { verifyNote?: string })[] = findDuplicateCandidates(walk.nodes, o.minSize ?? 1024);
@@ -237,7 +259,10 @@ export async function driveFindDuplicates(
     // Only the top `limit` candidate groups are downloaded; the rest stay unverified.
     const head = groups.slice(0, limit);
     const tail = groups.slice(limit);
-    groups = [...(await verifyGroups(head, deps.hash ?? makeDriveHasher(drive), { maxVerifyBytes: o.maxVerifyBytes ?? 50_000_000 })), ...tail];
+    groups = [...(await verifyGroups(head, deps.hash ?? makeDriveHasher(drive), {
+      maxVerifyBytes: o.maxVerifyBytes ?? 50_000_000, maxTotalBytes: o.maxVerifyTotalBytes,
+      signal: o.signal ?? callContext.getStore()?.signal,
+    })), ...tail];
     groups.sort((a, b) => wasted(b) - wasted(a) || (a.members[0].path < b.members[0].path ? -1 : 1));
     verified = true;
   }

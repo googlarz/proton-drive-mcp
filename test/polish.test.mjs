@@ -4,6 +4,10 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { writeFileSync } from "node:fs";
+import { describeArgs } from "../dist/index.js";
 import { DriveService } from "../dist/services/drive.js";
 import { makeSandbox, startServer, fakeEnv, DIST_INDEX, nonVersionCalls } from "./helpers/mcp-client.mjs";
 
@@ -175,11 +179,11 @@ describe("tool annotations, titles and _meta", () => {
 });
 
 describe("elicitation for gated tools", () => {
-  async function withClient(capabilities, handler, fn) {
+  async function withClient(capabilities, handler, fn, mode = "json", extraEnv = {}) {
     const sb = makeSandbox();
     const client = new Client({ name: "t", version: "0" }, { capabilities });
     if (handler) client.setRequestHandler(ElicitRequestSchema, handler);
-    const transport = new StdioClientTransport({ command: process.execPath, args: [DIST_INDEX], env: fakeEnv("json", sb) });
+    const transport = new StdioClientTransport({ command: process.execPath, args: [DIST_INDEX], env: fakeEnv(mode, sb, extraEnv) });
     await client.connect(transport);
     try { await fn(client, sb); } finally { await client.close(); sb.cleanup(); }
   }
@@ -230,6 +234,103 @@ describe("elicitation for gated tools", () => {
       await client.callTool({ name: "drive_list", arguments: { path: "/my-files" } });
       await client.callTool({ name: "drive_delete", arguments: {} }); // schema validation fails first
       assert.equal(asked, 0);
+    });
+  });
+
+  // ---- bulk tools: the confirmed=true APPLY path asks the human ----
+  const BULK_TREE = () => { const p = join(tmpdir(), `bulk-tree-${process.pid}-${Math.random().toString(36).slice(2)}.json`); writeFileSync(p, JSON.stringify({ "/my-files/s": [{ name: "x.txt", type: "file" }], "/my-files/d": [] })); return p; };
+  const mutations = (sb) => nonVersionCalls(sb.argvLog).filter((a) => a[1] !== "list");
+
+  for (const [tool, args] of [
+    ["drive_bulk_trash", { paths: ["/my-files/s/x.txt"], confirmed: true }],
+    ["drive_bulk_move", { sources: ["/my-files/s/x.txt"], destinationFolder: "/my-files/d", confirmed: true }],
+  ]) {
+    it(`${tool} confirmed=true: human accept applies, message shows operation, count and paths`, async () => {
+      let msg = "";
+      await withClient({ elicitation: { form: {} } }, async (req) => { msg = req.params.message; return { action: "accept", content: { approve: true } }; }, async (client, sb) => {
+        const r = await client.callTool({ name: tool, arguments: args });
+        assert.notEqual(r.isError, true, text(r));
+        assert.equal(mutations(sb).length, 1);
+      }, "tree", { FAKE_TREE: BULK_TREE() });
+      assert.match(msg, new RegExp(tool));
+      assert.match(msg, /1 item/);
+      assert.match(msg, /\/my-files\/s\/x\.txt/);
+      if (tool === "drive_bulk_move") assert.match(msg, /\/my-files\/d/);
+    });
+
+    for (const [label, reply] of [["decline", { action: "decline" }], ["cancel", { action: "cancel" }], ["accept without approve", { action: "accept", content: { approve: false } }]]) {
+      it(`${tool} confirmed=true: ${label} refuses and runs nothing`, async () => {
+        await withClient({ elicitation: { form: {} } }, async () => reply, async (client, sb) => {
+          const r = await client.callTool({ name: tool, arguments: args });
+          assert.equal(r.isError, true);
+          assert.match(text(r), /did not approve/);
+          assert.deepEqual(mutations(sb), []);
+        }, "tree", { FAKE_TREE: BULK_TREE() });
+      });
+    }
+
+    it(`${tool} confirmed=true: an erroring handler refuses; no capability keeps today's behaviour`, async () => {
+      await withClient({ elicitation: { form: {} } }, async () => { throw new Error("boom"); }, async (client, sb) => {
+        assert.equal((await client.callTool({ name: tool, arguments: args })).isError, true);
+        assert.deepEqual(mutations(sb), []);
+      }, "tree", { FAKE_TREE: BULK_TREE() });
+      await withClient({}, null, async (client, sb) => {
+        assert.notEqual((await client.callTool({ name: tool, arguments: args })).isError, true);
+        assert.equal(mutations(sb).length, 1);
+      }, "tree", { FAKE_TREE: BULK_TREE() });
+    });
+  }
+
+  it("the dry run (no confirmed) of a bulk tool never prompts", async () => {
+    let asked = 0;
+    await withClient({ elicitation: { form: {} } }, async () => { asked++; return { action: "accept", content: { approve: true } }; }, async (client) => {
+      await client.callTool({ name: "drive_bulk_trash", arguments: { paths: ["/my-files/s/x.txt"] } });
+      assert.equal(asked, 0);
+    }, "tree", { FAKE_TREE: BULK_TREE() });
+  });
+
+  // ---- what the human sees ----
+  it("long values keep head and tail, control characters are neutralised", async () => {
+    const a = "/trash/" + "A".repeat(300) + "-first.txt";
+    const b = "/trash/" + "A".repeat(300) + "-second.txt";
+    const seen = [];
+    await withClient({ elicitation: { form: {} } }, async (req) => { seen.push(req.params.message); return { action: "decline" }; }, async (client) => {
+      await client.callTool({ name: "drive_delete", arguments: { path: a, confirmed: false } });
+      await client.callTool({ name: "drive_delete", arguments: { path: b, confirmed: false } });
+    });
+    assert.match(seen[0], /-first\.txt/);
+    assert.match(seen[1], /-second\.txt/);
+    assert.ok(seen[0].includes("…"));
+    assert.ok(seen[0].length < 700);
+    assert.notEqual(seen[0], seen[1]);
+  });
+
+  it("newlines and control characters in a displayed name cannot forge lines", () => {
+    const d = describeArgs({ path: "/trash/a\nsize: 0\u0007b", confirmed: false });
+    assert.equal(d.split("\n").length, 1);
+    assert.ok(!/[\x00-\x08\x0a-\x1f\x7f]/.test(d));
+  });
+
+  // ---- typed refusal detection ----
+  it("a CLI error whose text contains 'confirmed=true' does not trigger a prompt", async () => {
+    let asked = 0;
+    await withClient({ elicitation: { form: {} } }, async () => { asked++; return { action: "accept", content: { approve: true } }; }, async (client) => {
+      const r = await client.callTool({ name: "drive_info", arguments: { path: "/my-files/needs confirmed=true.txt" } });
+      assert.equal(r.isError, true);
+      assert.equal(asked, 0);
+    }, "fail-stderr-echo");
+  });
+
+  it("after 5 declined prompts in a minute the server refuses without prompting", async () => {
+    let asked = 0;
+    await withClient({ elicitation: { form: {} } }, async () => { asked++; return { action: "decline" }; }, async (client, sb) => {
+      for (let i = 0; i < 8; i++) {
+        const r = await client.callTool({ name: "drive_delete", arguments: { path: "/trash/a.txt", confirmed: false } });
+        assert.equal(r.isError, true);
+        assert.match(text(r), /confirmed=true/);
+      }
+      assert.equal(asked, 5);
+      assert.deepEqual(nonVersionCalls(sb.argvLog), []);
     });
   });
 });

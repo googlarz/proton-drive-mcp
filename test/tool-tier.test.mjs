@@ -43,8 +43,8 @@ describe("tool tier", () => {
   });
 
   it("tools/list stays within the size budget", () => {
-    assert.ok(size(full) <= 39_500, `full ${size(full)} bytes`);
-    assert.ok(size(core) <= 17_500, `core ${size(core)} bytes`);
+    assert.ok(size(full) <= 39_200, `full ${size(full)} bytes`);
+    assert.ok(size(core) <= 17_000, `core ${size(core)} bytes`);
   });
 
   it("core refuses a hidden tool at call time without touching the CLI", async () => {

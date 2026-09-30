@@ -190,6 +190,20 @@ describe("walkTree", () => {
     assert.equal(stats.calls.length, n);
   });
 
+  it("an excluded folder is never answered from an ancestor walk that skipped it", async () => {
+    const tree = { ...small(), "/my-files/a/node_modules": [file("pkg.js", 3)] };
+    tree["/my-files/a"] = [...tree["/my-files/a"], folder("node_modules", 9)];
+    const { svc, stats } = makeSvc(tree);
+    await walkTree(svc, "/my-files"); // excludes .git and node_modules
+    const n = stats.calls.length;
+    const r = await walkTree(svc, "/my-files/a/node_modules");
+    assert.equal(r.fromCache, false);
+    assert.deepEqual(r.nodes.map((x) => x.path), ["/my-files/a/node_modules/pkg.js"]);
+    assert.ok(stats.calls.length > n);
+    const below = await walkTree(svc, "/my-files/.git", { refresh: false });
+    assert.deepEqual(below.nodes.map((x) => x.path), ["/my-files/.git/HEAD"]);
+  });
+
   it("a depth-limited or partial ancestor walk does not answer a deeper request", async () => {
     const { svc, stats } = makeSvc(small());
     await walkTree(svc, "/my-files", { maxDepth: 1 });
@@ -240,6 +254,45 @@ describe("walkTree", () => {
     // Permanent delete acts on the trash, not on live walks.
     await walkTree(svc, "/trash", { refresh: true });
     await svc.delete("/trash/x.pdf");
+    assert.equal((await walkTree(svc, "/trash")).fromCache, false);
+  });
+
+  it("a failing write still invalidates (it may have half-applied)", async () => {
+    const tree = { ...small(), "/trash": [] };
+    const runner = async (args) => {
+      if (args[1] === "list") return tree[args[2]];
+      throw new Error("boom");
+    };
+    const svc = new DriveService(runner);
+    const cases = [
+      () => svc.mkdir("/my-files/a/new"),
+      () => svc.upload("/tmp/x", "/my-files/a"),
+      () => svc.rename("/my-files/a/x.pdf", "q.pdf"),
+      () => svc.copy("/my-files/a/x.pdf", "/my-files/b"),
+      () => svc.trash("/my-files/a/x.pdf"),
+      () => svc.bulkTrash(["/my-files/a/x.pdf"]),
+      () => svc.restore("/trash/x.pdf"),
+      () => svc.delete("/trash/x.pdf"),
+      () => svc.emptyTrash(),
+    ];
+    for (const write of cases) {
+      await walkTree(svc, "/my-files", { refresh: true });
+      await walkTree(svc, "/trash", { refresh: true });
+      await assert.rejects(write());
+      const live = (await walkTree(svc, "/my-files")).fromCache;
+      const trash = (await walkTree(svc, "/trash")).fromCache;
+      assert.ok(!live || !trash, String(write)); // at least the affected walk was dropped
+      if (/trash|restore|delete|emptyTrash/.test(String(write))) assert.equal(trash, false, String(write));
+      if (!/delete|emptyTrash/.test(String(write))) assert.equal(live, false, String(write));
+    }
+  });
+
+  it("trashing an item also drops cached /trash walks", async () => {
+    const tree = { ...small(), "/trash": [] };
+    const svc = new DriveService(async (args) => (args[1] === "list" ? tree[args[2]] : []));
+    await walkTree(svc, "/trash", { refresh: true });
+    assert.equal((await walkTree(svc, "/trash")).fromCache, true);
+    await svc.trash("/my-files/a/x.pdf");
     assert.equal((await walkTree(svc, "/trash")).fromCache, false);
   });
 });

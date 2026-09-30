@@ -18,6 +18,13 @@ import { DriveNotAuthenticatedError, DriveParseError } from "../utils/errors.js"
 import { validateName } from "../utils/validation.js";
 import { invalidatePath } from "./walk.js";
 
+// A trashed item shows up in the trash listings, so cached trash walks go stale too.
+function invalidateTrashAnd(path: string): void {
+  invalidatePath(path);
+  invalidatePath("/trash");
+  invalidatePath("/photos-trash");
+}
+
 type Runner = (args: string[]) => Promise<unknown>;
 type RawRunner = (args: string[]) => Promise<string>;
 
@@ -289,22 +296,27 @@ export class DriveService {
     fileConflictStrategy: FileConflictStrategy = "skip",
     folderConflictStrategy: FolderConflictStrategy = "skip"
   ): Promise<UploadResult> {
-    const result = await this.run([
-      "filesystem",
-      "upload",
-      localPath,
-      remotePath,
-      "--file-conflict-strategy",
-      fileConflictStrategy,
-      "--folder-conflict-strategy",
-      folderConflictStrategy,
-    ]);
+    // finally: a partly completed upload that then fails also changes the tree.
+    let result: unknown;
+    try {
+      result = await this.run([
+        "filesystem",
+        "upload",
+        localPath,
+        remotePath,
+        "--file-conflict-strategy",
+        fileConflictStrategy,
+        "--folder-conflict-strategy",
+        folderConflictStrategy,
+      ]);
+    } finally {
+      invalidatePath(remotePath);
+    }
     // Real shape is TransferSummary: {transferredItems, transferredBytes,
     // skippedItems, failedItems, failures}. Confirmed live — the old
     // {uploaded, skipped, failed} field names never existed, so failures
     // were silently reported as 0 regardless of what actually happened.
     const summary = this.parseTransferSummary(result);
-    invalidatePath(remotePath);
     return {
       path: remotePath,
       uploaded: summary.transferredItems,
@@ -348,8 +360,7 @@ export class DriveService {
       throw new Error(`folder name must not contain '/': ${remotePath}`);
     }
     validateName(name);
-    await this.run(["filesystem", "create-folder", parent, name]);
-    invalidatePath(remotePath);
+    try { await this.run(["filesystem", "create-folder", parent, name]); } finally { invalidatePath(remotePath); }
   }
 
   // Returns metadata (including latest revision details) for a single file or
@@ -366,9 +377,7 @@ export class DriveService {
   // Renames in place — does not move to a different folder. Returns the
   // renamed node (raw pass-through).
   async rename(remotePath: string, newName: string): Promise<unknown> {
-    const renamed = await this.run(["filesystem", "rename", remotePath, newName]);
-    invalidatePath(remotePath);
-    return renamed;
+    try { return await this.run(["filesystem", "rename", remotePath, newName]); } finally { invalidatePath(remotePath); }
   }
 
   // The CLI has no single "move to any full path" command — `move` only
@@ -456,8 +465,7 @@ export class DriveService {
   // exists on the CLI side; our own confirmed-gate lives in the MCP layer.
   async delete(remotePath?: string, uid?: string): Promise<void> {
     const target = await this.resolveTrashTarget(remotePath, uid);
-    assertItemsOk(await this.run(["filesystem", "delete", target]), "Delete");
-    invalidatePath(target);
+    try { assertItemsOk(await this.run(["filesystem", "delete", target]), "Delete"); } finally { invalidatePath(target); }
   }
 
   // Sharing
@@ -609,8 +617,7 @@ export class DriveService {
   }
 
   async trash(remotePath: string): Promise<void> {
-    assertItemsOk(await this.run(["filesystem", "trash", remotePath]), "Trash");
-    invalidatePath(remotePath);
+    try { assertItemsOk(await this.run(["filesystem", "trash", remotePath]), "Trash"); } finally { invalidateTrashAnd(remotePath); }
   }
 
   // One batched CLI call; per-item failures surface through assertItemsOk, with
@@ -620,7 +627,7 @@ export class DriveService {
   }
 
   async bulkTrash(paths: string[]): Promise<void> {
-    await this.runBatch(["filesystem", "trash", ...paths], "Trash", paths.length);
+    try { await this.runBatch(["filesystem", "trash", ...paths], "Trash", paths.length); } finally { paths.forEach(invalidateTrashAnd); }
   }
 
   private async runBatch(args: string[], action: string, total: number): Promise<void> {
@@ -635,8 +642,8 @@ export class DriveService {
 
   async restore(remotePath?: string, uid?: string): Promise<void> {
     const target = await this.resolveTrashTarget(remotePath, uid);
-    assertItemsOk(await this.run(["filesystem", "restore", target]), "Restore");
-    invalidatePath("/"); // the original location is unknown, so drop every cached walk
+    // finally + "/": the original location is unknown, so drop every cached walk (trash included)
+    try { assertItemsOk(await this.run(["filesystem", "restore", target]), "Restore"); } finally { invalidatePath("/"); }
   }
 
   // Confirmed live against CLI v0.8.0: restore/delete accept only /trash
@@ -677,8 +684,7 @@ export class DriveService {
   }
 
   async emptyTrash(): Promise<void> {
-    await this.run(["filesystem", "empty-trash"]);
-    invalidatePath("/trash");
+    try { await this.run(["filesystem", "empty-trash"]); } finally { invalidatePath("/trash"); invalidatePath("/photos-trash"); }
   }
 
   // The destination is the target PARENT folder (unlike move). `newName` maps to
@@ -686,8 +692,7 @@ export class DriveService {
   // duplicate an item inside its own folder.
   async copy(remoteSrc: string, remoteDst: string, newName?: string): Promise<void> {
     const args = ["filesystem", "copy", ...(newName ? ["--name", newName] : []), remoteSrc, remoteDst];
-    assertItemsOk(await this.run(args), "Copy");
-    invalidatePath(remoteDst);
+    try { assertItemsOk(await this.run(args), "Copy"); } finally { invalidatePath(remoteDst); }
   }
 
   async listInvitations(): Promise<DriveInvitation[]> {

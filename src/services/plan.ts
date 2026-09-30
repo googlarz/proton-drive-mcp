@@ -3,6 +3,7 @@ import { createReadStream, lstatSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { ROOT_PATHS, splitRemotePath, joinRemote, type DriveService } from "./drive.js";
 import { walkTree, type WalkResult } from "./walk.js";
+import { globMatch } from "../utils/glob.js";
 import { validateLocalPath, validateRemotePath } from "../utils/validation.js";
 
 // ---- drive_sync_plan: read-only local <-> Drive diff ----------------------------
@@ -24,25 +25,13 @@ export interface SyncDiff {
   identicalCount: number;
 }
 
-// Glob subset: * (no '/'), ** (anything), ?. A pattern without '/' matches any path segment.
-function globToRegExp(glob: string): RegExp {
-  let re = "";
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
-    if (c === "*") {
-      if (glob[i + 1] === "*") { re += ".*"; i++; } else re += "[^/]*";
-    } else if (c === "?") re += "[^/]";
-    else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-  }
-  return new RegExp(`^${re}$`);
-}
-
 export function makeIgnore(patterns: string[]): (relPath: string) => boolean {
-  const compiled = patterns.map((p) => ({ re: globToRegExp(p.replace(/\/+$/, "")), bySegment: !p.replace(/\/+$/, "").includes("/") }));
+  // Glob subset (see utils/glob.ts). A pattern without '/' matches any path segment.
+  const compiled = patterns.map((p) => ({ glob: p.replace(/\/+$/, ""), bySegment: !p.replace(/\/+$/, "").includes("/") }));
   return (relPath) => {
     const segs = relPath.split("/");
-    return compiled.some(({ re, bySegment }) =>
-      bySegment ? segs.some((s) => re.test(s)) : segs.some((_, i) => re.test(segs.slice(0, i + 1).join("/"))));
+    return compiled.some(({ glob, bySegment }) =>
+      bySegment ? segs.some((s) => globMatch(glob, s)) : segs.some((_, i) => globMatch(glob, segs.slice(0, i + 1).join("/"))));
   };
 }
 

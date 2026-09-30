@@ -123,6 +123,8 @@ function lookup(root: string, maxDepth: number | undefined, key: string, exclude
     if (e.key === key) return fromCache(e, root, maxDepth, exclude, true); // same request, even if it was partial
     // An ancestor's walk can answer a subfolder request if it saw everything and went deep enough.
     if (e.excludeKey !== excludeKey || e.skipped.length > 0 || !isUnder(root, e.root)) continue;
+    // The ancestor never listed an excluded folder, so it cannot answer for it or anything below it.
+    if (segments(root).slice(e.root === "/" ? 0 : depthOf(e.root)).some((seg) => exclude.has(seg))) continue;
     const reach = e.maxDepth === undefined ? Infinity : e.maxDepth - (depthOf(root) - depthOf(e.root));
     if (reach < (maxDepth ?? Infinity)) continue;
     if (!best || e.root.length > best.root.length) best = e;

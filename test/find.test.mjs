@@ -65,9 +65,8 @@ describe("drive_search", () => {
     assert.deepEqual(paths(d), ["/my-files/Docs/Report.PDF", "/my-files/Docs/Old/report-2019.pdf"]);
   });
 
-  it("query, regex, extensions, type, mediaType and size bounds", async () => {
+  it("query, extensions, type, mediaType and size bounds", async () => {
     assert.deepEqual(paths(await search({ query: "REPORT" })), ["/my-files/Docs/Old/report-2019.pdf", "/my-files/Docs/Report.PDF"]);
-    assert.deepEqual(paths(await search({ regex: "^report-\\d+" })), ["/my-files/Docs/Old/report-2019.pdf"]);
     assert.deepEqual(paths(await search({ extensions: [".docx", "TXT"] })), ["/my-files/Docs/a.docx", "/my-files/notes.txt"]);
     assert.deepEqual(paths(await search({ type: "folder" })), ["/my-files/.git", "/my-files/Broken", "/my-files/Docs", "/my-files/Docs/Old", "/my-files/Pics"]);
     assert.equal((await search({ mediaType: "image/" })).total, 2);
@@ -114,8 +113,6 @@ describe("drive_search", () => {
   it("rejects bad arguments before touching the CLI", async () => {
     const before = nonVersionCalls(sb.argvLog).length;
     const bad = [
-      [{ regex: "a".repeat(201) }, /200 characters/],
-      [{ regex: "(" }, /regex is invalid/],
       [{ glob: "" }, /must not be empty/],
       [{ modifiedAfter: "yesterday" }, /ISO date/],
       [{ extensions: ["a/b"] }, /extensions/],
@@ -126,6 +123,7 @@ describe("drive_search", () => {
       [{ sort: "random" }, /one of/],
       [{ type: "album" }, /one of/],
       [{ bogus: 1 }, /Unknown argument/],
+      [{ regex: "^(a+)+$" }, /Unknown argument/], // removed: unsafe on V8
     ];
     for (const [args, re] of bad) {
       const r = await c.call("drive_search", args);

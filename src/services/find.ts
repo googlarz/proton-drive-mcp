@@ -1,13 +1,13 @@
 import type { DriveService } from "./drive.js";
 import { baseName, depthOf, parentPath, DEFAULT_EXCLUDE, walkTree, type WalkNode, type WalkResult } from "./walk.js";
 import { validateRemotePath } from "../utils/validation.js";
+import { globMatch } from "../utils/glob.js";
 
 // Argument handling shared by the drive_tree / drive_search tools and the CLI.
 // Everything is validated here because the CLI does not go through the MCP schema check.
 
 const MAX_PATTERN = 200;
-// V8 has no regex timeout, so a pathological user regex cannot be interrupted. The
-// length cap plus this cap on scanned nodes bound the damage; they do not remove it.
+// Bounds the work done per search on a very large walk.
 const SCAN_CAP = 100_000;
 const SKIPPED_SHOWN = 10;
 
@@ -52,18 +52,6 @@ function root(a: Args): string {
   return p;
 }
 
-function globToRegExp(glob: string): RegExp {
-  let re = "";
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
-    if (c === "*") {
-      if (glob[i + 1] === "*") { re += ".*"; while (glob[i + 1] === "*") i++; } else re += "[^/]*";
-    } else if (c === "?") re += "[^/]";
-    else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-  }
-  return new RegExp(`^${re}$`, "is");
-}
-
 function walkInfo(w: WalkResult, scanned: number, scanCapped: boolean) {
   return {
     complete: w.complete, fromCache: w.fromCache, ageMs: w.ageMs, callsMade: w.callsMade, scanned,
@@ -78,12 +66,6 @@ export async function driveSearch(svc: DriveService, a: Args) {
   const path = root(a);
   const query = str(a, "query")?.toLowerCase();
   const globRaw = str(a, "glob");
-  const glob = globRaw === undefined ? undefined : globToRegExp(globRaw);
-  const regexRaw = str(a, "regex");
-  let regex: RegExp | undefined;
-  if (regexRaw !== undefined) {
-    try { regex = new RegExp(regexRaw, "i"); } catch (e) { throw new Error(`regex is invalid: ${e instanceof Error ? e.message : String(e)}`); }
-  }
   const type = str(a, "type", 10);
   if (type !== undefined && type !== "file" && type !== "folder") throw new Error("type must be 'file' or 'folder'");
   const mediaType = str(a, "mediaType", 100)?.toLowerCase();
@@ -123,8 +105,7 @@ export async function driveSearch(svc: DriveService, a: Args) {
     const name = baseName(n.path);
     if (extensions && !extensions.some((e) => name.toLowerCase().endsWith(e))) continue;
     if (query && !name.toLowerCase().includes(query)) continue;
-    if (glob && !glob.test(globRaw!.includes("/") ? n.path : name)) continue;
-    if (regex && !regex.test(name)) continue;
+    if (globRaw !== undefined && !globMatch(globRaw, globRaw.includes("/") ? n.path : name, true)) continue;
     hits.push(n);
   }
 

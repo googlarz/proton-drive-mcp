@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   summarizeUsage, summarizeTrash, findDuplicateCandidates, verifyGroups, makeDriveHasher,
@@ -143,6 +144,41 @@ describe("verifyGroups", () => {
     assert.match(out[0].verifyNote, /boom/);
   });
 
+  it("stops hashing once the total download budget is used; later groups stay unverified", async () => {
+    const g1 = { kind: "same-size", members: [f("/my-files/p1", 600), f("/my-files/p2", 600)] };
+    const g2 = { kind: "same-size", members: [f("/my-files/q1", 600), f("/my-files/q2", 600)] };
+    const hashed = [];
+    const out = await verifyGroups([g1, g2], async (n) => { hashed.push(n.path); return "h"; }, { maxVerifyBytes: 1e6, maxTotalBytes: 1500 });
+    assert.deepEqual(hashed.sort(), ["/my-files/p1", "/my-files/p2"]);
+    assert.equal(out.find((g) => g.members[0].path === "/my-files/q1").kind, "same-size");
+    assert.match(out.find((g) => g.members[0].path === "/my-files/q1").verifyNote, /total verify budget/);
+  });
+
+  it("caps the number of members verified", async () => {
+    const many = Array.from({ length: 5 }, (_, i) => f(`/my-files/m${i}`, 10));
+    let calls = 0;
+    const out = await verifyGroups([{ kind: "same-size", members: many }], async () => { calls++; return "h"; }, { maxVerifyBytes: 1e6, maxMembers: 4 });
+    assert.equal(calls, 0);
+    assert.match(out[0].verifyNote, /budget/);
+  });
+
+  it("abort stops verification between members/groups", async () => {
+    const ac = new AbortController();
+    const groups = [1, 2, 3].map((i) => ({ kind: "same-size", members: [f(`/my-files/a${i}`, 10), f(`/my-files/b${i}`, 10)] }));
+    const hashed = [];
+    await assert.rejects(verifyGroups(groups, async (n) => { hashed.push(n.path); ac.abort(new Error("cancelled")); return "h"; }, { maxVerifyBytes: 1e6, concurrency: 1, signal: ac.signal }), /cancelled/);
+    assert.equal(hashed.length, 1);
+  });
+
+  it("an aborted verify still removes the hasher's temp dir", async () => {
+    const ac = new AbortController();
+    const before = readdirSync(tmpdir()).filter((x) => x.startsWith("pdmcp-dup-")).length;
+    const drive = { download: async (_p, dir) => { writeFileSync(join(dir, "f.bin"), "x"); ac.abort(new Error("cancelled")); return { downloaded: 1, failed: 0 }; } };
+    const hash = makeDriveHasher(drive);
+    await assert.rejects(verifyGroups([{ kind: "same-size", members: [f("/my-files/a", 1), f("/my-files/b", 1)] }], hash, { maxVerifyBytes: 1e6, concurrency: 1, signal: ac.signal }), /cancelled/);
+    assert.equal(readdirSync(tmpdir()).filter((x) => x.startsWith("pdmcp-dup-")).length, before);
+  });
+
   it("bounds concurrency", async () => {
     let live = 0, peak = 0;
     const many = Array.from({ length: 12 }, (_, i) => f(`/my-files/n${i}`, 2000));
@@ -236,6 +272,19 @@ describe("driveFindDuplicates", () => {
     assert.equal(r.totalGroups, 1);
     assert.equal(r.groups[0].kind, "verified");
     assert.equal(r.totalWastedBytes, 5000);
+  });
+});
+
+describe("driveFindDuplicates verify budget", () => {
+  it("rejects an out-of-range maxVerifyTotalBytes and honours a small one", async () => {
+    const nodes = [f("/my-files/a1", 9000, { sha1: "aa" }), f("/my-files/a2", 9000, { sha1: "aa" })];
+    const drive = new DriveService(async () => []);
+    const walk = { walk: async () => ({ root: "/my-files", nodes, complete: true, callsMade: 0, skipped: [], fromCache: true, ageMs: 0 }) };
+    await assert.rejects(driveFindDuplicates(drive, { path: "/my-files", verify: true, maxVerifyTotalBytes: 2_000_000_001 }, walk), /maxVerifyTotalBytes/);
+    let hashed = 0;
+    const r = await driveFindDuplicates(drive, { path: "/my-files", verify: true, maxVerifyTotalBytes: 100 }, { ...walk, hash: async () => { hashed++; return "h"; } });
+    assert.equal(hashed, 0);
+    assert.match(r.groups[0].verifyNote, /total verify budget/);
   });
 });
 
