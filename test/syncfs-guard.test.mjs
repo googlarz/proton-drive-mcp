@@ -2,7 +2,7 @@ import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, symlink, rm, stat } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
-import { join, delimiter } from "node:path";
+import { join, delimiter, dirname } from "node:path";
 
 import {
   resolveSyncPath,
@@ -265,7 +265,7 @@ describe("assertLocalPathAllowed", () => {
   });
 
   it("scan mode rejects directories that CONTAIN protected locations; destinations are unaffected", async () => {
-    for (const p of ["/", "/Users", home]) {
+    for (const p of ["/", dirname(home), home]) {
       assert.throws(() => assertLocalPathAllowed(p, { scan: true }), /contains protected locations.*pick a subfolder/);
       assertLocalPathAllowed(p); // write destination (download folder): still allowed
     }

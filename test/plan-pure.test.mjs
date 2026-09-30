@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
 import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { diffTrees, makeIgnore, scanLocal, planBulkMove, planBulkTrash, foldersToList, syncPlan, sha1File } from "../dist/services/plan.js";
 
 const walk = (nodes, extra = {}) => ({ root: "/my-files/p", nodes, complete: true, callsMade: 1, skipped: [], fromCache: false, ageMs: 0, ...extra });
@@ -109,7 +109,7 @@ describe("scanLocal and syncPlan (real temp dir, injected walk)", () => {
   });
 
   it("rejects parent directories of protected locations and prunes secret-named entries", async () => {
-    for (const localPath of ["/", "/Users", process.env.HOME]) {
+    for (const localPath of ["/", dirname(process.env.HOME), process.env.HOME]) {
       await assert.rejects(syncPlan({}, { localPath, drivePath: "/my-files/p" }, async () => walk([])), /contains protected locations/);
     }
     const d = mkdtempSync(join(tmpdir(), "plan-prot-"));
