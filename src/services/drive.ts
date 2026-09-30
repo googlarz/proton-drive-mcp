@@ -155,6 +155,19 @@ function trimNode(v: unknown, depth = 0): unknown {
   return v;
 }
 
+// Revision metadata the CLI returns but the old shaping dropped. sha1 is what the
+// uploader claimed (unverified) and is absent on most files.
+function revisionMeta(item: Record<string, unknown>): { mtime?: string; uploadedAt?: string; sha1?: string } {
+  const rev = item.activeRevision as Record<string, unknown> | undefined;
+  if (!rev || typeof rev !== "object") return {};
+  const digests = (rev.claimedDigests ?? {}) as Record<string, unknown>;
+  const out: { mtime?: string; uploadedAt?: string; sha1?: string } = {};
+  if (typeof rev.claimedModificationTime === "string") out.mtime = rev.claimedModificationTime;
+  if (typeof rev.creationTime === "string") out.uploadedAt = rev.creationTime;
+  if (typeof digests.sha1 === "string") out.sha1 = digests.sha1;
+  return out;
+}
+
 function mapPhoto(item: Record<string, unknown>): AlbumPhoto {
   const photo = (item.photo ?? {}) as Record<string, unknown>;
   const captureTime = item.captureTime ?? photo.captureTime;
@@ -227,8 +240,8 @@ export class DriveService {
   //
   // Exception: listing "/" returns the roots as [{path:"/my-files"}, ...] with
   // no name at all — previously every root came out as "[unnamed]".
-  async list(remotePath: string, opts: { includeUid?: boolean } = {}): Promise<DriveFile[]> {
-    const result = await this.run(["filesystem", "list", remotePath]);
+  async list(remotePath: string, opts: { includeUid?: boolean; type?: "file" | "folder" } = {}): Promise<DriveFile[]> {
+    const result = await this.run(opts.type ? ["filesystem", "list", "-t", opts.type, remotePath] : ["filesystem", "list", remotePath]);
     if (result === null) return [];
     if (!Array.isArray(result)) throw new DriveParseError(`Expected array from list, got: ${JSON.stringify(result).slice(0, 100)}`);
     // The CLI's order changes between calls and callers page by re-listing, so
@@ -253,6 +266,7 @@ export class DriveService {
       storageSize: typeof item.totalStorageSize === "number" ? item.totalStorageSize : undefined,
       modifiedAt: typeof item.modificationTime === "string" ? item.modificationTime : undefined,
       mimeType: typeof item.mediaType === "string" ? item.mediaType : undefined,
+      ...revisionMeta(item),
     };
     if (opts.includeUid) {
       file.uid = typeof item.uid === "string" ? item.uid : undefined;
@@ -334,7 +348,10 @@ export class DriveService {
   // CLI/SDK node, whose exact shape is not guaranteed.
   async info(remotePath: string, verbose = false): Promise<unknown> {
     const raw = await this.run(["filesystem", "info", remotePath]);
-    return verbose ? raw : trimNode(raw);
+    if (verbose) return raw;
+    const trimmed = trimNode(raw);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return trimmed;
+    return { ...(trimmed as Record<string, unknown>), ...revisionMeta(raw as Record<string, unknown>) };
   }
 
   // Renames in place — does not move to a different folder. Returns the

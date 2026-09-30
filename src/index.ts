@@ -5,6 +5,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ErrorCode,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
@@ -18,6 +20,7 @@ import {
   type PhotoUploadConflictStrategy,
   type PhotoDownloadConflictStrategy,
 } from "./services/drive.js";
+import { PROMPTS, getPromptText } from "./prompts.js";
 import { isMainModule } from "./utils/isMainModule.js";
 import { checkCliAvailable, callContext, killAllChildren } from "./utils/subprocess.js";
 import {
@@ -101,6 +104,7 @@ type ToolDef = {
   description: string;
   inputSchema: { type: string; properties: Record<string, JsonSchemaProp>; required?: readonly string[]; additionalProperties?: boolean };
   annotations?: Record<string, boolean>;
+  title?: string;
 };
 
 // The schemas advertise additionalProperties:false, but nothing enforced it, and
@@ -159,7 +163,7 @@ const TOOLS = [
   {
     name: "drive_list",
     description:
-      "List the immediate children of a Proton Drive folder (one level, not recursive). Listing '/' returns the top-level roots. Returns {items, total, offset, limit, hasMore} (default limit 200, sorted by name); items are [{name, path, type ('file'|'folder'), size? (bytes), storageSize? (encrypted, all revisions), modifiedAt?, mimeType?}]. Items come in a stable sorted order; each page is a fresh read, so changes between page calls can still shift items. Use drive_list_trash for the trash.",
+      "List the immediate children of a Proton Drive folder (one level, not recursive). Listing '/' returns the top-level roots. Returns {items, total, offset, limit, hasMore} (default limit 200, sorted by name); items are [{name, path, type ('file'|'folder'), size? (bytes), storageSize? (encrypted, all revisions), modifiedAt?, mimeType?, mtime? (original local modification time), uploadedAt? (revision upload time), sha1? (hash CLAIMED by the uploader: unverified and often absent)}]. Items come in a stable sorted order; each page is a fresh read, so changes between page calls can still shift items. Use drive_list_trash for the trash.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: "object",
@@ -167,6 +171,11 @@ const TOOLS = [
         path: {
           type: "string",
           description: "Absolute remote path, e.g. /my-files/Reports.",
+        },
+        type: {
+          type: "string",
+          enum: ["file", "folder"],
+          description: "Only list items of this type (default: both).",
         },
       },
       required: ["path"],
@@ -176,7 +185,7 @@ const TOOLS = [
   {
     name: "drive_info",
     description:
-      "Get full metadata for one Proton Drive file or folder, including latest revision details. Verification wrappers are unwrapped and noise fields dropped (verbose=true returns the raw CLI node, whose shape is not guaranteed). Use drive_list to enumerate children.",
+      "Get full metadata for one Proton Drive file or folder, including latest revision details. Also returns mtime (original local modification time), uploadedAt (revision upload time) and sha1 (hash CLAIMED by the uploader: unverified and often absent) when known. Verification wrappers are unwrapped and noise fields dropped (verbose=true returns the raw CLI node, whose shape is not guaranteed). Use drive_list to enumerate children.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: "object",
@@ -886,13 +895,35 @@ const EXTRA_PROPS: Record<string, Record<string, JsonSchemaProp & { description:
   drive_copy: { newName: { type: "string", description: "Optional name for the copy (CLI --name). Required to copy an item into its own folder." } },
   photos_list_album_photos: { loadDetails: { type: "boolean", description: "Include name, mediaType, sizes, captureTime and tags (default false)." } },
 };
+// Replace/remove strategies are gated by `confirmed`, so the tools themselves are
+// not advertised as destructive; trash is reversible via drive_restore.
 const ANNOTATION_OVERRIDES: Record<string, Record<string, boolean>> = {
-  drive_share_set_url: { destructiveHint: true },
-  drive_upload: { destructiveHint: true },
-  drive_download: { destructiveHint: true },
-  photos_download: { destructiveHint: true },
-  drive_read_file: { idempotentHint: true },
+  drive_share_set_url: { destructiveHint: true, openWorldHint: true },
+  drive_share_invite: { destructiveHint: false, openWorldHint: true },
+  drive_upload: { destructiveHint: false },
+  drive_download: { destructiveHint: false },
+  photos_download: { destructiveHint: false },
+  photos_upload: { destructiveHint: false },
+  drive_trash: { destructiveHint: false, idempotentHint: true },
+  drive_version: { openWorldHint: false },
+  drive_read_file: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 };
+const TOOL_TITLES: Record<string, string> = {
+  drive_auth_status: "Check sign-in status", drive_auth_logout: "Sign out", drive_version: "CLI version",
+  drive_list: "List folder", drive_info: "Get item info", drive_upload: "Upload to Drive", drive_download: "Download from Drive",
+  drive_mkdir: "Create folder", drive_rename: "Rename item", drive_move: "Move item", drive_delete: "Delete permanently",
+  drive_share_status: "Show sharing status", drive_list_trash: "List trash", drive_share_invite: "Invite to share",
+  drive_share_revoke: "Revoke member access", drive_trash: "Move to trash", drive_restore: "Restore from trash",
+  drive_empty_trash: "Empty trash", drive_copy: "Copy item", drive_list_invitations: "List invitations",
+  drive_invitation_accept: "Accept invitation", drive_invitation_reject: "Reject invitation", drive_share_leave: "Leave shared item",
+  drive_share_set_url: "Create or update public link", drive_share_remove_url: "Remove public link",
+  drive_share_remove_all: "Remove all sharing", photos_list_albums: "List photo albums", photos_create_album: "Create photo album",
+  photos_update_album: "Update photo album", photos_delete_album: "Delete photo album", photos_list_album_photos: "List album photos",
+  photos_add_to_album: "Add photos to album", photos_remove_from_album: "Remove photo from album", photos_list_timeline: "List photo timeline",
+  photos_download: "Download photo", photos_upload: "Upload photos", drive_read_file: "Read synced text file", drive_write_file: "Write synced text file",
+};
+// Hint for clients that cap tool-result size: these tools can legitimately return large payloads.
+const LARGE_RESULT_TOOLS = new Set(["drive_list", "drive_read_file"]);
 
 const TOOL_DEFS: ToolDef[] = TOOLS.map((t) => {
   const base = t as unknown as ToolDef;
@@ -912,6 +943,7 @@ const TOOL_DEFS: ToolDef[] = TOOLS.map((t) => {
   }
   return {
     ...base,
+    ...(TOOL_TITLES[base.name] ? { title: TOOL_TITLES[base.name] } : {}),
     description,
     inputSchema: { ...base.inputSchema, properties },
     annotations: { ...(base.annotations ?? {}), ...(ANNOTATION_OVERRIDES[base.name] ?? {}) },
@@ -939,6 +971,23 @@ export function resolveTier(raw: string | undefined): "full" | "core" {
   return "full";
 }
 
+async function askHuman(server: Server, tool: string, args: Record<string, unknown>, refusal: string, signal?: AbortSignal): Promise<boolean> {
+  try {
+    const { confirmed: _ignored, ...shown } = args;
+    const reason = refusal.replace(/\s*Describe this to the user.*$/s, "");
+    const res = await server.elicitInput(
+      {
+        message: truncate(`${tool} needs your approval. ${reason}\nArguments: ${JSON.stringify(shown)}`),
+        requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Approve this action", default: false } }, required: ["approve"] },
+      },
+      { timeout: 120_000, signal },
+    );
+    return res.action === "accept" && res.content?.approve === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function main() {
   const drive = new DriveService();
   const tier = resolveTier(process.env.PROTON_DRIVE_TOOL_TIER); // read once at startup
@@ -946,7 +995,7 @@ export async function main() {
 
   const server = new Server(
     { name: "proton-drive-mcp", version: VERSION },
-    { capabilities: { tools: {} } }
+    { capabilities: { tools: {}, prompts: {} } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -955,8 +1004,27 @@ export async function main() {
       description: t.description,
       inputSchema: t.inputSchema,
       annotations: t.annotations,
+      ...(t.title ? { title: t.title } : {}),
+      ...(LARGE_RESULT_TOOLS.has(t.name) ? { _meta: { "anthropic/maxResultSizeChars": 100000 } } : {}),
     })),
   }));
+
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+    prompts: PROMPTS.map((p) => ({ ...p, arguments: [...p.arguments] })),
+  }));
+
+  server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+    const { name, arguments: args = {} } = req.params;
+    let text: string | undefined;
+    try {
+      text = getPromptText(name, args);
+    } catch (err) {
+      throw new McpError(ErrorCode.InvalidParams, err instanceof Error ? err.message : String(err));
+    }
+    if (text === undefined) throw new McpError(ErrorCode.InvalidParams, `Unknown prompt: ${name}`);
+    const def = PROMPTS.find((p) => p.name === name);
+    return { description: def?.description, messages: [{ role: "user" as const, content: { type: "text" as const, text } }] };
+  });
 
   const handleCall = async (req: { params: { name: string; arguments?: Record<string, unknown> } }): Promise<ToolResult> => {
     const { name, arguments: args = {} } = req.params;
@@ -989,7 +1057,8 @@ export async function main() {
 
         case "drive_list": {
           const listPath = validateRemotePath(a.path);
-          return ok({ path: listPath, ...paginate(await drive.list(listPath), a, PAGE_DEFAULTS.drive_list) });
+          const listType = a.type === "file" || a.type === "folder" ? a.type : undefined;
+          return ok({ path: listPath, ...paginate(await drive.list(listPath, { type: listType }), a, PAGE_DEFAULTS.drive_list) });
         }
 
         case "drive_info":
@@ -1320,7 +1389,15 @@ export async function main() {
     try {
       // The request's AbortSignal reaches the CLI child via AsyncLocalStorage, so
       // notifications/cancelled actually kills a running upload/download.
-      return await callContext.run({ signal: extra?.signal }, () => handleCall(req));
+      return await callContext.run({ signal: extra?.signal }, async () => {
+        const first = await handleCall(req);
+        // Every gate's refusal mentions confirmed=true. If the client can ask the human
+        // directly, let the human (never the model) grant it; any failure keeps the refusal.
+        const refusal = first.isError ? first.content?.[0]?.text : undefined;
+        if (typeof refusal !== "string" || !refusal.includes("confirmed=true") || !server.getClientCapabilities()?.elicitation?.form) return first;
+        const asked = await askHuman(server, req.params.name, req.params.arguments ?? {}, refusal, extra?.signal);
+        return asked ? handleCall({ params: { ...req.params, arguments: { ...(req.params.arguments ?? {}), confirmed: true } } }) : first;
+      });
     } finally {
       inFlight--;
     }
