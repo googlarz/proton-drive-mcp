@@ -71,10 +71,10 @@ describe("loadListing + plan with the injected runner (plan step never mutates)"
     assert.match(p.problems[0].problem, /destination folder not found \(or not a folder\)/);
   });
 
-  it("a whole-batch CLI failure says nothing was trashed/moved", async () => {
+  it("a whole-batch CLI failure says the batch failed and to check before retrying", async () => {
     const svc = new DriveService(async () => { throw new Error("CLI error: Node not found"); });
-    await assert.rejects(svc.bulkTrash(["/my-files/a/x.txt"]), /nothing was trashed/);
-    await assert.rejects(svc.bulkMove(["/my-files/a/x.txt"], "/my-files/dst"), /nothing was moved/);
+    await assert.rejects(svc.bulkTrash(["/my-files/a/x.txt"]), /batch call failed.*list the folders before retrying/);
+    await assert.rejects(svc.bulkMove(["/my-files/a/x.txt"], "/my-files/dst"), /batch call failed.*list the folders before retrying/);
   });
 
   it("propagates non-not-found list errors instead of treating them as missing", async () => {
