@@ -5,7 +5,9 @@
 //   FAKE_ARGV_LOG     file that receives one JSON line per invocation: {argv, pid}
 //   FAKE_MODE         json | shuffle | empty | undefined-literal | garbage | ansi-prefixed-json |
 //                     fail-stderr | fail-stderr-echo | fail-stdout-crash | hang |
-//                     big-stderr | auth-fail | ok-false-results | locked-then-json | transient-then-json
+//                     big-stderr | auth-fail | ok-false-results | locked-then-json | transient-then-json | tree
+//   FAKE_TREE         tree mode: path to a JSON file {"<folder path>": [list items]}; `filesystem list <path>` serves that entry
+//                     (missing entry -> "Item not found" exit 1; a string entry is written to stderr, exit 1). Other commands print "[]".
 //   FAKE_COUNTER      locked-then-json: file holding the number of calls so far
 //   FAKE_LOCKED_TIMES locked-then-json: how many calls fail with "database is locked" (default 2)
 //   FAKE_TRANSIENT_KIND   transient-then-json: ratelimit | timeout | reset | retryafter | notfound (counter via FAKE_COUNTER)
@@ -134,6 +136,23 @@ switch (mode) {
     }
     process.stdout.write(payload + "\n");
     process.exit(0);
+    break;
+  }
+  case "tree": {
+    if (argv[0] === "filesystem" && argv[1] === "list") {
+      const tree = JSON.parse(readFileSync(process.env.FAKE_TREE, "utf8"));
+      const entry = tree[argv[2]];
+      const ms = Number(process.env.FAKE_SLEEP_MS ?? 0);
+      setTimeout(() => {
+        if (entry === undefined) { process.stderr.write(`Item not found: ${argv[2]}\n`); process.exit(1); }
+        if (typeof entry === "string") { process.stderr.write(entry + "\n"); process.exit(1); }
+        process.stdout.write(JSON.stringify(entry) + "\n");
+        process.exit(0);
+      }, ms);
+    } else {
+      process.stdout.write("[]\n");
+      process.exit(0);
+    }
     break;
   }
   case "ok-false-results":

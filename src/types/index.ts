@@ -10,6 +10,12 @@ export interface DriveFile {
   storageSize?: number;
   modifiedAt?: string;
   mimeType?: string;
+  // Original local modification time (activeRevision.claimedModificationTime).
+  mtime?: string;
+  // When the active revision was uploaded to Drive.
+  uploadedAt?: string;
+  // Uploader-claimed SHA-1 (unverified; absent on most files).
+  sha1?: string;
   // Only set for trash listings, where names are not unique.
   uid?: string;
   trashedAt?: string;
@@ -23,6 +29,7 @@ export interface ShareStatus {
   // Whether the public link has a password (never the password itself) / expiry.
   sharePasswordProtected?: boolean;
   shareUrlExpiresAt?: string;
+  shareUrlRole?: ShareRole;
   editorsCanShare?: boolean;
 }
 

@@ -67,6 +67,18 @@
       "description": "Move a file or folder to trash on Proton Drive."
     },
     {
+      "name": "drive_sync_plan",
+      "description": "Read-only plan: compare a local folder with a Proton Drive folder (nothing is transferred)."
+    },
+    {
+      "name": "drive_bulk_move",
+      "description": "Move many items into one Proton Drive folder; returns a plan first, applies only with confirmed=true."
+    },
+    {
+      "name": "drive_bulk_trash",
+      "description": "Trash many items on Proton Drive (recoverable); returns a plan first, applies only with confirmed=true."
+    },
+    {
       "name": "drive_restore",
       "description": "Restore a file or folder from trash on Proton Drive."
     },
@@ -159,12 +171,32 @@
       "description": "Upload local photos or videos directly into your Proton Photos library."
     },
     {
+      "name": "drive_tree",
+      "description": "Show a Proton Drive folder as a tree with per-folder file counts and size totals."
+    },
+    {
+      "name": "drive_search",
+      "description": "Find files and folders under a Proton Drive path by name, type, extension, size or modified date."
+    },
+    {
       "name": "drive_info",
       "description": "Get full metadata for a single Proton Drive file or folder, including latest revision details."
     },
     {
       "name": "drive_rename",
       "description": "Rename a file or folder in place on Proton Drive, without moving it."
+    },
+    {
+      "name": "drive_usage",
+      "description": "Storage analytics for a Proton Drive path: totals, largest files and folders, breakdowns, old files and trash."
+    },
+    {
+      "name": "drive_find_duplicates",
+      "description": "Find likely duplicate files in Proton Drive (claimed sha1, same size, or hash-verified); suggests a keeper, never deletes."
+    },
+    {
+      "name": "drive_sharing_audit",
+      "description": "Audit public links, invitees and risk flags across shared items in Proton Drive."
     }
   ]
 }

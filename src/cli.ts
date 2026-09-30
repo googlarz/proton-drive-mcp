@@ -21,8 +21,12 @@ import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, Drive
 import { checkCliAvailable } from "./utils/subprocess.js";
 import { runDoctor, formatDoctor } from "./utils/doctor.js";
 import { buildEntry, defaultConfigPath, isDirectory, resolveDriveCli, writeEntry, SERVER_KEY } from "./utils/claudeConfig.js";
+import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type Direction, type Compare } from "./services/plan.js";
+import { invalidatePath } from "./services/walk.js";
 import { resolve } from "node:path";
-import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
+import { driveSearch, driveTree } from "./services/find.js";
+import { driveUsage, driveFindDuplicates, driveSharingAudit } from "./services/analytics.js";
+import { validateRemotePath, validateRemotePathList, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 
 const drive = new DriveService();
 const args = process.argv.slice(2);
@@ -38,6 +42,12 @@ Commands:
   version                                  Show CLI/SDK version
   list <path>                              List files at path
   info <path> [--verbose]                  Show node metadata (--verbose = raw CLI node)
+  tree [path] [--depth N] [--limit N] [--folders-only] [--refresh]
+                                           Folder overview with per-folder counts and sizes (default /my-files, depth 2)
+  search [path] [--query S] [--glob G] [--type file|folder] [--media-type P] [--ext pdf,docx]
+         [--min-size B] [--max-size B] [--after DATE] [--before DATE] [--sort name|size|mtime]
+         [--limit N] [--offset N] [--refresh]
+                                           Find files/folders under path (default /my-files) in one walk
   mkdir <path>                             Create a new folder
   upload <local> <remote> [--file-conflict X] [--folder-conflict X] [--confirm]
                                            Upload file/folder (files: skip/create-new-revision/rename/replace; folders: skip/merge/rename/replace;
@@ -49,6 +59,7 @@ Commands:
   move <src> <dst>                         Move and/or rename
   delete <path>|--uid <uid> --confirm      Delete a file/folder already in trash, permanently
   share status <path>                      Show sharing info
+  share audit [path] [--refresh]           Audit public links, invitees and risk flags under a path (default /my-files)
   share invite <path> <email> <role>       Invite user (viewer/editor/admin)
   share revoke <path> <email>              Revoke one user's access
   share remove-all <path> --confirm        Remove everyone's access + pending invitations
@@ -57,7 +68,15 @@ Commands:
   share leave <path>                       Leave a folder shared with you
   copy <src> <dst-parent-folder> [--name N]  Copy file/folder into a folder (optionally under a new name)
   trash <path>                             Move to trash
+  sync-plan <local> <remote> [--direction up|down|both] [--compare size-mtime|sha1] [--ignore g1,g2] [--limit N]
+                                           Read-only diff of a local folder vs a Drive folder (nothing transferred)
+  bulk-move <dst-folder> <src>... [--confirm]  Move many items into an existing folder; without --confirm prints the plan only
+  bulk-trash <path>... [--confirm]         Trash many items; without --confirm prints the plan only
   trash list                               List trash contents
+  usage [path] [--top N] [--older-than DAYS] [--refresh]
+                                           Storage analytics: totals, largest files/folders, breakdowns, trash (sum of file sizes, not the quota)
+  duplicates [path] [--min-size B] [--verify] [--max-verify-bytes B] [--max-verify-total-bytes B] [--limit N] [--refresh]
+                                           Likely duplicate files; --verify downloads and hashes candidates. Never deletes.
   trash empty --confirm                    Permanently delete all trash
   restore <path>|--uid <uid>               Restore from trash (uid from 'trash list')
   invitation list                          List pending invitations
@@ -92,6 +111,17 @@ function requirePath(value: string | undefined, usage: string): string {
   return "" as never; // unreachable; process.exit(1) above always terminates
 }
 
+function pathOrRoot(value: string | undefined): string {
+  return value && !value.startsWith("--") ? requirePath(value, "<command> [path]") : "/my-files";
+}
+
+function intFlag(flag: string): number | undefined {
+  const v = getFlag(flag);
+  if (v === undefined) return undefined;
+  if (!/^\d+$/.test(v)) { console.error(`${flag} must be a non-negative integer`); process.exit(1); }
+  return Number(v);
+}
+
 function requireEmail(value: string): string {
   try { return validateEmail(value); }
   catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); }
@@ -106,6 +136,17 @@ function getFlag(flag: string): string | undefined {
     process.exit(1);
   }
   return args[idx + 1];
+}
+
+function numFlag(flag: string): number | undefined {
+  const v = getFlag(flag);
+  if (v === undefined) return undefined;
+  if (!/^\d+$/.test(v)) { console.error(`${flag} must be a non-negative integer`); process.exit(1); }
+  return Number(v);
+}
+
+function numFlags(...names: string[]): Record<string, number | undefined> {
+  return Object.fromEntries(names.map((n) => [n, numFlag(`--${n}`)]));
 }
 
 function print(data: unknown) {
@@ -195,6 +236,23 @@ async function run() {
       print(await drive.list(requirePath(sub, "list <path>")));
       break;
 
+    case "tree":
+      print(await driveTree(drive, { path: sub && !sub.startsWith("--") ? sub : undefined, ...numFlags("depth", "limit"), foldersOnly: args.includes("--folders-only") || undefined, refresh: args.includes("--refresh") || undefined }));
+      break;
+
+    case "search":
+      print(await driveSearch(drive, {
+        path: sub && !sub.startsWith("--") ? sub : undefined,
+        query: getFlag("--query"), glob: getFlag("--glob"),
+        type: getFlag("--type"), mediaType: getFlag("--media-type"),
+        extensions: getFlag("--ext")?.split(","),
+        ...numFlags("limit", "offset"),
+        minSize: numFlag("--min-size"), maxSize: numFlag("--max-size"),
+        modifiedAfter: getFlag("--after"), modifiedBefore: getFlag("--before"),
+        sort: getFlag("--sort"), refresh: args.includes("--refresh") || undefined,
+      }));
+      break;
+
     case "info":
       print(await drive.info(requirePath(sub, "info <path> [--verbose]"), args.includes("--verbose")));
       break;
@@ -203,7 +261,7 @@ async function run() {
       const rawLocal = sub;
       if (!rawLocal) { console.error("Usage: upload <local> <remote> [--file-conflict X] [--folder-conflict X]"); process.exit(1); }
       let local: string;
-      try { local = validateLocalPath(rawLocal); }
+      try { local = validateLocalPath(rawLocal, { scan: true }); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
       const remote = requirePath(rest[0], "upload <local> <remote>");
       const fileConflictRaw = getFlag("--file-conflict") ?? "skip";
@@ -297,6 +355,8 @@ async function run() {
     case "share":
       if (sub === "status") {
         print(await drive.shareStatus(requirePath(rest[0], "share status <path>")));
+      } else if (sub === "audit") {
+        print(await driveSharingAudit(drive, { path: pathOrRoot(rest[0]), refresh: args.includes("--refresh") }));
       } else if (sub === "invite") {
         const [rawPath, rawEmail, role] = rest;
         if (!rawPath || !rawEmail || !role) {
@@ -357,6 +417,27 @@ async function run() {
       }
       break;
 
+    case "usage":
+      print(await driveUsage(drive, {
+        path: pathOrRoot(sub),
+        top: intFlag("--top"),
+        olderThanDays: intFlag("--older-than"),
+        refresh: args.includes("--refresh"),
+      }));
+      break;
+
+    case "duplicates":
+      print(await driveFindDuplicates(drive, {
+        path: pathOrRoot(sub),
+        minSize: intFlag("--min-size"),
+        verify: args.includes("--verify"),
+        maxVerifyBytes: intFlag("--max-verify-bytes"),
+        maxVerifyTotalBytes: intFlag("--max-verify-total-bytes"),
+        limit: intFlag("--limit"),
+        refresh: args.includes("--refresh"),
+      }));
+      break;
+
     case "trash":
       if (sub === "empty") {
         if (!args.includes("--confirm")) {
@@ -375,6 +456,47 @@ async function run() {
         process.exit(1);
       }
       break;
+
+    case "sync-plan": {
+      const direction = getFlag("--direction"), compare = getFlag("--compare"), ignore = getFlag("--ignore"), limit = getFlag("--limit");
+      if (direction !== undefined && !["up", "down", "both"].includes(direction)) { console.error("--direction must be up, down or both"); process.exit(1); }
+      if (compare !== undefined && !["size-mtime", "sha1"].includes(compare)) { console.error("--compare must be size-mtime or sha1"); process.exit(1); }
+      if (!sub || !rest[0]) { console.error("Usage: sync-plan <local> <remote> [--direction X] [--compare X] [--ignore g1,g2] [--limit N]"); process.exit(1); }
+      print(await syncPlan(drive, {
+        localPath: sub, drivePath: rest[0], direction: direction as Direction | undefined, compare: compare as Compare | undefined,
+        ignore: ignore?.split(","), limit: limit !== undefined ? Number(limit) : undefined,
+      }));
+      break;
+    }
+
+    case "bulk-move": {
+      const dst = requirePath(sub, "bulk-move <dst-folder> <src>... [--confirm]");
+      const srcs = validateRemotePathList(rest.filter((r) => !r.startsWith("--")), "sources");
+      const plan = planBulkMove(srcs, dst, await loadListing(drive, foldersToList(srcs, dst)));
+      if (!args.includes("--confirm") || plan.problems.length) {
+        print({ applied: false, ...plan });
+        if (plan.problems.length) process.exit(1);
+        console.error("Plan only. Pass --confirm to apply.");
+        break;
+      }
+      try { await drive.bulkMove(srcs, dst); } finally { invalidatePath(dst); srcs.forEach(invalidatePath); }
+      console.log(`Moved ${srcs.length} item(s) to ${dst}.`);
+      break;
+    }
+
+    case "bulk-trash": {
+      const paths = validateRemotePathList([sub, ...rest].filter((r) => r !== undefined && !r.startsWith("--")), "paths");
+      const plan = planBulkTrash(paths, await loadListing(drive, foldersToList(paths)));
+      if (!args.includes("--confirm") || plan.problems.length) {
+        print({ applied: false, ...plan });
+        if (plan.problems.length) process.exit(1);
+        console.error("Plan only. Pass --confirm to apply.");
+        break;
+      }
+      try { await drive.bulkTrash(paths); } finally { paths.forEach(invalidatePath); }
+      console.log(`Moved ${paths.length} item(s) to trash.`);
+      break;
+    }
 
     case "restore": {
       const restoreUid = getFlag("--uid");
@@ -507,7 +629,7 @@ async function run() {
         if (positionals.length === 0) { console.error("Usage: photo upload <local>... [--conflict X]"); process.exit(1); return; }
         const localPaths: string[] = [];
         for (const p of positionals) {
-          try { localPaths.push(validateLocalPath(p)); }
+          try { localPaths.push(validateLocalPath(p, { scan: true })); }
           catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
         }
         if (!["skip", "rename"].includes(conflictRaw)) {

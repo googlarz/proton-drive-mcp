@@ -1,4 +1,4 @@
-import { realpathSync, lstatSync, readlinkSync } from "node:fs";
+import { realpathSync, lstatSync, readlinkSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, dirname, basename, join, relative, isAbsolute, sep, delimiter } from "node:path";
 
@@ -59,24 +59,9 @@ function realResolve(p: string, depth = 0): string {
   }
 }
 
-export function assertLocalPathAllowed(absPath: string): void {
-  const lexical = resolve(absPath);
-  const real = realResolve(lexical);
-
-  const rootsEnv = process.env["PROTON_DRIVE_LOCAL_ROOT"];
-  const roots = rootsEnv ? rootsEnv.split(delimiter).filter((r) => r.trim() !== "") : [];
-  if (roots.length > 0) {
-    const ok = roots.some((r) => isInside(realResolve(r), real));
-    if (!ok) {
-      throw new Error(
-        `local path is outside PROTON_DRIVE_LOCAL_ROOT: ${absPath}`
-      );
-    }
-    return;
-  }
-
-  if (process.env["PROTON_DRIVE_ALLOW_SENSITIVE_PATHS"] === "1") return;
-
+/** Protected absolute locations, or null when the denylist is off (allowlist set or PROTON_DRIVE_ALLOW_SENSITIVE_PATHS=1). */
+function deniedPaths(): Set<string> | null {
+  if (rootsEnv().length > 0 || process.env["PROTON_DRIVE_ALLOW_SENSITIVE_PATHS"] === "1") return null;
   const home = homedir();
   const denied = new Set<string>();
   for (const rel of HOME_DENY) {
@@ -87,6 +72,49 @@ export function assertLocalPathAllowed(absPath: string): void {
     denied.add(a);
     denied.add(realResolve(a));
   }
+  return denied;
+}
+
+function rootsEnv(): string[] {
+  const env = process.env["PROTON_DRIVE_LOCAL_ROOT"];
+  return env ? env.split(delimiter).filter((r) => r.trim() !== "") : [];
+}
+
+const nameDenied = (name: string): boolean => NAME_DENY.some((re) => re.test(name.toLowerCase()));
+
+/** True when a directory entry must not be read during a recursive scan (secret-file name or protected path). Always false when the denylist is off. */
+export function isProtectedEntry(fullPath: string, name: string): boolean {
+  const denied = deniedPaths();
+  if (!denied) return false;
+  if (nameDenied(name)) return true;
+  const lexical = resolve(fullPath);
+  const real = realResolve(lexical);
+  for (const d of denied) if (isInside(d, real) || isInside(d, lexical)) return true;
+  return false;
+}
+
+/**
+ * `scan: true` is for operations that READ a directory recursively (sync plan, folder upload): the target must
+ * not contain a protected location either. Leave it off for write destinations such as download folders.
+ */
+export function assertLocalPathAllowed(absPath: string, opts: { scan?: boolean } = {}): void {
+  const lexical = resolve(absPath);
+  const real = realResolve(lexical);
+
+  const roots = rootsEnv();
+  if (roots.length > 0) {
+    const ok = roots.some((r) => isInside(realResolve(r), real));
+    if (!ok) {
+      throw new Error(
+        `local path is outside PROTON_DRIVE_LOCAL_ROOT: ${absPath}`
+      );
+    }
+    return;
+  }
+
+  const denied = deniedPaths();
+  if (!denied) return;
+
   for (const d of denied) {
     if (isInside(d, real) || isInside(d, lexical)) {
       throw new Error(
@@ -96,12 +124,25 @@ export function assertLocalPathAllowed(absPath: string): void {
     }
   }
   for (const name of [basename(lexical), basename(real)]) {
-    const lower = name.toLowerCase();
-    if (NAME_DENY.some((re) => re.test(lower))) {
+    if (nameDenied(name)) {
       throw new Error(
         `local path looks like a credential/secret file and cannot be used: ${absPath} ` +
           `(set PROTON_DRIVE_ALLOW_SENSITIVE_PATHS=1 to disable this check)`
       );
     }
   }
+  if (opts.scan && isDirectory(real)) {
+    for (const d of denied) {
+      if (isInside(real, d) || isInside(lexical, d)) {
+        throw new Error(
+          `local folder contains protected locations and cannot be scanned: ${absPath}; pick a subfolder ` +
+            `(set PROTON_DRIVE_LOCAL_ROOT to allow specific folders, or PROTON_DRIVE_ALLOW_SENSITIVE_PATHS=1 to disable this check)`
+        );
+      }
+    }
+  }
+}
+
+function isDirectory(p: string): boolean {
+  try { return statSync(p).isDirectory(); } catch { return false; }
 }

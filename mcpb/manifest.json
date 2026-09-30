@@ -70,6 +70,14 @@
       "description": "List the immediate children of a Proton Drive folder."
     },
     {
+      "name": "drive_tree",
+      "description": "Show a Proton Drive folder as a tree with per-folder file counts and size totals."
+    },
+    {
+      "name": "drive_search",
+      "description": "Find files and folders under a Proton Drive path by name, type, extension, size or modified date."
+    },
+    {
       "name": "drive_info",
       "description": "Get full metadata for a single Proton Drive file or folder, including latest revision details."
     },
@@ -116,6 +124,18 @@
     {
       "name": "drive_trash",
       "description": "Move a file or folder to the Proton Drive trash."
+    },
+    {
+      "name": "drive_sync_plan",
+      "description": "Read-only plan: compare a local folder with a Proton Drive folder (nothing is transferred)."
+    },
+    {
+      "name": "drive_bulk_move",
+      "description": "Move many items into one Proton Drive folder; returns a plan first, applies only with confirmed=true."
+    },
+    {
+      "name": "drive_bulk_trash",
+      "description": "Trash many items on Proton Drive (recoverable); returns a plan first, applies only with confirmed=true."
     },
     {
       "name": "drive_restore",
@@ -204,6 +224,46 @@
     {
       "name": "drive_write_file",
       "description": "Write text content to a file in the local Proton Drive sync folder (no Proton login needed — this only touches the local synced folder)."
+    },
+    {
+      "name": "drive_usage",
+      "description": "Storage analytics for a Proton Drive path: totals, largest files and folders, breakdowns, old files and trash."
+    },
+    {
+      "name": "drive_find_duplicates",
+      "description": "Find likely duplicate files in Proton Drive (claimed sha1, same size, or hash-verified); suggests a keeper, never deletes."
+    },
+    {
+      "name": "drive_sharing_audit",
+      "description": "Audit public links, invitees and risk flags across shared items in Proton Drive."
+    }
+  ],
+  "prompts": [
+    {
+      "name": "organise-folder",
+      "description": "Survey a Proton Drive folder and propose a cleaner structure, applying it only after you approve.",
+      "arguments": [
+        "path"
+      ],
+      "text": "Help me organise my Proton Drive folder ${arguments.path}.\n1. Survey it with drive_tree and drive_usage. Do not change anything yet.\n2. Propose a clearer folder structure and explain the reasoning briefly.\n3. Show the concrete plan by calling drive_bulk_move WITHOUT confirmed, so it is a dry run, and present the result to me.\n4. Wait for my explicit OK before running anything with confirmed=true. Apply only what I approved.\nNever permanently delete anything; use drive_trash (reversible) if something must go, and ask first."
+    },
+    {
+      "name": "find-files",
+      "description": "Locate files in Proton Drive from a plain-language description.",
+      "arguments": [
+        "description"
+      ],
+      "text": "Find files in my Proton Drive matching this description: ${arguments.description}\nUse drive_search with the most selective name, extension and date filters the description suggests. If there are too many or no results, refine the filters and search again rather than guessing. Report the paths of the best matches with size and modified date, and say how confident you are."
+    },
+    {
+      "name": "storage-audit",
+      "description": "Find what uses your Proton Drive space: biggest items, duplicates and trash, with a short action list.",
+      "text": "Audit my Proton Drive storage.\nUse drive_usage to find the largest folders and files, drive_find_duplicates to find redundant copies, and drive_list_trash to see what the trash holds. Finish with a short prioritised action list with estimated space saved. Do not delete or move anything; propose only."
+    },
+    {
+      "name": "sharing-audit",
+      "description": "Review what is shared from your Proton Drive and explain the risks.",
+      "text": "Audit what I share from Proton Drive.\nUse drive_sharing_audit to list shared folders, members, pending invitations and public links. Explain the risks in plain language (for example public links without a password, editors who no longer need access, stale invitations) and suggest what to tighten. Do not revoke anything without my explicit OK."
     }
   ],
   "compatibility": {

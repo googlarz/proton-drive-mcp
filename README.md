@@ -30,8 +30,8 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
 - **Proton Photos album management** — list albums, create/delete albums, add and remove photos
-- **Full CLI** — same 38 operations, scriptable and pipeable, works in cron and shell scripts
-- **100% CLI coverage** — every scriptable Proton Drive CLI command has a matching tool (verified against the CLI's own source; `auth login` is the one command excluded, since it's an interactive browser flow)
+- **Companion CLI** — 44 of the 46 operations, scriptable and pipeable, works in cron and shell scripts (the two sync-folder tools, `drive_read_file` and `drive_write_file`, are MCP-only)
+- **Full Proton Drive CLI coverage** — every scriptable Proton Drive CLI command has a matching tool (verified against the CLI's own source; `auth login` is the one command excluded, since it's an interactive browser flow)
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
 - **Shell injection safe** — all CLI calls use `execFile` with discrete argument arrays, never string interpolation
 - **Privacy-native** — end-to-end encryption is handled by Proton's own CLI; this server is just a thin MCP wrapper
@@ -229,6 +229,28 @@ proton-drive-cli restore /my-files/old-draft.pdf       # restore from trash
 proton-drive-cli trash empty --confirm                  # permanently delete all trashed items
 ```
 
+### Search, analytics and cleanup
+`drive_search` · `drive_tree` · `drive_usage` · `drive_find_duplicates` · `drive_sharing_audit` · `drive_sync_plan` · `drive_bulk_move` · `drive_bulk_trash`
+
+```bash
+proton-drive-cli tree /my-files --depth 2
+proton-drive-cli search /my-files --ext pdf --min-size 1000000
+proton-drive-cli usage /my-files --top 20 --older-than 365
+proton-drive-cli duplicates /my-files --min-size 1000000 [--verify]
+proton-drive-cli share audit /my-files
+proton-drive-cli sync-plan ./local /my-files/backup --direction up
+proton-drive-cli bulk-move /my-files/Archive /my-files/a.pdf /my-files/b.pdf          # plan only
+proton-drive-cli bulk-trash /my-files/old1.txt /my-files/old2.txt --confirm           # apply
+```
+
+- The first walk of a large drive can take minutes (measured ~25 s per 1,200 files at concurrency 8). Later calls reuse a 5-minute cache; `refresh` bypasses it.
+- Walks skip `.git` and `node_modules` by default.
+- Read-only tools (`drive_search`, `drive_tree`, `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_sync_plan`) change nothing. `drive_bulk_move` and `drive_bulk_trash` are two-step: call without `confirmed` for the plan, then with `confirmed: true` to apply. Bulk trash is reversible with `drive_restore`.
+- Duplicate detection uses the sha1 the uploader claimed, which is unverified. `verify: true` downloads the candidates and hashes them.
+- The sharing audit flags an invitee as external when the address is outside Proton domains, so Proton users on a custom domain are over-flagged.
+- Sizes are sums of file sizes, not your account quota.
+- `drive_usage` trash stats always make one uncached `/trash` listing (~2.5 s), even when the walk is cached.
+
 ### Photos
 
 ```bash
@@ -260,13 +282,19 @@ proton-drive-cli share status /my-files/Projects
 
 ---
 
+## Prompts
+
+The server offers four MCP prompts (also declared in the MCPB manifest): `organise-folder` (`path`), `find-files` (`description`), `storage-audit` and `sharing-audit`. In Claude Code they are listed as `/servername:promptname (MCP)`, and `/mcp__servername__promptname` also runs them. Other clients show them as prompts. A prompt is hidden when a tool it needs is outside the active tool tier: with `PROTON_DRIVE_TOOL_TIER=core` only `find-files` is offered.
+
+---
+
 ## Tool surface
 
 ### Auth
 `drive_auth_status` · `drive_auth_logout` · `drive_version`
 
 ### Filesystem
-`drive_list` · `drive_info` · `drive_mkdir` · `drive_upload` · `drive_download` · `drive_rename` · `drive_move` · `drive_delete`
+`drive_list` · `drive_info` · `drive_tree` · `drive_search` · `drive_mkdir` · `drive_upload` · `drive_download` · `drive_rename` · `drive_move` · `drive_delete`
 
 ### Sharing
 `drive_share_status` · `drive_share_invite` · `drive_share_revoke` · `drive_share_remove_all` · `drive_share_set_url` · `drive_share_remove_url`
@@ -279,6 +307,9 @@ proton-drive-cli share status /my-files/Projects
 
 ### Copy
 `drive_copy`
+
+### Plan & bulk
+`drive_sync_plan` · `drive_bulk_move` · `drive_bulk_trash`
 
 ### Invitations
 `drive_list_invitations` · `drive_invitation_accept` · `drive_invitation_reject` · `drive_share_leave`
@@ -297,6 +328,8 @@ proton-drive-cli share status /my-files/Projects
 | `drive_version` | CLI and SDK version info | — |
 | `drive_list` | List files and folders at a path (paginated, default 200; `/` lists the roots) | `path`, `limit?`, `offset?` |
 | `drive_info` | Get metadata for one file/folder, including revision details (noise trimmed) | `path`, `verbose?` (raw CLI node) |
+| `drive_tree` | Folder overview: per-folder file counts and size totals (largest first), depth-limited, cached 5 min | `path?`, `depth?` (default 2, max 10), `limit?`, `foldersOnly?`, `refresh?` |
+| `drive_search` | Find files/folders under a path in one cached walk: name (substring/glob; a glob containing `/` matches the path relative to `path`), type, extension, MIME prefix, size, modified date; sortable, paginated. Reports `walk.complete` — false means the walk was cut short and matches may be missing | `query?`, `glob?`, `path?`, `type?`, `mediaType?`, `extensions?`, `minSize?`, `maxSize?`, `modifiedAfter?`, `modifiedBefore?`, `sort?`, `limit?` (default 50, max 500), `offset?`, `refresh?` |
 | `drive_mkdir` | Create a new empty folder | `path` |
 | `drive_upload` | Upload local file or folder | `localPath`, `remotePath`, `fileConflictStrategy?` (skip/create-new-revision/rename/replace), `folderConflictStrategy?` (skip/merge/rename/replace), `confirmed?` (**required for `replace`** — it trashes the existing remote item) |
 | `drive_download` | Download to local path | `remotePath`, `localPath`, `fileConflictStrategy?` (skip/rename/remove), `folderConflictStrategy?` (skip/merge/rename/remove), `confirmed?` (**required for `remove`** — it deletes the existing local item) |
@@ -306,12 +339,18 @@ proton-drive-cli share status /my-files/Projects
 | `drive_delete` | Permanently delete an item already in trash ⚠️ | `path`, `confirmed: true` |
 | `drive_list_trash` | List items currently in trash (paginated, default 100; includes `uid` — names are not unique in trash) | `limit?`, `offset?` |
 | `drive_share_status` | Get sharing members and URL | `path` |
+| `drive_usage` | Storage analytics for a subtree: totals, largest files/folders, extension and media-type breakdown, old files, trash stats (sum of file sizes, not the account quota) | `path?`, `top?`, `olderThanDays?`, `refresh?` |
+| `drive_find_duplicates` | Likely duplicate groups (claimed sha1 / same size; `verify` downloads and sha256s candidates), wasted bytes, suggested keeper — never deletes | `path?`, `minSize?`, `verify?`, `maxVerifyBytes?`, `maxVerifyTotalBytes?` (default 500 MB, max 2 GB), `limit?`, `refresh?` |
+| `drive_sharing_audit` | Public links (no URL), invitees, pending invitations and risk flags for shared items (max 100) | `path?`, `refresh?` |
 | `drive_share_invite` | Invite a user (sends an email) ⚠️ | `path`, `email`, `role` (viewer/editor/admin), `message?`, `confirmed: true` |
 | `drive_share_revoke` | Revoke one person's access (fails if not a member) ⚠️ | `path`, `email`, `confirmed: true` |
 | `drive_share_remove_all` | Remove every member + pending invitation at once ⚠️ | `path`, `confirmed: true` |
 | `drive_share_set_url` | Create/replace a public share link ⚠️ (re-running without `password`/`expiration` removes them; expiry max ~90 days) | `path`, `role?` (viewer/editor), `password?`, `expiration?`, `confirmed: true` |
 | `drive_share_remove_url` | Remove the public share link ⚠️ | `path`, `confirmed: true` |
 | `drive_trash` | Move to trash | `path` |
+| `drive_sync_plan` | Read-only diff of a local folder vs a Drive folder (nothing transferred) | `localPath`, `drivePath`, `direction?` (up/down/both), `ignore?`, `compare?` (size-mtime/sha1), `limit?` |
+| `drive_bulk_move` | Move up to 200 items into an existing folder; without `confirmed` returns the plan and problems only | `sources`, `destinationFolder`, `confirmed?` (**required to apply**) |
+| `drive_bulk_trash` | Trash up to 200 items (recoverable); without `confirmed` returns the plan and problems only | `paths`, `confirmed?` (**required to apply**) |
 | `drive_restore` | Restore from trash | `path` |
 | `drive_empty_trash` | Permanently delete all trash ⚠️ | `confirmed: true` |
 | `drive_read_file` | Read text file from local sync folder | `path` |
@@ -356,15 +395,17 @@ proton-drive-cli share status /my-files/Projects
 - Error messages come from the CLI's own output; the command line (and therefore any `--password`) is never echoed back.
 - `drive_move` accepts a full destination path (parent + new name) for a familiar interface, but the underlying CLI only has separate `move` (change parent) and `rename` (change name) commands — this MCP translates automatically, issuing one or both as needed.
 - `drive_delete` only works on items already in `/trash` or `/photos-trash` — the CLI rejects live paths. Trash an item first with `drive_trash`, or use `drive_empty_trash` to clear everything at once.
+- If the client declares MCP elicitation (form mode), a refused `confirmed` gate is put to the human instead, and `drive_bulk_move` / `drive_bulk_trash` ask before applying a `confirmed: true` call. Only an explicit approval runs the call; decline, cancel, timeout or error keep the refusal, and after 5 declined prompts in a minute the server stops prompting. This only upgrades refusals and bulk applies: a compromised model that supplies `confirmed: true` on any other tool is **not** stopped by it. Clients without elicitation behave as before. Confirmation prompts need a client that supports elicitation (Claude Code CLI today; Claude Desktop is unverified).
+- Walk-based tools (`drive_tree`, `drive_search`, `drive_usage`, `drive_find_duplicates`) read from a cache up to 5 minutes old; changes made by other clients or processes are not seen until it expires or you pass `refresh: true`. The first walk of a large drive can take minutes (measured about 25 s per 1200 files at concurrency 8).
 - `drive_auth_status` has no native CLI equivalent — it probes by resolving `/my-files` and reports authenticated based on whether that succeeds.
 - Paths are always Drive-absolute: `/my-files/folder/file.pdf`. Relative paths are not supported.
 - All calls include `--json` automatically, except `drive_version`, whose underlying CLI command ignores `--json` and always prints plain text — this MCP parses it directly.
 
 ### Token cost
 
-`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` 29.5 KB (38 tools; 39.5 KB before description trimming), `core` 13.3 KB (16 tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
+`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` 39.0 KB (46 tools), `core` 16.8 KB (18 tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
 
-`drive_auth_status`, `drive_version`, `drive_list`, `drive_info`, `drive_list_trash`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`, `drive_trash`, `drive_restore`, `drive_share_status`, `photos_list_timeline`, `photos_download`.
+`drive_auth_status`, `drive_version`, `drive_list`, `drive_info`, `drive_list_trash`, `drive_search`, `drive_tree`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`, `drive_trash`, `drive_restore`, `drive_share_status`, `photos_list_timeline`, `photos_download`.
 
 Left out of `core` (use `full`): permanent deletion (`drive_delete`, `drive_empty_trash`), `drive_auth_logout`, public links, invitations and invites, album management, `photos_upload` and the sync-file tools. A call to a hidden tool returns an error asking for `PROTON_DRIVE_TOOL_TIER=full`; no CLI command runs.
 
@@ -404,7 +445,8 @@ Every tool group was live-tested on 2026-09-28 against a real Proton account, **
 | `PROTON_DRIVE_ALLOW_SENSITIVE_PATHS` | Optional | Set to `1` to disable the built-in credential-location denylist (not recommended). |
 | `CLAUDE_DESKTOP_CONFIG` | Optional | Path of the Claude Desktop config that `doctor` and `setup-claude-desktop` read/write instead of the per-OS default. |
 | `PROTON_DRIVE_RETRY_BASE_MS` | Optional | Test hook: base backoff in ms for retrying read-only calls (default 250). |
-| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 38 tools) or `core` (16 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
+| `PROTON_DRIVE_WALK_TTL_MS` | Optional | How long `drive_tree`/`drive_search` reuse a cached folder walk, in ms (default 300000; 0 disables the cache). Results can be up to this old, and changes made by other clients or processes are not seen until it expires or `refresh: true`. The first walk of a large drive can take minutes. The cache is dropped for any path this server writes to. |
+| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 46 tools) or `core` (18 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
 
 ---
 

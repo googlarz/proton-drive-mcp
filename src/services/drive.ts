@@ -16,6 +16,14 @@ import type {
 import { runDrive as defaultRunDrive, runDriveRaw as defaultRunDriveRaw } from "../utils/subprocess.js";
 import { DriveNotAuthenticatedError, DriveParseError } from "../utils/errors.js";
 import { validateName } from "../utils/validation.js";
+import { invalidatePath } from "./walk.js";
+
+// A trashed item shows up in the trash listings, so cached trash walks go stale too.
+function invalidateTrashAnd(path: string): void {
+  invalidatePath(path);
+  invalidatePath("/trash");
+  invalidatePath("/photos-trash");
+}
 
 type Runner = (args: string[]) => Promise<unknown>;
 type RawRunner = (args: string[]) => Promise<string>;
@@ -61,13 +69,13 @@ function escapeNameForPath(name: string): string {
   return name.replace(/\//g, "\\/");
 }
 
-function unescapeName(name: string): string {
+export function unescapeName(name: string): string {
   return name.replace(/\\\//g, "/");
 }
 
 // dirname/basename that respect the "\/" escape: node's posix.basename would
 // split "/a/raw\/slash" into "slash", corrupting mkdir/move on such items.
-function splitRemotePath(p: string): { parent: string; name: string } {
+export function splitRemotePath(p: string): { parent: string; name: string } {
   for (let i = p.length - 1; i >= 0; i--) {
     if (p[i] === "/" && p[i - 1] !== "\\") {
       return { parent: i === 0 ? "/" : p.slice(0, i), name: p.slice(i + 1) };
@@ -76,7 +84,7 @@ function splitRemotePath(p: string): { parent: string; name: string } {
   return { parent: "/", name: p };
 }
 
-function joinRemote(parent: string, escapedName: string): string {
+export function joinRemote(parent: string, escapedName: string): string {
   return `${parent === "/" ? "" : parent}/${escapedName}`;
 }
 
@@ -121,7 +129,7 @@ function assertItemsOk(result: unknown, action: string): void {
 
 // Confirmed live: `sharing status /my-files` fails with "Error decrypting
 // session keys" — roots are not shareable nodes.
-const ROOT_PATHS = new Set(["/my-files", "/photos", "/albums", "/trash", "/photos-trash", "/shared-with-me", "/shared-by-me", "/devices"]);
+export const ROOT_PATHS = new Set(["/my-files", "/photos", "/albums", "/trash", "/photos-trash", "/shared-with-me", "/shared-by-me", "/devices"]);
 
 // Strips "<package-name>@" and "+<hash>" from a version token like
 // "cli-drive@0.8.0+06e8c605", leaving "0.8.0". Falls back to the raw
@@ -153,6 +161,19 @@ function trimNode(v: unknown, depth = 0): unknown {
     return out;
   }
   return v;
+}
+
+// Revision metadata the CLI returns but the old shaping dropped. sha1 is what the
+// uploader claimed (unverified) and is absent on most files.
+function revisionMeta(item: Record<string, unknown>): { mtime?: string; uploadedAt?: string; sha1?: string } {
+  const rev = item.activeRevision as Record<string, unknown> | undefined;
+  if (!rev || typeof rev !== "object") return {};
+  const digests = (rev.claimedDigests ?? {}) as Record<string, unknown>;
+  const out: { mtime?: string; uploadedAt?: string; sha1?: string } = {};
+  if (typeof rev.claimedModificationTime === "string") out.mtime = rev.claimedModificationTime;
+  if (typeof rev.creationTime === "string") out.uploadedAt = rev.creationTime;
+  if (typeof digests.sha1 === "string") out.sha1 = digests.sha1;
+  return out;
 }
 
 function mapPhoto(item: Record<string, unknown>): AlbumPhoto {
@@ -227,8 +248,14 @@ export class DriveService {
   //
   // Exception: listing "/" returns the roots as [{path:"/my-files"}, ...] with
   // no name at all — previously every root came out as "[unnamed]".
-  async list(remotePath: string, opts: { includeUid?: boolean } = {}): Promise<DriveFile[]> {
-    const result = await this.run(["filesystem", "list", remotePath]);
+  async list(remotePath: string, opts: { includeUid?: boolean; type?: "file" | "folder" } = {}): Promise<DriveFile[]> {
+    return (await this.listEntries(remotePath, opts)).map((e) => e.file);
+  }
+
+  // list() plus each item's raw CLI node, for callers (the tree walker) that need
+  // fields DriveFile drops: uid chain, revision mtime, claimed sha1, share flags.
+  async listEntries(remotePath: string, opts: { includeUid?: boolean; type?: "file" | "folder" } = {}): Promise<{ item: Record<string, unknown>; file: DriveFile }[]> {
+    const result = await this.run(opts.type ? ["filesystem", "list", "-t", opts.type, remotePath] : ["filesystem", "list", remotePath]);
     if (result === null) return [];
     if (!Array.isArray(result)) throw new DriveParseError(`Expected array from list, got: ${JSON.stringify(result).slice(0, 100)}`);
     // The CLI's order changes between calls and callers page by re-listing, so
@@ -236,7 +263,7 @@ export class DriveService {
     const uidOf = (item: Record<string, unknown>) => (typeof item.uid === "string" ? item.uid : "");
     const entries = result.map((item: Record<string, unknown>) => ({ item, file: this.mapListItem(item, remotePath, opts) }));
     entries.sort((x, y) => x.file.name.localeCompare(y.file.name) || (uidOf(x.item) < uidOf(y.item) ? -1 : uidOf(x.item) > uidOf(y.item) ? 1 : 0));
-    return entries.map((e) => e.file);
+    return entries;
   }
 
   private mapListItem(item: Record<string, unknown>, remotePath: string, opts: { includeUid?: boolean }): DriveFile {
@@ -253,6 +280,7 @@ export class DriveService {
       storageSize: typeof item.totalStorageSize === "number" ? item.totalStorageSize : undefined,
       modifiedAt: typeof item.modificationTime === "string" ? item.modificationTime : undefined,
       mimeType: typeof item.mediaType === "string" ? item.mediaType : undefined,
+      ...revisionMeta(item),
     };
     if (opts.includeUid) {
       file.uid = typeof item.uid === "string" ? item.uid : undefined;
@@ -268,16 +296,22 @@ export class DriveService {
     fileConflictStrategy: FileConflictStrategy = "skip",
     folderConflictStrategy: FolderConflictStrategy = "skip"
   ): Promise<UploadResult> {
-    const result = await this.run([
-      "filesystem",
-      "upload",
-      localPath,
-      remotePath,
-      "--file-conflict-strategy",
-      fileConflictStrategy,
-      "--folder-conflict-strategy",
-      folderConflictStrategy,
-    ]);
+    // finally: a partly completed upload that then fails also changes the tree.
+    let result: unknown;
+    try {
+      result = await this.run([
+        "filesystem",
+        "upload",
+        localPath,
+        remotePath,
+        "--file-conflict-strategy",
+        fileConflictStrategy,
+        "--folder-conflict-strategy",
+        folderConflictStrategy,
+      ]);
+    } finally {
+      invalidatePath(remotePath);
+    }
     // Real shape is TransferSummary: {transferredItems, transferredBytes,
     // skippedItems, failedItems, failures}. Confirmed live — the old
     // {uploaded, skipped, failed} field names never existed, so failures
@@ -326,7 +360,7 @@ export class DriveService {
       throw new Error(`folder name must not contain '/': ${remotePath}`);
     }
     validateName(name);
-    await this.run(["filesystem", "create-folder", parent, name]);
+    try { await this.run(["filesystem", "create-folder", parent, name]); } finally { invalidatePath(remotePath); }
   }
 
   // Returns metadata (including latest revision details) for a single file or
@@ -334,13 +368,16 @@ export class DriveService {
   // CLI/SDK node, whose exact shape is not guaranteed.
   async info(remotePath: string, verbose = false): Promise<unknown> {
     const raw = await this.run(["filesystem", "info", remotePath]);
-    return verbose ? raw : trimNode(raw);
+    if (verbose) return raw;
+    const trimmed = trimNode(raw);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return trimmed;
+    return { ...(trimmed as Record<string, unknown>), ...revisionMeta(raw as Record<string, unknown>) };
   }
 
   // Renames in place — does not move to a different folder. Returns the
   // renamed node (raw pass-through).
   async rename(remotePath: string, newName: string): Promise<unknown> {
-    return this.run(["filesystem", "rename", remotePath, newName]);
+    try { return await this.run(["filesystem", "rename", remotePath, newName]); } finally { invalidatePath(remotePath); }
   }
 
   // The CLI has no single "move to any full path" command — `move` only
@@ -354,6 +391,11 @@ export class DriveService {
   //  - the source's *own* name taken in the destination folder (the interim
   //    name after `move`) -> rename first, then move, instead
   async move(sourcePath: string, destinationPath: string): Promise<void> {
+    // finally: a half-done move (moved, rename failed) also changes the tree.
+    try { await this.moveImpl(sourcePath, destinationPath); } finally { invalidatePath(sourcePath); invalidatePath(destinationPath); }
+  }
+
+  private async moveImpl(sourcePath: string, destinationPath: string): Promise<void> {
     const src = splitRemotePath(sourcePath);
     const dst = splitRemotePath(destinationPath);
     // Only a *rename* to a slash-containing name is unsupported; moving an item
@@ -423,7 +465,7 @@ export class DriveService {
   // exists on the CLI side; our own confirmed-gate lives in the MCP layer.
   async delete(remotePath?: string, uid?: string): Promise<void> {
     const target = await this.resolveTrashTarget(remotePath, uid);
-    assertItemsOk(await this.run(["filesystem", "delete", target]), "Delete");
+    try { assertItemsOk(await this.run(["filesystem", "delete", target]), "Delete"); } finally { invalidatePath(target); }
   }
 
   // Sharing
@@ -467,6 +509,7 @@ export class DriveService {
       // Only a boolean — never echo the link password itself.
       sharePasswordProtected: urlAccess ? Boolean(password) : undefined,
       shareUrlExpiresAt: typeof expiresAt === "string" ? expiresAt : undefined,
+      shareUrlRole: VALID_ROLES.has(String(urlAccess?.role)) ? (String(urlAccess?.role) as ShareRole) : undefined,
       editorsCanShare: typeof r.editorsCanShare === "boolean" ? r.editorsCanShare : undefined,
     };
   }
@@ -574,12 +617,40 @@ export class DriveService {
   }
 
   async trash(remotePath: string): Promise<void> {
-    assertItemsOk(await this.run(["filesystem", "trash", remotePath]), "Trash");
+    try { assertItemsOk(await this.run(["filesystem", "trash", remotePath]), "Trash"); } finally { invalidateTrashAnd(remotePath); }
+  }
+
+  // One batched CLI call; per-item failures surface through assertItemsOk, with
+  // the success count added because earlier items may already have been applied.
+  async bulkMove(sources: string[], destinationFolder: string): Promise<void> {
+    await this.runBatch(["filesystem", "move", ...sources, destinationFolder], "Move", sources.length);
+  }
+
+  async bulkTrash(paths: string[]): Promise<void> {
+    try { await this.runBatch(["filesystem", "trash", ...paths], "Trash", paths.length); } finally { paths.forEach(invalidateTrashAnd); }
+  }
+
+  private async runBatch(args: string[], action: string, total: number): Promise<void> {
+    let result;
+    try {
+      result = await this.run(args);
+    } catch (err) {
+      // A failure of the whole call (e.g. a missing source) is rejected by the CLI before anything is applied.
+      if (err instanceof Error) err.message += " [the batch call failed; the CLI normally rejects a whole batch before applying anything, but list the folders before retrying]";
+      throw err;
+    }
+    try {
+      assertItemsOk(result, action);
+    } catch (err) {
+      const okCount = Array.isArray(result) ? (result as { ok?: boolean }[]).filter((i) => i && i.ok !== false).length : 0;
+      throw new Error(`${(err as Error).message} [${okCount} of ${total} items succeeded; verify with drive_list]`);
+    }
   }
 
   async restore(remotePath?: string, uid?: string): Promise<void> {
     const target = await this.resolveTrashTarget(remotePath, uid);
-    assertItemsOk(await this.run(["filesystem", "restore", target]), "Restore");
+    // finally + "/": the original location is unknown, so drop every cached walk (trash included)
+    try { assertItemsOk(await this.run(["filesystem", "restore", target]), "Restore"); } finally { invalidatePath("/"); }
   }
 
   // Confirmed live against CLI v0.8.0: restore/delete accept only /trash
@@ -620,7 +691,7 @@ export class DriveService {
   }
 
   async emptyTrash(): Promise<void> {
-    await this.run(["filesystem", "empty-trash"]);
+    try { await this.run(["filesystem", "empty-trash"]); } finally { invalidatePath("/trash"); invalidatePath("/photos-trash"); }
   }
 
   // The destination is the target PARENT folder (unlike move). `newName` maps to
@@ -628,7 +699,7 @@ export class DriveService {
   // duplicate an item inside its own folder.
   async copy(remoteSrc: string, remoteDst: string, newName?: string): Promise<void> {
     const args = ["filesystem", "copy", ...(newName ? ["--name", newName] : []), remoteSrc, remoteDst];
-    assertItemsOk(await this.run(args), "Copy");
+    try { assertItemsOk(await this.run(args), "Copy"); } finally { invalidatePath(remoteDst); }
   }
 
   async listInvitations(): Promise<DriveInvitation[]> {

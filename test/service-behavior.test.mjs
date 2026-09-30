@@ -71,6 +71,7 @@ describe("info()", () => {
       uid: "vol~n1",
       name: "a.txt",
       activeRevision: { contentAuthor: "me@proton.me", storageSize: 5 },
+      sha1: "x",
     });
   });
 

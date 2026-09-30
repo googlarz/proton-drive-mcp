@@ -50,6 +50,31 @@ describe("mcpb manifest", () => {
   });
 });
 
+describe("mcpb manifest prompts", () => {
+  it("names, arguments and texts equal the server's prompts (full tier)", async () => {
+    const sb = makeSandbox();
+    const c = await startServer("json", sb);
+    try {
+      await c.initialize();
+      const real = (await c.request("prompts/list", {})).result.prompts;
+      assert.deepEqual(manifest.prompts.map((p) => p.name).sort(), real.map((p) => p.name).sort());
+      for (const mp of manifest.prompts) {
+        const rp = real.find((p) => p.name === mp.name);
+        assert.deepEqual(mp.arguments ?? [], rp.arguments.map((a) => a.name));
+        assert.equal(mp.description, rp.description);
+        // Render the server text with sentinels and map them back to the manifest placeholders.
+        const args = Object.fromEntries((mp.arguments ?? []).map((n) => [n, n === "path" ? "/my-files/@@path@@" : `@@${n}@@`]));
+        let text = (await c.request("prompts/get", { name: mp.name, arguments: args })).result.messages[0].content.text;
+        for (const n of mp.arguments ?? []) text = text.replaceAll(n === "path" ? "/my-files/@@path@@" : `@@${n}@@`, `\${arguments.${n}}`);
+        assert.equal(mp.text, text);
+      }
+    } finally {
+      await c.close();
+      sb.cleanup();
+    }
+  });
+});
+
 describe("mcpb-release workflow", () => {
   const wf = read(".github", "workflows", "mcpb-release.yml");
   it("triggers on release published + dispatch, SHA-pins actions, scopes write permission", () => {

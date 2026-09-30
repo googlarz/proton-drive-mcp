@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.3.0 — 2026-09-30
+
+Proton Drive has no search, and its end-to-end encryption rules out server-side indexing. This release adds the client-side layer: find things, understand what uses your space, and clean up safely. 4 builders worked in parallel, then 3 verifiers (live on a real account, an independent security review, packaging/CI) and a re-check of every fix. Review findings fixed before release include two ReDoS vectors in search and a local-path guard gap.
+
+### Added
+- **`drive_tree`** and **`drive_search`** (also in the `core` tier): a bounded, parallel walk of the drive (8 concurrent calls, `.git` and `node_modules` skipped, call cap, cancellable) with a 5-minute in-memory cache that the server's own writes invalidate. Search by name, glob (relative to the search folder when it contains `/`), extension, media type, size and date, with stable pagination. The first walk of a large drive takes minutes (about 25 s per 1,200 files); later calls are instant.
+- **`drive_usage`**: largest files and folders, breakdown by type, old files and trash stats (sums of file sizes, not the account quota).
+- **`drive_find_duplicates`**: groups by the uploader-claimed sha1 or by size; `verify` downloads and hashes candidates within a size and total budget. It never deletes.
+- **`drive_sharing_audit`**: public links (role, expiry, password; the URL is never printed), invitees, pending invitations and risk flags.
+- **`drive_sync_plan`**: compares a local folder with a Drive folder (plan only).
+- **`drive_bulk_move`** and **`drive_bulk_trash`**: up to 200 items in one batched call. Always two steps: without `confirmed` you get a plan and any problems; `confirmed:true` applies only if there are none. Trash stays reversible.
+- **MCP prompts** (`organise-folder`, `find-files`, `storage-audit`, `sharing-audit`), listed only when the tools they need are in the active tier; also declared in the MCPB manifest.
+- **Human confirmation through elicitation** for clients that support it (Claude Code CLI; Claude Desktop is unverified): gated calls and bulk applies ask the person instead of only failing. Clients without it behave as before. It does not protect against a model that passes `confirmed:true` itself.
+- `drive_list` and `drive_info` now return `mtime`, `uploadedAt` and `sha1` (claimed, often absent); `drive_list` takes a `type` filter; `drive_share_status` adds `shareUrlRole`.
+- Tool titles on every tool, corrected annotations (for example `drive_trash` is not destructive), `maxResultSizeChars` hints on the large-result tools.
+
+### Changed
+- The full tool list is now 46 tools (about 39 KB, was 29.5 KB); `core` is 18 tools (16.8 KB). Use `PROTON_DRIVE_TOOL_TIER=core` to keep the token cost down.
+- Folder uploads and `drive_sync_plan` refuse a local folder that contains protected locations (home directory, `/`, `~/.ssh`, ...); scans skip secret-named files and report `protectedSkipped`. Downloads into your home folder still work. Note that for uploads the CLI does the recursion, so a `.env` inside an uploaded subfolder is not filtered.
+- `.gitignore` covers `node_modules` as a symlink too.
+
+### Known limitations
+- Windows is not supported. The CLI has no search, version history, quota or change notifications, so none of those are offered.
+- The walk cache does not see changes made by other clients until it expires or `refresh:true`.
+- `drive_share_leave`, `drive_invitation_accept` and `drive_invitation_reject` have never been tested live (no second Proton account). Elicitation and prompts are verified with the official SDK client and Claude Code semantics, not with Claude Desktop.
+
 ## 1.2.0 — 2026-09-28
 
 Setup, packaging and reliability round. Five features were built in parallel on separate branches, merged, then verified live (real account, 3 concurrent servers), on Node 22/24 and on the new Ubuntu + macOS CI matrix, plus an independent code review. Review and CI findings were fixed before release.

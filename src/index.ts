@@ -5,6 +5,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ErrorCode,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
@@ -18,6 +20,7 @@ import {
   type PhotoUploadConflictStrategy,
   type PhotoDownloadConflictStrategy,
 } from "./services/drive.js";
+import { PROMPTS, getPromptText } from "./prompts.js";
 import { isMainModule } from "./utils/isMainModule.js";
 import { checkCliAvailable, callContext, killAllChildren } from "./utils/subprocess.js";
 import {
@@ -25,11 +28,16 @@ import {
   DriveCliError,
   DriveNotAuthenticatedError,
   DriveParseError,
+  NeedsConfirmationError,
 } from "./utils/errors.js";
-import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
+import { validateRemotePath, validateRemotePathList, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
+import { driveSearch, driveTree } from "./services/find.js";
+import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type Direction, type Compare } from "./services/plan.js";
+import { invalidatePath } from "./services/walk.js";
 import { getSyncRoot, readSyncFile, writeSyncFile, syncFileExists } from "./utils/syncfs.js";
 import type { AlbumPhoto } from "./types/index.js";
+import { driveUsage, driveFindDuplicates, driveSharingAudit } from "./services/analytics.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version?: string };
@@ -59,7 +67,15 @@ function truncate(s: string, max = 500): string {
   return s.length > max ? s.slice(0, max) + "…" : s;
 }
 
+// Results produced by a NeedsConfirmationError; the only results that may trigger a human prompt.
+const confirmationRefusals = new WeakSet<ToolResult>();
+
 function handleError(err: unknown): ToolResult {
+  if (err instanceof NeedsConfirmationError) {
+    const r = fail(err.message);
+    confirmationRefusals.add(r);
+    return r;
+  }
   if (err instanceof DriveCliNotFoundError) return fail(err.message);
   if (err instanceof DriveNotAuthenticatedError) return fail(err.message);
   if (err instanceof DriveCliError) return fail(`CLI error: ${truncate(err.message)}`);
@@ -71,9 +87,9 @@ function handleError(err: unknown): ToolResult {
 // Outward-facing / destructive tools refuse to run without an explicit
 // confirmed=true, so a prompt-injected or careless agent cannot trigger them in
 // a single call. Mirrors the CLI's --confirm flags.
-function needConfirm(a: Record<string, unknown>, tool: string, action: string): ToolResult | undefined {
-  if (a.confirmed === true) return undefined;
-  return fail(`${tool} ${action} Describe this to the user, get their explicit OK, then call again with confirmed=true.`);
+function needConfirm(a: Record<string, unknown>, tool: string, action: string): void {
+  if (a.confirmed === true) return;
+  throw new NeedsConfirmationError(`${tool} ${action} Describe this to the user, get their explicit OK, then call again with confirmed=true.`);
 }
 
 function paginate<T>(all: T[], a: Record<string, unknown>, defaultLimit: number) {
@@ -101,6 +117,7 @@ type ToolDef = {
   description: string;
   inputSchema: { type: string; properties: Record<string, JsonSchemaProp>; required?: readonly string[]; additionalProperties?: boolean };
   annotations?: Record<string, boolean>;
+  title?: string;
 };
 
 // The schemas advertise additionalProperties:false, but nothing enforced it, and
@@ -159,7 +176,7 @@ const TOOLS = [
   {
     name: "drive_list",
     description:
-      "List the immediate children of a Proton Drive folder (one level, not recursive). Listing '/' returns the top-level roots. Returns {items, total, offset, limit, hasMore} (default limit 200, sorted by name); items are [{name, path, type ('file'|'folder'), size? (bytes), storageSize? (encrypted, all revisions), modifiedAt?, mimeType?}]. Items come in a stable sorted order; each page is a fresh read, so changes between page calls can still shift items. Use drive_list_trash for the trash.",
+      "List the immediate children of a Proton Drive folder (one level, not recursive). Listing '/' returns the top-level roots. Returns {items, total, offset, limit, hasMore} (default limit 200, sorted by name); items are [{name, path, type ('file'|'folder'), size? (bytes), storageSize? (encrypted, all revisions), modifiedAt?, mimeType?, mtime? (original local modification time), uploadedAt? (revision upload time), sha1? (hash CLAIMED by the uploader: unverified and often absent)}]. Items come in a stable sorted order; each page is a fresh read, so changes between page calls can still shift items. Use drive_list_trash for the trash.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: "object",
@@ -167,6 +184,11 @@ const TOOLS = [
         path: {
           type: "string",
           description: "Absolute remote path, e.g. /my-files/Reports.",
+        },
+        type: {
+          type: "string",
+          enum: ["file", "folder"],
+          description: "Only list items of this type (default: both).",
         },
       },
       required: ["path"],
@@ -176,7 +198,7 @@ const TOOLS = [
   {
     name: "drive_info",
     description:
-      "Get full metadata for one Proton Drive file or folder, including latest revision details. Verification wrappers are unwrapped and noise fields dropped (verbose=true returns the raw CLI node, whose shape is not guaranteed). Use drive_list to enumerate children.",
+      "Get full metadata for one Proton Drive file or folder, including latest revision details. Also returns mtime (original local modification time), uploadedAt (revision upload time) and sha1 (hash CLAIMED by the uploader: unverified and often absent) when known. Verification wrappers are unwrapped and noise fields dropped (verbose=true returns the raw CLI node, whose shape is not guaranteed). Use drive_list to enumerate children.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: "object",
@@ -187,6 +209,51 @@ const TOOLS = [
         },
       },
       required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_tree",
+    description:
+      "Folder overview with per-folder file counts and size totals, largest first. Returns {files, folders, size, complete, unexpanded?, skipped?, tree}. Totals cover opened folders only; 'unexpanded' counts folders not opened (depth limit, .git/node_modules, failures). complete=false: part of the tree failed to load. Cached 5 min; refresh=true re-reads.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Default /my-files." },
+        depth: { type: "integer", minimum: 1, maximum: 10, description: "Levels (default 2)." },
+        limit: { type: "integer", minimum: 1, maximum: 1000, description: "Max entries (default 200); rest counted in 'more'." },
+        foldersOnly: { type: "boolean", description: "Hide files (totals still count them)." },
+        refresh: { type: "boolean", description: "Bypass the cache." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_search",
+    description:
+      "Find files/folders under a path by name, type, extension, size or date in one walk. Filters are ANDed. Returns {total, hasMore, items [{path, type, size?, mtime?, sha1?}], walk {complete, fromCache, skipped?}}; walk.complete=false means matches may be missing. Cached 5 min; refresh=true re-reads; skips .git/node_modules.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Name substring, case-insensitive." },
+        glob: { type: "string", description: "Name pattern, e.g. *.pdf (* ? **). A pattern containing '/' matches the path relative to `path` (no leading slash), e.g. Docs/*/*.pdf." },
+        path: { type: "string", description: "Default /my-files." },
+        type: { type: "string", enum: ["file", "folder"], description: "Only files or folders." },
+        mediaType: { type: "string", description: "MIME prefix, e.g. image/." },
+        extensions: { type: "array", items: { type: "string" }, description: "e.g. ['pdf','docx']." },
+        minSize: { type: "integer", minimum: 0, description: "Bytes (files only)." },
+        maxSize: { type: "integer", minimum: 0, description: "Bytes (files only)." },
+        modifiedAfter: { type: "string", description: "ISO date (original mtime, else upload time)." },
+        modifiedBefore: { type: "string", description: "ISO date." },
+        sort: { type: "string", enum: ["name", "size", "mtime"], description: "Default name; size and mtime sort descending." },
+        limit: { type: "integer", minimum: 1, maximum: 500, description: "Default 50." },
+        offset: { type: "integer", minimum: 0, description: "Items to skip." },
+        refresh: { type: "boolean", description: "Bypass the cache." },
+      },
+      required: [],
       additionalProperties: false,
     },
   },
@@ -867,12 +934,114 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "drive_sync_plan",
+    description:
+      "Read-only plan, transfers nothing: diff a local folder against a Drive folder (only local, only Drive, changed; same size but mtime >2 s apart = 'maybe changed'), with byte totals and completeness. Symlinks skipped.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        localPath: { type: "string", description: "Absolute local folder." },
+        drivePath: { type: "string", description: "Absolute remote folder." },
+        direction: { type: "string", enum: ["up", "down", "both"], description: "Default up." },
+        ignore: { type: "array", items: { type: "string" }, description: "Globs (default .git, node_modules, .DS_Store)." },
+        compare: { type: "string", enum: ["size-mtime", "sha1"], description: "Default size-mtime; sha1 hashes same-size files when Drive claims one." },
+        limit: { type: "integer", minimum: 1, maximum: 1000, description: "Per list, default 200." },
+      },
+      required: ["localPath", "drivePath"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_bulk_move",
+    description:
+      "Move up to 200 items into one existing folder, keeping names. Without confirmed: plan and problems only. With confirmed=true: moves only if no problems.",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        sources: { type: "array", items: { type: "string" }, description: "Absolute remote paths." },
+        destinationFolder: { type: "string", description: "Existing folder (not a full new path)." },
+      },
+      required: ["sources", "destinationFolder"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_bulk_trash",
+    description:
+      "Trash up to 200 items (drive_restore recovers). Without confirmed: plan and problems only. With confirmed=true: trashes only if no problems.",
+    annotations: { destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        paths: { type: "array", items: { type: "string" }, description: "Absolute remote paths." },
+      },
+      required: ["paths"],
+      additionalProperties: false,
+    },
+  },
+  // Analytics (read-only; walk the tree once, cached)
+  {
+    name: "drive_usage",
+    description:
+      "Storage analytics for a subtree: totals, largest files/folders, extension and media-type breakdown, old files, trash stats (always uncached, ~2.5 s). Sizes are summed file sizes, not the account quota. Walks the tree; results come from a cache up to 5 min old (other clients' changes unseen until expiry or refresh=true); a first walk of a large drive can take minutes. `complete` flags partial results.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Folder (default /my-files)." },
+        top: { type: "integer", minimum: 1, maximum: 50, description: "Rows per ranking (default 10)." },
+        olderThanDays: { type: "integer", minimum: 0, description: "Report files older than this many days." },
+        refresh: { type: "boolean", description: "Ignore the cached walk." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_find_duplicates",
+    description:
+      "Find likely duplicates: same claimed sha1, or same size+mediaType without sha1 (candidates only). verify=true downloads and sha256s them ('verified'; writes temporary local files, removed afterwards). Reports wastedBytes and a suggested keeper; never deletes. Walk results are cached up to 5 min (refresh=true re-reads; first walk of a large drive can take minutes).",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Folder (default /my-files)." },
+        minSize: { type: "integer", minimum: 0, description: "Min bytes (default 1024)." },
+        verify: { type: "boolean", description: "Download and hash candidates of the top groups." },
+        maxVerifyBytes: { type: "integer", minimum: 1, description: "Skip files larger than this (default 50000000)." },
+        maxVerifyTotalBytes: { type: "integer", minimum: 1, maximum: 2000000000, description: "Total download budget for verify (default 500000000)." },
+        limit: { type: "integer", minimum: 1, maximum: 200, description: "Max groups returned (default 20)." },
+        refresh: { type: "boolean", description: "Ignore the cached walk." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_sharing_audit",
+    description:
+      "Audit sharing under a path: public links (role, expiry, password; URL omitted), invitees, pending invitations, risk flags (public-link-no-expiry, public-link-editor, external-invitee = non-Proton address). Max 100 shared items.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Folder (default /my-files)." },
+        refresh: { type: "boolean", description: "Ignore the cached walk." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 // ---- Tool surface: derived from TOOLS so the literal stays readable ----------
 const CONFIRM_ALWAYS = new Set([
   "drive_auth_logout", "drive_share_invite", "drive_share_revoke", "drive_share_set_url",
   "drive_share_remove_url", "drive_share_leave", "drive_invitation_reject", "photos_remove_from_album",
+  "drive_bulk_move", "drive_bulk_trash",
 ]);
 const CONFIRM_CONDITIONAL: Record<string, string> = {
   drive_upload: "when fileConflictStrategy or folderConflictStrategy is 'replace' (it trashes the existing remote item)",
@@ -886,13 +1055,38 @@ const EXTRA_PROPS: Record<string, Record<string, JsonSchemaProp & { description:
   drive_copy: { newName: { type: "string", description: "Optional name for the copy (CLI --name). Required to copy an item into its own folder." } },
   photos_list_album_photos: { loadDetails: { type: "boolean", description: "Include name, mediaType, sizes, captureTime and tags (default false)." } },
 };
+// Replace/remove strategies are gated by `confirmed`, so the tools themselves are
+// not advertised as destructive; trash is reversible via drive_restore.
 const ANNOTATION_OVERRIDES: Record<string, Record<string, boolean>> = {
-  drive_share_set_url: { destructiveHint: true },
-  drive_upload: { destructiveHint: true },
-  drive_download: { destructiveHint: true },
-  photos_download: { destructiveHint: true },
-  drive_read_file: { idempotentHint: true },
+  drive_share_set_url: { destructiveHint: true, openWorldHint: true },
+  drive_share_invite: { destructiveHint: false, openWorldHint: true },
+  drive_upload: { destructiveHint: false },
+  drive_download: { destructiveHint: false },
+  photos_download: { destructiveHint: false },
+  photos_upload: { destructiveHint: false },
+  drive_trash: { destructiveHint: false, idempotentHint: true },
+  drive_version: { openWorldHint: false },
+  drive_read_file: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 };
+const TOOL_TITLES: Record<string, string> = {
+  drive_tree: "Show folder tree", drive_search: "Search files", drive_usage: "Storage usage report",
+  drive_find_duplicates: "Find duplicate files", drive_sharing_audit: "Audit sharing",
+  drive_sync_plan: "Plan local/Drive sync", drive_bulk_move: "Move many items", drive_bulk_trash: "Trash many items",
+  drive_auth_status: "Check sign-in status", drive_auth_logout: "Sign out", drive_version: "CLI version",
+  drive_list: "List folder", drive_info: "Get item info", drive_upload: "Upload to Drive", drive_download: "Download from Drive",
+  drive_mkdir: "Create folder", drive_rename: "Rename item", drive_move: "Move item", drive_delete: "Delete permanently",
+  drive_share_status: "Show sharing status", drive_list_trash: "List trash", drive_share_invite: "Invite to share",
+  drive_share_revoke: "Revoke member access", drive_trash: "Move to trash", drive_restore: "Restore from trash",
+  drive_empty_trash: "Empty trash", drive_copy: "Copy item", drive_list_invitations: "List invitations",
+  drive_invitation_accept: "Accept invitation", drive_invitation_reject: "Reject invitation", drive_share_leave: "Leave shared item",
+  drive_share_set_url: "Create or update public link", drive_share_remove_url: "Remove public link",
+  drive_share_remove_all: "Remove all sharing", photos_list_albums: "List photo albums", photos_create_album: "Create photo album",
+  photos_update_album: "Update photo album", photos_delete_album: "Delete photo album", photos_list_album_photos: "List album photos",
+  photos_add_to_album: "Add photos to album", photos_remove_from_album: "Remove photo from album", photos_list_timeline: "List photo timeline",
+  photos_download: "Download photo", photos_upload: "Upload photos", drive_read_file: "Read synced text file", drive_write_file: "Write synced text file",
+};
+// Hint for clients that cap tool-result size: these tools can legitimately return large payloads.
+const LARGE_RESULT_TOOLS = new Set(["drive_list", "drive_read_file"]);
 
 const TOOL_DEFS: ToolDef[] = TOOLS.map((t) => {
   const base = t as unknown as ToolDef;
@@ -912,6 +1106,7 @@ const TOOL_DEFS: ToolDef[] = TOOLS.map((t) => {
   }
   return {
     ...base,
+    ...(TOOL_TITLES[base.name] ? { title: TOOL_TITLES[base.name] } : {}),
     description,
     inputSchema: { ...base.inputSchema, properties },
     annotations: { ...(base.annotations ?? {}), ...(ANNOTATION_OVERRIDES[base.name] ?? {}) },
@@ -925,6 +1120,7 @@ const TOOL_DEFS: ToolDef[] = TOOLS.map((t) => {
 export const CORE_TOOL_NAMES = new Set([
   "drive_auth_status", "drive_version", // session check and CLI diagnostics
   "drive_list", "drive_info", "drive_list_trash", // reading
+  "drive_search", "drive_tree", // finding things without listing folder by folder
   "drive_mkdir", "drive_upload", "drive_download", // basic file I/O
   "drive_rename", "drive_move", "drive_copy", // reorganising
   "drive_trash", "drive_restore", // reversible removal
@@ -939,14 +1135,69 @@ export function resolveTier(raw: string | undefined): "full" | "core" {
   return "full";
 }
 
+// Text shown to the human: control characters and newlines are neutralised and the MIDDLE of a
+// long value is elided, so two long names sharing a prefix (or a spoofed line break) stay distinguishable.
+export function showValue(v: unknown, head = 120, tail = 60): string {
+  const t = (typeof v === "string" ? v : JSON.stringify(v) ?? String(v)).replace(/[\x00-\x1f\x7f\u2028\u2029]/g, " ");
+  return t.length > head + tail + 1 ? `${t.slice(0, head)}…${t.slice(-tail)}` : t;
+}
+
+export function describeArgs(args: Record<string, unknown>): string {
+  return Object.entries(args).filter(([k]) => k !== "confirmed").map(([k, v]) => {
+    if (Array.isArray(v)) return `${k}: ${v.slice(0, 5).map((x) => showValue(x)).join(" | ")}${v.length > 5 ? ` (+${v.length - 5} more)` : ""}`;
+    return `${k}: ${showValue(v)}`;
+  }).join("\n");
+}
+
+function bulkPrompt(tool: string, verb: string, paths: string[], destination?: string): string {
+  return `${tool} needs your approval. ${verb} ${paths.length} item(s)${destination ? ` into ${showValue(destination)}` : ""}.\n` +
+    paths.slice(0, 5).map((p) => `- ${showValue(p)}`).join("\n") + (paths.length > 5 ? `\n(+${paths.length - 5} more)` : "");
+}
+
+// The SDK's prompts/get schema types arguments as string-only, and a violation surfaces as -32603.
+// Accept any JSON value here so getPromptText can reject it as InvalidParams (-32602).
+const GetPromptLooseSchema = GetPromptRequestSchema.extend({
+  params: GetPromptRequestSchema.shape.params.extend({ arguments: CallToolRequestSchema.shape.params.shape.arguments }),
+});
+
+async function elicitApproval(server: Server, message: string, signal?: AbortSignal): Promise<boolean> {
+  try {
+    const res = await server.elicitInput(
+      {
+        message,
+        requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Approve this action", default: false } }, required: ["approve"] },
+      },
+      { timeout: 120_000, signal },
+    );
+    return res.action === "accept" && res.content?.approve === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function main() {
   const drive = new DriveService();
   const tier = resolveTier(process.env.PROTON_DRIVE_TOOL_TIER); // read once at startup
   const activeDefs = tier === "core" ? TOOL_DEFS.filter((t) => CORE_TOOL_NAMES.has(t.name)) : TOOL_DEFS;
 
+  // A looping model must not be able to spam the human: after this many declined/cancelled
+  // prompts within a minute, refuse without prompting until the window clears.
+  const declinedAt: number[] = [];
+  const MAX_DECLINED_PER_MINUTE = 5;
+  const canElicit = () => !!server.getClientCapabilities()?.elicitation?.form;
+  // Returns true only when the human approved. Never prompts when the client cannot, or when over budget.
+  const askApproval = async (message: string): Promise<boolean> => {
+    const now = Date.now();
+    while (declinedAt.length && now - declinedAt[0] > 60_000) declinedAt.shift();
+    if (declinedAt.length >= MAX_DECLINED_PER_MINUTE) return false;
+    const approved = await elicitApproval(server, message, callContext.getStore()?.signal);
+    if (!approved) declinedAt.push(now);
+    return approved;
+  };
+
   const server = new Server(
     { name: "proton-drive-mcp", version: VERSION },
-    { capabilities: { tools: {} } }
+    { capabilities: { tools: {}, prompts: {} } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -955,12 +1206,35 @@ export async function main() {
       description: t.description,
       inputSchema: t.inputSchema,
       annotations: t.annotations,
+      ...(t.title ? { title: t.title } : {}),
+      ...(LARGE_RESULT_TOOLS.has(t.name) ? { _meta: { "anthropic/maxResultSizeChars": 100000 } } : {}),
     })),
   }));
 
+  // A prompt is offered only when every tool it tells the model to call is in the active tier.
+  const activeToolNames = new Set(activeDefs.map((t) => t.name));
+  const activePrompts = PROMPTS.filter((p) => p.requires.every((r) => activeToolNames.has(r)));
+
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+    prompts: activePrompts.map(({ requires: _requires, ...p }) => ({ ...p, arguments: [...p.arguments] })),
+  }));
+
+  server.setRequestHandler(GetPromptLooseSchema, async (req) => {
+    const { name, arguments: args = {} } = req.params;
+    let text: string | undefined;
+    try {
+      text = activePrompts.some((p) => p.name === name) ? getPromptText(name, args) : undefined;
+    } catch (err) {
+      throw new McpError(ErrorCode.InvalidParams, err instanceof Error ? err.message : String(err));
+    }
+    if (text === undefined) throw new McpError(ErrorCode.InvalidParams, `Unknown prompt: ${name}`);
+    const def = PROMPTS.find((p) => p.name === name);
+    return { description: def?.description, messages: [{ role: "user" as const, content: { type: "text" as const, text } }] };
+  });
+
   const handleCall = async (req: { params: { name: string; arguments?: Record<string, unknown> } }): Promise<ToolResult> => {
     const { name, arguments: args = {} } = req.params;
-    const a = args as Record<string, unknown>;
+    let a = args as Record<string, unknown>;
 
     const def = TOOL_DEFS.find((t) => t.name === name);
     // A client may remember a name from a fuller tools/list; refuse before any CLI call.
@@ -969,7 +1243,13 @@ export async function main() {
     }
     if (def) {
       const problem = checkArgs(def, a);
-      if (problem) return fail(problem);
+      if (problem) {
+        // `confirmed` is schema-required on the destructive tools. For a client that can ask the human, a missing
+        // `confirmed` must still reach the gate (which prompts); any other validation failure stays an error.
+        const asConfirmFalse = { ...a, confirmed: false };
+        if (a.confirmed !== undefined && a.confirmed !== null || !canElicit() || checkArgs(def, asConfirmFalse)) return fail(problem);
+        a = asConfirmFalse;
+      }
     }
 
     try {
@@ -978,8 +1258,7 @@ export async function main() {
           return ok(await drive.authStatus());
 
         case "drive_auth_logout": {
-          const gate = needConfirm(a, "drive_auth_logout", "ends the stored Proton Drive session for every client on this machine.");
-          if (gate) return gate;
+          needConfirm(a, "drive_auth_logout", "ends the stored Proton Drive session for every client on this machine.");
           await drive.authLogout();
           return ok({ message: "Logged out successfully." });
         }
@@ -989,11 +1268,18 @@ export async function main() {
 
         case "drive_list": {
           const listPath = validateRemotePath(a.path);
-          return ok({ path: listPath, ...paginate(await drive.list(listPath), a, PAGE_DEFAULTS.drive_list) });
+          const listType = a.type === "file" || a.type === "folder" ? a.type : undefined;
+          return ok({ path: listPath, ...paginate(await drive.list(listPath, { type: listType }), a, PAGE_DEFAULTS.drive_list) });
         }
 
         case "drive_info":
           return ok(await drive.info(validateRemotePath(a.path), a.verbose === true));
+
+        case "drive_tree":
+          return ok(await driveTree(drive, a));
+
+        case "drive_search":
+          return ok(await driveSearch(drive, a));
 
         case "drive_mkdir": {
           const mkdirPath = validateRemotePath(a.path);
@@ -1011,10 +1297,10 @@ export async function main() {
             return fail(`folderConflictStrategy must be skip, merge, rename, or replace`);
           }
           if ((fcs === "replace" || dcs2 === "replace") && a.confirmed !== true) {
-            return fail("drive_upload with strategy 'replace' trashes the existing remote item. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
+            throw new NeedsConfirmationError("drive_upload with strategy 'replace' trashes the existing remote item. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
           const uploadResult = await drive.upload(
-            validateLocalPath(a.localPath),
+            validateLocalPath(a.localPath, { scan: true }),
             validateRemotePath(a.remotePath),
             fcs as FileConflictStrategy,
             dcs2 as FolderConflictStrategy
@@ -1035,7 +1321,7 @@ export async function main() {
             return fail(`folderConflictStrategy must be skip, merge, rename, or remove`);
           }
           if ((fdcs === "remove" || fodcs === "remove") && a.confirmed !== true) {
-            return fail("drive_download with strategy 'remove' deletes the existing LOCAL file or folder before downloading. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
+            throw new NeedsConfirmationError("drive_download with strategy 'remove' deletes the existing LOCAL file or folder before downloading. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
           const downloadResult = await drive.download(
             validateRemotePath(a.remotePath),
@@ -1065,13 +1351,38 @@ export async function main() {
 
         case "drive_delete": {
           if (a.confirmed !== true) {
-            return fail("drive_delete requires confirmed=true. Ask the user to confirm before deleting.");
+            throw new NeedsConfirmationError("drive_delete requires confirmed=true. Ask the user to confirm before deleting.");
           }
           const deletePath = a.path === undefined ? undefined : validateRemotePath(a.path);
           const deleteUid = a.uid ? validateFlagValue(a.uid as string, "uid") : undefined;
           await drive.delete(deletePath, deleteUid);
           return ok({ message: `Deleted: ${deletePath ?? `uid ${deleteUid}`}` });
         }
+
+        case "drive_usage":
+          return ok(await driveUsage(drive, {
+            path: a.path === undefined ? "/my-files" : validateRemotePath(a.path),
+            top: a.top as number | undefined,
+            olderThanDays: a.olderThanDays as number | undefined,
+            refresh: a.refresh === true,
+          }));
+
+        case "drive_find_duplicates":
+          return ok(await driveFindDuplicates(drive, {
+            path: a.path === undefined ? "/my-files" : validateRemotePath(a.path),
+            minSize: a.minSize as number | undefined,
+            verify: a.verify === true,
+            maxVerifyBytes: a.maxVerifyBytes as number | undefined,
+            maxVerifyTotalBytes: a.maxVerifyTotalBytes as number | undefined,
+            limit: a.limit as number | undefined,
+            refresh: a.refresh === true,
+          }));
+
+        case "drive_sharing_audit":
+          return ok(await driveSharingAudit(drive, {
+            path: a.path === undefined ? "/my-files" : validateRemotePath(a.path),
+            refresh: a.refresh === true,
+          }));
 
         case "drive_list_trash": {
           const trashed = await drive.listTrash();
@@ -1083,8 +1394,7 @@ export async function main() {
           return ok(await drive.shareStatus(validateRemotePath(a.path)));
 
         case "drive_share_invite": {
-          const inviteGate = needConfirm(a, "drive_share_invite", "immediately emails the invitee and grants them access.");
-          if (inviteGate) return inviteGate;
+          needConfirm(a, "drive_share_invite", "immediately emails the invitee and grants them access.");
           const email = validateEmail(a.email);
           if (typeof a.role !== "string") {
             return fail("role must be a string: viewer, editor, or admin");
@@ -1105,8 +1415,7 @@ export async function main() {
 
         case "drive_share_revoke":
         {
-          const revokeGate = needConfirm(a, "drive_share_revoke", "removes a person's access.");
-          if (revokeGate) return revokeGate;
+          needConfirm(a, "drive_share_revoke", "removes a person's access.");
           const revokeEmail = validateEmail(a.email);
           await drive.shareRevoke(validateRemotePath(a.path), revokeEmail);
           return ok({ message: `Revoked access for ${revokeEmail}.` });
@@ -1118,6 +1427,48 @@ export async function main() {
           return ok({ message: `Moved to trash: ${trashPath}` });
         }
 
+        case "drive_sync_plan": {
+          const direction = a.direction === undefined ? undefined : String(a.direction);
+          if (direction !== undefined && !["up", "down", "both"].includes(direction)) return fail("direction must be up, down or both");
+          const compare = a.compare === undefined ? undefined : String(a.compare);
+          if (compare !== undefined && !["size-mtime", "sha1"].includes(compare)) return fail("compare must be size-mtime or sha1");
+          if (a.ignore !== undefined && (!Array.isArray(a.ignore) || a.ignore.some((g) => typeof g !== "string"))) return fail("ignore must be an array of strings");
+          return ok(await syncPlan(drive, {
+            localPath: a.localPath as string, drivePath: a.drivePath as string,
+            direction: direction as Direction | undefined, compare: compare as Compare | undefined,
+            ignore: a.ignore as string[] | undefined, limit: typeof a.limit === "number" ? a.limit : undefined,
+          }));
+        }
+
+        case "drive_bulk_move": {
+          const sources = validateRemotePathList(a.sources, "sources");
+          const destFolder = validateRemotePath(a.destinationFolder);
+          const movePlan = planBulkMove(sources, destFolder, await loadListing(drive, foldersToList(sources, destFolder)));
+          if (a.confirmed !== true) {
+            return ok({ applied: false, ...movePlan, next: movePlan.problems.length ? "Fix problems first." : "Get user approval, then confirmed=true." });
+          }
+          if (movePlan.problems.length) return fail(`drive_bulk_move not applied, nothing moved: ${JSON.stringify(movePlan.problems)}`);
+          if (canElicit() && !(await askApproval(bulkPrompt("drive_bulk_move", "Move", sources, destFolder)))) {
+            return fail("drive_bulk_move not applied, nothing moved: the user did not approve.");
+          }
+          try { await drive.bulkMove(sources, destFolder); } finally { invalidatePath(destFolder); sources.forEach(invalidatePath); }
+          return ok({ applied: true, moved: movePlan.plan.length, plan: movePlan.plan });
+        }
+
+        case "drive_bulk_trash": {
+          const trashPaths = validateRemotePathList(a.paths, "paths");
+          const trashPlan = planBulkTrash(trashPaths, await loadListing(drive, foldersToList(trashPaths)));
+          if (a.confirmed !== true) {
+            return ok({ applied: false, ...trashPlan, next: trashPlan.problems.length ? "Fix problems first." : "Get user approval, then confirmed=true." });
+          }
+          if (trashPlan.problems.length) return fail(`drive_bulk_trash not applied, nothing trashed: ${JSON.stringify(trashPlan.problems)}`);
+          if (canElicit() && !(await askApproval(bulkPrompt("drive_bulk_trash", "Trash", trashPaths)))) {
+            return fail("drive_bulk_trash not applied, nothing trashed: the user did not approve.");
+          }
+          try { await drive.bulkTrash(trashPaths); } finally { trashPaths.forEach(invalidatePath); }
+          return ok({ applied: true, trashed: trashPlan.plan.length, plan: trashPlan.plan });
+        }
+
         case "drive_restore": {
           const restorePath = a.path === undefined ? undefined : validateRemotePath(a.path);
           const restoreUid = a.uid ? validateFlagValue(a.uid as string, "uid") : undefined;
@@ -1127,7 +1478,7 @@ export async function main() {
 
         case "drive_empty_trash":
           if (a.confirmed !== true) {
-            return fail(
+            throw new NeedsConfirmationError(
               "drive_empty_trash requires confirmed=true. " +
               "Use drive_list_trash first to show the user what will be deleted, then ask for confirmation."
             );
@@ -1155,24 +1506,21 @@ export async function main() {
 
         case "drive_invitation_reject": {
           if (typeof a.uid !== "string" || !a.uid) return fail("uid must be a non-empty string");
-          const rejectGate = needConfirm(a, "drive_invitation_reject", "declines the invitation permanently.");
-          if (rejectGate) return rejectGate;
+          needConfirm(a, "drive_invitation_reject", "declines the invitation permanently.");
           const rejectUid = validateFlagValue(a.uid, "uid");
           await drive.invitationReject(rejectUid);
           return ok({ message: "Invitation rejected." });
         }
 
         case "drive_share_leave": {
-          const leaveGate = needConfirm(a, "drive_share_leave", "removes your own access to a shared folder.");
-          if (leaveGate) return leaveGate;
+          needConfirm(a, "drive_share_leave", "removes your own access to a shared folder.");
           const leavePath = validateRemotePath(a.path);
           await drive.shareLeave(leavePath);
           return ok({ message: `Left shared folder: ${leavePath}` });
         }
 
         case "drive_share_set_url": {
-          const setUrlGate = needConfirm(a, "drive_share_set_url", "creates or replaces a PUBLIC link that anyone with the URL can open.");
-          if (setUrlGate) return setUrlGate;
+          needConfirm(a, "drive_share_set_url", "creates or replaces a PUBLIC link that anyone with the URL can open.");
           const setUrlPath = validateRemotePath(a.path);
           const role = typeof a.role === "string" ? a.role : "viewer";
           if (!["viewer", "editor"].includes(role)) return fail("role must be viewer or editor");
@@ -1183,8 +1531,7 @@ export async function main() {
         }
 
         case "drive_share_remove_url": {
-          const removeUrlGate = needConfirm(a, "drive_share_remove_url", "disables the public link.");
-          if (removeUrlGate) return removeUrlGate;
+          needConfirm(a, "drive_share_remove_url", "disables the public link.");
           const removeUrlPath = validateRemotePath(a.path);
           await drive.shareRemoveUrl(removeUrlPath);
           return ok({ message: `Public link removed: ${removeUrlPath}` });
@@ -1192,7 +1539,7 @@ export async function main() {
 
         case "drive_share_remove_all": {
           if (a.confirmed !== true) {
-            return fail("drive_share_remove_all requires confirmed=true. Use drive_share_status first to show the user who has access.");
+            throw new NeedsConfirmationError("drive_share_remove_all requires confirmed=true. Use drive_share_status first to show the user who has access.");
           }
           const removeAllPath = validateRemotePath(a.path);
           const removeAll = await drive.shareRemoveAll(removeAllPath);
@@ -1221,7 +1568,7 @@ export async function main() {
         }
 
         case "photos_delete_album": {
-          if (a.confirmed !== true) return fail("photos_delete_album requires confirmed=true. Show the user the album name and photo count first.");
+          if (a.confirmed !== true) throw new NeedsConfirmationError("photos_delete_album requires confirmed=true. Show the user the album name and photo count first.");
           const albumDelPath = validateRemotePath(a.albumPath);
           if (!albumDelPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
           await drive.deleteAlbum(albumDelPath, a.force === true, a.save === true);
@@ -1244,8 +1591,7 @@ export async function main() {
         }
 
         case "photos_remove_from_album": {
-          const removePhotoGate = needConfirm(a, "photos_remove_from_album", "removes a photo from the album.");
-          if (removePhotoGate) return removePhotoGate;
+          needConfirm(a, "photos_remove_from_album", "removes a photo from the album.");
           const remAlbumPath = validateRemotePath(a.albumPath);
           const remPhotoPath = validateRemotePath(a.photoPath);
           if (!remAlbumPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
@@ -1264,7 +1610,7 @@ export async function main() {
           const pdcs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
           if (!["skip", "rename", "remove"].includes(pdcs)) return fail("conflictStrategy must be skip, rename, or remove");
           if (pdcs === "remove" && a.confirmed !== true) {
-            return fail("photos_download with conflictStrategy 'remove' deletes the existing LOCAL file before downloading. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
+            throw new NeedsConfirmationError("photos_download with conflictStrategy 'remove' deletes the existing LOCAL file before downloading. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
           const downloadSummary = await drive.photoDownload(downloadPaths, downloadFolder, pdcs as PhotoDownloadConflictStrategy);
           if (downloadSummary.failedItems > 0) {
@@ -1275,7 +1621,7 @@ export async function main() {
 
         case "photos_upload": {
           if (!Array.isArray(a.localPaths) || a.localPaths.length === 0) return fail("localPaths must be a non-empty array of strings");
-          const uploadPaths = a.localPaths.map((p) => validateLocalPath(p));
+          const uploadPaths = a.localPaths.map((p) => validateLocalPath(p, { scan: true }));
           const pucs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
           if (!["skip", "rename"].includes(pucs)) return fail("conflictStrategy must be skip or rename");
           const uploadSummary = await drive.photoUpload(uploadPaths, pucs as PhotoUploadConflictStrategy);
@@ -1299,7 +1645,7 @@ export async function main() {
           if (typeof a.content !== "string") return fail("content must be a string");
           const writePath = validateRemotePath(a.path);
           if (a.confirmed !== true && (await syncFileExists(syncRoot, writePath))) {
-            return fail(`drive_write_file would overwrite the existing file ${writePath}. Ask the user to confirm, then call again with confirmed=true.`);
+            throw new NeedsConfirmationError(`drive_write_file would overwrite the existing file ${writePath}. Ask the user to confirm, then call again with confirmed=true.`);
           }
           await writeSyncFile(syncRoot, writePath, a.content);
           return ok({ message: `Written: ${writePath}` });
@@ -1320,7 +1666,15 @@ export async function main() {
     try {
       // The request's AbortSignal reaches the CLI child via AsyncLocalStorage, so
       // notifications/cancelled actually kills a running upload/download.
-      return await callContext.run({ signal: extra?.signal }, () => handleCall(req));
+      return await callContext.run({ signal: extra?.signal }, async () => {
+        const first = await handleCall(req);
+        // A gate refused with NeedsConfirmationError. If the client can ask the human directly,
+        // let the human (never the model) grant it; any failure keeps the refusal.
+        if (!confirmationRefusals.has(first) || !canElicit()) return first;
+        const reason = (first.content?.[0]?.text ?? "").replace(/\s*(Describe this to the user|Ask the user|Show the user|Use \w+ first).*$/s, "");
+        const asked = await askApproval(`${req.params.name} needs your approval. ${showValue(reason, 300, 100)}\n${describeArgs(req.params.arguments ?? {})}`);
+        return asked ? handleCall({ params: { ...req.params, arguments: { ...(req.params.arguments ?? {}), confirmed: true } } }) : first;
+      });
     } finally {
       inFlight--;
     }

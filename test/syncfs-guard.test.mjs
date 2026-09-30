@@ -2,7 +2,7 @@ import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, symlink, rm, stat } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
-import { join, delimiter } from "node:path";
+import { join, delimiter, dirname } from "node:path";
 
 import {
   resolveSyncPath,
@@ -262,6 +262,27 @@ describe("assertLocalPathAllowed", () => {
     assertLocalPathAllowed(join(home, ".ssh", "id_rsa"));
     assertLocalPathAllowed("/etc/hosts");
     assertLocalPathAllowed(join(base, ".env"));
+  });
+
+  it("scan mode rejects directories that CONTAIN protected locations; destinations are unaffected", async () => {
+    for (const p of ["/", dirname(home), home]) {
+      assert.throws(() => assertLocalPathAllowed(p, { scan: true }), /contains protected locations.*pick a subfolder/);
+      assertLocalPathAllowed(p); // write destination (download folder): still allowed
+    }
+    const fakeHome = join(base, "fakehome");
+    await mkdir(join(fakeHome, ".ssh"), { recursive: true });
+    await mkdir(join(fakeHome, "Documents"), { recursive: true });
+    const savedHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+    try {
+      assert.throws(() => assertLocalPathAllowed(fakeHome, { scan: true }), /contains protected locations/);
+      assertLocalPathAllowed(join(fakeHome, "Documents"), { scan: true });
+      assertLocalPathAllowed(join(fakeHome, "Documents", "a.txt"), { scan: true });
+      process.env.PROTON_DRIVE_ALLOW_SENSITIVE_PATHS = "1";
+      assertLocalPathAllowed(fakeHome, { scan: true });
+    } finally {
+      process.env.HOME = savedHome;
+    }
   });
 
   it("opt-out does not disable an explicit LOCAL_ROOT", async () => {
