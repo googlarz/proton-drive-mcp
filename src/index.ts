@@ -30,6 +30,7 @@ import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, 
 import { logger } from "./utils/logger.js";
 import { getSyncRoot, readSyncFile, writeSyncFile, syncFileExists } from "./utils/syncfs.js";
 import type { AlbumPhoto } from "./types/index.js";
+import { driveUsage, driveFindDuplicates, driveSharingAudit } from "./services/analytics.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version?: string };
@@ -867,6 +868,58 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  // Analytics (read-only; walk the tree once, cached)
+  {
+    name: "drive_usage",
+    description:
+      "Storage analytics for a subtree: totals, largest files/folders, extension and media-type breakdown, old files, trash stats. Sizes are summed file sizes, not the account quota. Walks the tree (cached); `complete` flags partial results.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Folder (default /my-files)." },
+        top: { type: "integer", minimum: 1, maximum: 50, description: "Rows per ranking (default 10)." },
+        olderThanDays: { type: "integer", minimum: 0, description: "Report files older than this many days." },
+        refresh: { type: "boolean", description: "Ignore the cached walk." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_find_duplicates",
+    description:
+      "Find likely duplicates: same claimed sha1, or same size+mediaType without sha1 (candidates only). verify=true downloads and sha256s them ('verified'). Reports wastedBytes and a suggested keeper; never deletes.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Folder (default /my-files)." },
+        minSize: { type: "integer", minimum: 0, description: "Min bytes (default 1024)." },
+        verify: { type: "boolean", description: "Download and hash candidates of the top groups." },
+        maxVerifyBytes: { type: "integer", minimum: 1, description: "Skip files larger than this (default 50000000)." },
+        limit: { type: "integer", minimum: 1, maximum: 200, description: "Max groups returned (default 20)." },
+        refresh: { type: "boolean", description: "Ignore the cached walk." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_sharing_audit",
+    description:
+      "Audit sharing under a path: public links (role, expiry, password; URL omitted), invitees, pending invitations, risk flags (public-link-no-expiry, public-link-editor, external-invitee = non-Proton address). Max 100 shared items.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Folder (default /my-files)." },
+        refresh: { type: "boolean", description: "Ignore the cached walk." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 // ---- Tool surface: derived from TOOLS so the literal stays readable ----------
@@ -1072,6 +1125,30 @@ export async function main() {
           await drive.delete(deletePath, deleteUid);
           return ok({ message: `Deleted: ${deletePath ?? `uid ${deleteUid}`}` });
         }
+
+        case "drive_usage":
+          return ok(await driveUsage(drive, {
+            path: a.path === undefined ? "/my-files" : validateRemotePath(a.path),
+            top: a.top as number | undefined,
+            olderThanDays: a.olderThanDays as number | undefined,
+            refresh: a.refresh === true,
+          }));
+
+        case "drive_find_duplicates":
+          return ok(await driveFindDuplicates(drive, {
+            path: a.path === undefined ? "/my-files" : validateRemotePath(a.path),
+            minSize: a.minSize as number | undefined,
+            verify: a.verify === true,
+            maxVerifyBytes: a.maxVerifyBytes as number | undefined,
+            limit: a.limit as number | undefined,
+            refresh: a.refresh === true,
+          }));
+
+        case "drive_sharing_audit":
+          return ok(await driveSharingAudit(drive, {
+            path: a.path === undefined ? "/my-files" : validateRemotePath(a.path),
+            refresh: a.refresh === true,
+          }));
 
         case "drive_list_trash": {
           const trashed = await drive.listTrash();

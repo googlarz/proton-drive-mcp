@@ -204,6 +204,18 @@
     {
       "name": "drive_write_file",
       "description": "Write text content to a file in the local Proton Drive sync folder (no Proton login needed — this only touches the local synced folder)."
+    },
+    {
+      "name": "drive_usage",
+      "description": "Storage analytics for a Proton Drive path: totals, largest files and folders, breakdowns, old files and trash."
+    },
+    {
+      "name": "drive_find_duplicates",
+      "description": "Find likely duplicate files in Proton Drive (claimed sha1, same size, or hash-verified); suggests a keeper, never deletes."
+    },
+    {
+      "name": "drive_sharing_audit",
+      "description": "Audit public links, invitees and risk flags across shared items in Proton Drive."
     }
   ],
   "compatibility": {

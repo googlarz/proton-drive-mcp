@@ -23,6 +23,7 @@ export interface ShareStatus {
   // Whether the public link has a password (never the password itself) / expiry.
   sharePasswordProtected?: boolean;
   shareUrlExpiresAt?: string;
+  shareUrlRole?: ShareRole;
   editorsCanShare?: boolean;
 }
 

@@ -467,6 +467,7 @@ export class DriveService {
       // Only a boolean — never echo the link password itself.
       sharePasswordProtected: urlAccess ? Boolean(password) : undefined,
       shareUrlExpiresAt: typeof expiresAt === "string" ? expiresAt : undefined,
+      shareUrlRole: VALID_ROLES.has(String(urlAccess?.role)) ? (String(urlAccess?.role) as ShareRole) : undefined,
       editorsCanShare: typeof r.editorsCanShare === "boolean" ? r.editorsCanShare : undefined,
     };
   }

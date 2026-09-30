@@ -30,7 +30,7 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
 - **Proton Photos album management** — list albums, create/delete albums, add and remove photos
-- **Full CLI** — same 38 operations, scriptable and pipeable, works in cron and shell scripts
+- **Full CLI** — same 41 operations, scriptable and pipeable, works in cron and shell scripts
 - **100% CLI coverage** — every scriptable Proton Drive CLI command has a matching tool (verified against the CLI's own source; `auth login` is the one command excluded, since it's an interactive browser flow)
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
 - **Shell injection safe** — all CLI calls use `execFile` with discrete argument arrays, never string interpolation
@@ -229,6 +229,9 @@ proton-drive-cli restore /my-files/old-draft.pdf       # restore from trash
 proton-drive-cli trash empty --confirm                  # permanently delete all trashed items
 ```
 
+### Analytics
+`drive_usage` · `drive_find_duplicates` · `drive_sharing_audit`
+
 ### Photos
 
 ```bash
@@ -306,6 +309,9 @@ proton-drive-cli share status /my-files/Projects
 | `drive_delete` | Permanently delete an item already in trash ⚠️ | `path`, `confirmed: true` |
 | `drive_list_trash` | List items currently in trash (paginated, default 100; includes `uid` — names are not unique in trash) | `limit?`, `offset?` |
 | `drive_share_status` | Get sharing members and URL | `path` |
+| `drive_usage` | Storage analytics for a subtree: totals, largest files/folders, extension and media-type breakdown, old files, trash stats (sum of file sizes, not the account quota) | `path?`, `top?`, `olderThanDays?`, `refresh?` |
+| `drive_find_duplicates` | Likely duplicate groups (claimed sha1 / same size; `verify` downloads and sha256s candidates), wasted bytes, suggested keeper — never deletes | `path?`, `minSize?`, `verify?`, `maxVerifyBytes?`, `limit?`, `refresh?` |
+| `drive_sharing_audit` | Public links (no URL), invitees, pending invitations and risk flags for shared items (max 100) | `path?`, `refresh?` |
 | `drive_share_invite` | Invite a user (sends an email) ⚠️ | `path`, `email`, `role` (viewer/editor/admin), `message?`, `confirmed: true` |
 | `drive_share_revoke` | Revoke one person's access (fails if not a member) ⚠️ | `path`, `email`, `confirmed: true` |
 | `drive_share_remove_all` | Remove every member + pending invitation at once ⚠️ | `path`, `confirmed: true` |
@@ -404,7 +410,7 @@ Every tool group was live-tested on 2026-09-28 against a real Proton account, **
 | `PROTON_DRIVE_ALLOW_SENSITIVE_PATHS` | Optional | Set to `1` to disable the built-in credential-location denylist (not recommended). |
 | `CLAUDE_DESKTOP_CONFIG` | Optional | Path of the Claude Desktop config that `doctor` and `setup-claude-desktop` read/write instead of the per-OS default. |
 | `PROTON_DRIVE_RETRY_BASE_MS` | Optional | Test hook: base backoff in ms for retrying read-only calls (default 250). |
-| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 38 tools) or `core` (16 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
+| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 41 tools) or `core` (16 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
 
 ---
 

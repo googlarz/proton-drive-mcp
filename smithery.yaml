@@ -50,6 +50,9 @@ tools:
   - photos_upload
   - drive_info
   - drive_rename
+  - drive_usage
+  - drive_find_duplicates
+  - drive_sharing_audit
 startCommand:
   type: stdio
   configSchema:
