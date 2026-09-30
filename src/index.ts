@@ -1288,7 +1288,7 @@ export async function main() {
             throw new NeedsConfirmationError("drive_upload with strategy 'replace' trashes the existing remote item. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
           const uploadResult = await drive.upload(
-            validateLocalPath(a.localPath),
+            validateLocalPath(a.localPath, { scan: true }),
             validateRemotePath(a.remotePath),
             fcs as FileConflictStrategy,
             dcs2 as FolderConflictStrategy
@@ -1609,7 +1609,7 @@ export async function main() {
 
         case "photos_upload": {
           if (!Array.isArray(a.localPaths) || a.localPaths.length === 0) return fail("localPaths must be a non-empty array of strings");
-          const uploadPaths = a.localPaths.map((p) => validateLocalPath(p));
+          const uploadPaths = a.localPaths.map((p) => validateLocalPath(p, { scan: true }));
           const pucs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
           if (!["skip", "rename"].includes(pucs)) return fail("conflictStrategy must be skip or rename");
           const uploadSummary = await drive.photoUpload(uploadPaths, pucs as PhotoUploadConflictStrategy);

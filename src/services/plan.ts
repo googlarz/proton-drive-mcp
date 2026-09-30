@@ -5,6 +5,7 @@ import { ROOT_PATHS, splitRemotePath, joinRemote, type DriveService } from "./dr
 import { walkTree, type WalkResult } from "./walk.js";
 import { globMatch } from "../utils/glob.js";
 import { validateLocalPath, validateRemotePath } from "../utils/validation.js";
+import { isProtectedEntry } from "../utils/localguard.js";
 
 // ---- drive_sync_plan: read-only local <-> Drive diff ----------------------------
 
@@ -13,7 +14,7 @@ export const MAX_LOCAL_ENTRIES = 50_000;
 const MTIME_TOLERANCE_MS = 2000; // Drive stores the claimed mtime; filesystems round differently
 
 export interface LocalFile { path: string; size: number; mtimeMs: number }
-export interface LocalScan { files: LocalFile[]; scanned: number; symlinksSkipped: number; unreadable: number; truncated: boolean }
+export interface LocalScan { files: LocalFile[]; scanned: number; symlinksSkipped: number; unreadable: number; protectedSkipped: number; truncated: boolean }
 
 export type Compare = "size-mtime" | "sha1";
 export type Direction = "up" | "down" | "both";
@@ -37,7 +38,7 @@ export function makeIgnore(patterns: string[]): (relPath: string) => boolean {
 
 /** Bounded, symlink-safe local scan: symlinks are counted, never followed. */
 export function scanLocal(root: string, ignore: (rel: string) => boolean, maxEntries = MAX_LOCAL_ENTRIES): LocalScan {
-  const out: LocalScan = { files: [], scanned: 0, symlinksSkipped: 0, unreadable: 0, truncated: false };
+  const out: LocalScan = { files: [], scanned: 0, symlinksSkipped: 0, unreadable: 0, protectedSkipped: 0, truncated: false };
   const stack = [root];
   while (stack.length) {
     const dir = stack.pop() as string;
@@ -51,6 +52,7 @@ export function scanLocal(root: string, ignore: (rel: string) => boolean, maxEnt
       if (out.scanned >= maxEntries) { out.truncated = true; return out; }
       out.scanned++;
       if (e.isSymbolicLink()) { out.symlinksSkipped++; continue; }
+      if (isProtectedEntry(full, e.name)) { out.protectedSkipped++; continue; }
       if (e.isDirectory()) { stack.push(full); continue; }
       if (!e.isFile()) continue;
       try {
@@ -127,7 +129,7 @@ const sum = (xs: SyncPlanItem[], pick: (i: SyncPlanItem) => number | undefined) 
 
 /** Plan only; nothing is uploaded, downloaded or deleted. `walk` is injectable for tests. */
 export async function syncPlan(svc: DriveService, a: SyncPlanArgs, walk: typeof walkTree = walkTree) {
-  const localRoot = validateLocalPath(a.localPath); // same denylist / PROTON_DRIVE_LOCAL_ROOT rules as upload
+  const localRoot = validateLocalPath(a.localPath, { scan: true }); // same denylist / PROTON_DRIVE_LOCAL_ROOT rules as upload
   const driveRoot = validateRemotePath(a.drivePath);
   if (!lstatSync(localRoot).isDirectory()) throw new Error(`localPath is not a directory: ${localRoot}`);
   const direction = a.direction ?? "up";
@@ -154,7 +156,7 @@ export async function syncPlan(svc: DriveService, a: SyncPlanArgs, walk: typeof 
     complete: w.complete && !scan.truncated,
     driveWalkComplete: w.complete,
     skipped: cap(w.skipped),
-    local: { scanned: scan.scanned, symlinksSkipped: scan.symlinksSkipped, unreadable: scan.unreadable, truncated: scan.truncated, maxEntries: MAX_LOCAL_ENTRIES },
+    local: { scanned: scan.scanned, symlinksSkipped: scan.symlinksSkipped, unreadable: scan.unreadable, protectedSkipped: scan.protectedSkipped, truncated: scan.truncated, maxEntries: MAX_LOCAL_ENTRIES },
     note: "Plan only. onlyLocal = not on Drive, onlyDrive = not local; 'maybe changed' compares mtime (Drive claimed time) and can be a false positive." +
       (w.complete ? "" : " Drive walk incomplete: onlyLocal may include files that exist on Drive."),
   };

@@ -108,6 +108,26 @@ describe("scanLocal and syncPlan (real temp dir, injected walk)", () => {
     assert.equal(await sha1File(join(dir, "a.txt")), "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d");
   });
 
+  it("rejects parent directories of protected locations and prunes secret-named entries", async () => {
+    for (const localPath of ["/", "/Users", process.env.HOME]) {
+      await assert.rejects(syncPlan({}, { localPath, drivePath: "/my-files/p" }, async () => walk([])), /contains protected locations/);
+    }
+    const d = mkdtempSync(join(tmpdir(), "plan-prot-"));
+    try {
+      writeFileSync(join(d, "ok.txt"), "x");
+      writeFileSync(join(d, ".env"), "SECRET");
+      writeFileSync(join(d, "id_rsa"), "KEY");
+      writeFileSync(join(d, "cert.pem"), "KEY");
+      const s = scanLocal(d, () => false);
+      assert.deepEqual(s.files.map((f) => f.path), ["ok.txt"]);
+      assert.equal(s.protectedSkipped, 3);
+      const r = await syncPlan({}, { localPath: d, drivePath: "/my-files/p" }, async () => walk([]));
+      assert.equal(r.local.protectedSkipped, 3);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
   it("applies the local path guard like upload does", async () => {
     await assert.rejects(syncPlan({}, { localPath: join(process.env.HOME, ".ssh"), drivePath: "/my-files/p" }, async () => walk([])), /protected location/);
     await assert.rejects(syncPlan({}, { localPath: "relative/dir", drivePath: "/my-files/p" }, async () => walk([])), /absolute/);

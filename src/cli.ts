@@ -261,7 +261,7 @@ async function run() {
       const rawLocal = sub;
       if (!rawLocal) { console.error("Usage: upload <local> <remote> [--file-conflict X] [--folder-conflict X]"); process.exit(1); }
       let local: string;
-      try { local = validateLocalPath(rawLocal); }
+      try { local = validateLocalPath(rawLocal, { scan: true }); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
       const remote = requirePath(rest[0], "upload <local> <remote>");
       const fileConflictRaw = getFlag("--file-conflict") ?? "skip";
@@ -629,7 +629,7 @@ async function run() {
         if (positionals.length === 0) { console.error("Usage: photo upload <local>... [--conflict X]"); process.exit(1); return; }
         const localPaths: string[] = [];
         for (const p of positionals) {
-          try { localPaths.push(validateLocalPath(p)); }
+          try { localPaths.push(validateLocalPath(p, { scan: true })); }
           catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
         }
         if (!["skip", "rename"].includes(conflictRaw)) {

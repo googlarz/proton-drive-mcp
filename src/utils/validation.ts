@@ -91,10 +91,11 @@ export function validateFlagValue(value: unknown, label: string): string {
   return v;
 }
 
-export function validateLocalPath(path: unknown): string {
+/** `scan: true` for paths that are read recursively (upload sources, sync_plan); omit for write destinations. */
+export function validateLocalPath(path: unknown, opts: { scan?: boolean } = {}): string {
   const p = validatePath(path);
   if (!isAbsolute(p)) throw new Error(`local path must be absolute: ${p}`);
-  assertLocalPathAllowed(p);
+  assertLocalPathAllowed(p, opts);
   return p;
 }
 
