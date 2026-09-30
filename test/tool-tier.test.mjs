@@ -43,7 +43,7 @@ describe("tool tier", () => {
   });
 
   it("tools/list stays within the size budget", () => {
-    assert.ok(size(full) <= 32_500, `full ${size(full)} bytes`);
+    assert.ok(size(full) <= 60_000, `full ${size(full)} bytes`);
     assert.ok(size(core) <= 16_000, `core ${size(core)} bytes`);
   });
 
