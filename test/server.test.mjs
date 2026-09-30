@@ -44,7 +44,7 @@ describe("initialize and tools/list", () => {
   let tools;
   before(async () => { tools = await s.c.listTools(); });
 
-  it("advertises exactly 40 tools", () => assert.equal(tools.length, 40));
+  it("advertises exactly 46 tools", () => assert.equal(tools.length, 46));
 
   it("has unique tool names", () => {
     assert.equal(new Set(tools.map((t) => t.name)).size, tools.length);
@@ -572,7 +572,7 @@ describe("CLI output handling and error sanitization", () => {
       const r = await c.call("drive_list", { path: "/my-files" });
       assert.equal(r.isError, true);
       assert.match(r.text, /not found/i);
-      assert.equal((await c.listTools()).length, 40);
+      assert.equal((await c.listTools()).length, 46);
     } finally { await c.close(); sb.cleanup(); }
   });
 });

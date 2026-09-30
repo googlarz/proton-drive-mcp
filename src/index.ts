@@ -964,7 +964,7 @@ const TOOLS = [
     name: "drive_bulk_trash",
     description:
       "Trash up to 200 items (drive_restore recovers). Without confirmed: plan and problems only. With confirmed=true: trashes only if no problems.",
-    annotations: { destructiveHint: true },
+    annotations: { destructiveHint: false, idempotentHint: true },
     inputSchema: {
       type: "object",
       properties: {
@@ -1060,6 +1060,9 @@ const ANNOTATION_OVERRIDES: Record<string, Record<string, boolean>> = {
   drive_read_file: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 };
 const TOOL_TITLES: Record<string, string> = {
+  drive_tree: "Show folder tree", drive_search: "Search files", drive_usage: "Storage usage report",
+  drive_find_duplicates: "Find duplicate files", drive_sharing_audit: "Audit sharing",
+  drive_sync_plan: "Plan local/Drive sync", drive_bulk_move: "Move many items", drive_bulk_trash: "Trash many items",
   drive_auth_status: "Check sign-in status", drive_auth_logout: "Sign out", drive_version: "CLI version",
   drive_list: "List folder", drive_info: "Get item info", drive_upload: "Upload to Drive", drive_download: "Download from Drive",
   drive_mkdir: "Create folder", drive_rename: "Rename item", drive_move: "Move item", drive_delete: "Delete permanently",

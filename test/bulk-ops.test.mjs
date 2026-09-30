@@ -132,7 +132,7 @@ describe("stdio gates (fake CLI; every call answers the same listing)", () => {
       assert.ok(t.drive_bulk_move.inputSchema.properties.confirmed);
       assert.ok(t.drive_bulk_trash.inputSchema.properties.confirmed);
       assert.equal(t.drive_bulk_move.annotations.destructiveHint, false);
-      assert.equal(t.drive_bulk_trash.annotations.destructiveHint, true);
+      assert.equal(t.drive_bulk_trash.annotations.destructiveHint, false); // reversible, like drive_trash
       assert.equal(t.drive_sync_plan.annotations.readOnlyHint, true);
       assert.equal(t.drive_sync_plan.inputSchema.properties.confirmed, undefined);
     });

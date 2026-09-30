@@ -25,7 +25,7 @@ describe("tool tier", () => {
     core = await withServer({ PROTON_DRIVE_TOOL_TIER: "core" }, (c) => c.listTools());
   });
 
-  it("default lists all 40 tools", () => assert.equal(full.length, 40));
+  it("default lists all 46 tools", () => assert.equal(full.length, 46));
 
   it("core lists exactly the curated set, all present in full", () => {
     assert.deepEqual(core.map((t) => t.name).sort(), [...CORE].sort());
@@ -43,8 +43,8 @@ describe("tool tier", () => {
   });
 
   it("tools/list stays within the size budget", () => {
-    assert.ok(size(full) <= 60_000, `full ${size(full)} bytes`);
-    assert.ok(size(core) <= 16_000, `core ${size(core)} bytes`);
+    assert.ok(size(full) <= 39_500, `full ${size(full)} bytes`);
+    assert.ok(size(core) <= 17_500, `core ${size(core)} bytes`);
   });
 
   it("core refuses a hidden tool at call time without touching the CLI", async () => {
@@ -79,7 +79,7 @@ describe("tool tier", () => {
     sb.cleanup();
     const lines = out.split("\n").filter(Boolean).map((l) => JSON.parse(l)); // throws on any non-JSON line
     assert.ok(lines.every((m) => m.jsonrpc === "2.0"));
-    assert.equal(lines.find((m) => m.id === 2).result.tools.length, 40);
+    assert.equal(lines.find((m) => m.id === 2).result.tools.length, 46);
     assert.equal((err.match(/PROTON_DRIVE_TOOL_TIER/g) ?? []).length, 1);
   });
 });
