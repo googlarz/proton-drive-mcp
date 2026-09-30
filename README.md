@@ -280,6 +280,9 @@ proton-drive-cli share status /my-files/Projects
 ### Copy
 `drive_copy`
 
+### Plan & bulk
+`drive_sync_plan` · `drive_bulk_move` · `drive_bulk_trash`
+
 ### Invitations
 `drive_list_invitations` · `drive_invitation_accept` · `drive_invitation_reject` · `drive_share_leave`
 
@@ -312,6 +315,9 @@ proton-drive-cli share status /my-files/Projects
 | `drive_share_set_url` | Create/replace a public share link ⚠️ (re-running without `password`/`expiration` removes them; expiry max ~90 days) | `path`, `role?` (viewer/editor), `password?`, `expiration?`, `confirmed: true` |
 | `drive_share_remove_url` | Remove the public share link ⚠️ | `path`, `confirmed: true` |
 | `drive_trash` | Move to trash | `path` |
+| `drive_sync_plan` | Read-only diff of a local folder vs a Drive folder (nothing transferred) | `localPath`, `drivePath`, `direction?` (up/down/both), `ignore?`, `compare?` (size-mtime/sha1), `limit?` |
+| `drive_bulk_move` | Move up to 200 items into an existing folder; without `confirmed` returns the plan and problems only | `sources`, `destinationFolder`, `confirmed?` (**required to apply**) |
+| `drive_bulk_trash` | Trash up to 200 items (recoverable); without `confirmed` returns the plan and problems only | `paths`, `confirmed?` (**required to apply**) |
 | `drive_restore` | Restore from trash | `path` |
 | `drive_empty_trash` | Permanently delete all trash ⚠️ | `confirmed: true` |
 | `drive_read_file` | Read text file from local sync folder | `path` |

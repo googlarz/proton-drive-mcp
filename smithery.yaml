@@ -26,6 +26,9 @@ tools:
   - drive_share_invite
   - drive_share_revoke
   - drive_trash
+  - drive_sync_plan
+  - drive_bulk_move
+  - drive_bulk_trash
   - drive_restore
   - drive_empty_trash
   - drive_read_file
