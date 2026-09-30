@@ -21,9 +21,10 @@ import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, Drive
 import { checkCliAvailable } from "./utils/subprocess.js";
 import { runDoctor, formatDoctor } from "./utils/doctor.js";
 import { buildEntry, defaultConfigPath, isDirectory, resolveDriveCli, writeEntry, SERVER_KEY } from "./utils/claudeConfig.js";
+import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type Direction, type Compare } from "./services/plan.js";
+import { invalidatePath } from "./services/walk.js";
 import { resolve } from "node:path";
 import { driveSearch, driveTree } from "./services/find.js";
-import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 
 const drive = new DriveService();
 const args = process.argv.slice(2);
@@ -64,6 +65,10 @@ Commands:
   share leave <path>                       Leave a folder shared with you
   copy <src> <dst-parent-folder> [--name N]  Copy file/folder into a folder (optionally under a new name)
   trash <path>                             Move to trash
+  sync-plan <local> <remote> [--direction up|down|both] [--compare size-mtime|sha1] [--ignore g1,g2] [--limit N]
+                                           Read-only diff of a local folder vs a Drive folder (nothing transferred)
+  bulk-move <dst-folder> <src>... [--confirm]  Move many items into an existing folder; without --confirm prints the plan only
+  bulk-trash <path>... [--confirm]         Trash many items; without --confirm prints the plan only
   trash list                               List trash contents
   trash empty --confirm                    Permanently delete all trash
   restore <path>|--uid <uid>               Restore from trash (uid from 'trash list')
@@ -410,6 +415,47 @@ async function run() {
         process.exit(1);
       }
       break;
+
+    case "sync-plan": {
+      const direction = getFlag("--direction"), compare = getFlag("--compare"), ignore = getFlag("--ignore"), limit = getFlag("--limit");
+      if (direction !== undefined && !["up", "down", "both"].includes(direction)) { console.error("--direction must be up, down or both"); process.exit(1); }
+      if (compare !== undefined && !["size-mtime", "sha1"].includes(compare)) { console.error("--compare must be size-mtime or sha1"); process.exit(1); }
+      if (!sub || !rest[0]) { console.error("Usage: sync-plan <local> <remote> [--direction X] [--compare X] [--ignore g1,g2] [--limit N]"); process.exit(1); }
+      print(await syncPlan(drive, {
+        localPath: sub, drivePath: rest[0], direction: direction as Direction | undefined, compare: compare as Compare | undefined,
+        ignore: ignore?.split(","), limit: limit !== undefined ? Number(limit) : undefined,
+      }));
+      break;
+    }
+
+    case "bulk-move": {
+      const dst = requirePath(sub, "bulk-move <dst-folder> <src>... [--confirm]");
+      const srcs = validateRemotePathList(rest.filter((r) => !r.startsWith("--")), "sources");
+      const plan = planBulkMove(srcs, dst, await loadListing(drive, foldersToList(srcs, dst)));
+      if (!args.includes("--confirm") || plan.problems.length) {
+        print({ applied: false, ...plan });
+        if (plan.problems.length) process.exit(1);
+        console.error("Plan only. Pass --confirm to apply.");
+        break;
+      }
+      try { await drive.bulkMove(srcs, dst); } finally { invalidatePath(dst); srcs.forEach(invalidatePath); }
+      console.log(`Moved ${srcs.length} item(s) to ${dst}.`);
+      break;
+    }
+
+    case "bulk-trash": {
+      const paths = validateRemotePathList([sub, ...rest].filter((r) => r !== undefined && !r.startsWith("--")), "paths");
+      const plan = planBulkTrash(paths, await loadListing(drive, foldersToList(paths)));
+      if (!args.includes("--confirm") || plan.problems.length) {
+        print({ applied: false, ...plan });
+        if (plan.problems.length) process.exit(1);
+        console.error("Plan only. Pass --confirm to apply.");
+        break;
+      }
+      try { await drive.bulkTrash(paths); } finally { paths.forEach(invalidatePath); }
+      console.log(`Moved ${paths.length} item(s) to trash.`);
+      break;
+    }
 
     case "restore": {
       const restoreUid = getFlag("--uid");

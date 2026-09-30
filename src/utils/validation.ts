@@ -35,6 +35,13 @@ export function validateRemotePath(path: unknown): string {
   return p.length > 1 ? p.replace(/\/+$/, "") || "/" : p;
 }
 
+// Explicit path list for bulk tools: non-empty, capped, every entry a valid remote path.
+export function validateRemotePathList(value: unknown, label: string, max = 200): string[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error(`${label} must be a non-empty array of paths`);
+  if (value.length > max) throw new Error(`${label} has ${value.length} paths; the limit is ${max} per call`);
+  return value.map((v) => validateRemotePath(v));
+}
+
 export function validateMessage(message: unknown): string {
   const m = asString(message, "message").trim();
   if (m.startsWith("-")) throw new Error(`message must not start with '-': ${m}`);

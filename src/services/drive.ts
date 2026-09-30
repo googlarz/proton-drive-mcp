@@ -62,13 +62,13 @@ function escapeNameForPath(name: string): string {
   return name.replace(/\//g, "\\/");
 }
 
-function unescapeName(name: string): string {
+export function unescapeName(name: string): string {
   return name.replace(/\\\//g, "/");
 }
 
 // dirname/basename that respect the "\/" escape: node's posix.basename would
 // split "/a/raw\/slash" into "slash", corrupting mkdir/move on such items.
-function splitRemotePath(p: string): { parent: string; name: string } {
+export function splitRemotePath(p: string): { parent: string; name: string } {
   for (let i = p.length - 1; i >= 0; i--) {
     if (p[i] === "/" && p[i - 1] !== "\\") {
       return { parent: i === 0 ? "/" : p.slice(0, i), name: p.slice(i + 1) };
@@ -77,7 +77,7 @@ function splitRemotePath(p: string): { parent: string; name: string } {
   return { parent: "/", name: p };
 }
 
-function joinRemote(parent: string, escapedName: string): string {
+export function joinRemote(parent: string, escapedName: string): string {
   return `${parent === "/" ? "" : parent}/${escapedName}`;
 }
 
@@ -122,7 +122,7 @@ function assertItemsOk(result: unknown, action: string): void {
 
 // Confirmed live: `sharing status /my-files` fails with "Error decrypting
 // session keys" — roots are not shareable nodes.
-const ROOT_PATHS = new Set(["/my-files", "/photos", "/albums", "/trash", "/photos-trash", "/shared-with-me", "/shared-by-me", "/devices"]);
+export const ROOT_PATHS = new Set(["/my-files", "/photos", "/albums", "/trash", "/photos-trash", "/shared-with-me", "/shared-by-me", "/devices"]);
 
 // Strips "<package-name>@" and "+<hash>" from a version token like
 // "cli-drive@0.8.0+06e8c605", leaving "0.8.0". Falls back to the raw
@@ -593,6 +593,26 @@ export class DriveService {
   async trash(remotePath: string): Promise<void> {
     assertItemsOk(await this.run(["filesystem", "trash", remotePath]), "Trash");
     invalidatePath(remotePath);
+  }
+
+  // One batched CLI call; per-item failures surface through assertItemsOk, with
+  // the success count added because earlier items may already have been applied.
+  async bulkMove(sources: string[], destinationFolder: string): Promise<void> {
+    await this.runBatch(["filesystem", "move", ...sources, destinationFolder], "Move", sources.length);
+  }
+
+  async bulkTrash(paths: string[]): Promise<void> {
+    await this.runBatch(["filesystem", "trash", ...paths], "Trash", paths.length);
+  }
+
+  private async runBatch(args: string[], action: string, total: number): Promise<void> {
+    const result = await this.run(args);
+    try {
+      assertItemsOk(result, action);
+    } catch (err) {
+      const okCount = Array.isArray(result) ? (result as { ok?: boolean }[]).filter((i) => i && i.ok !== false).length : 0;
+      throw new Error(`${(err as Error).message} [${okCount} of ${total} items succeeded; verify with drive_list]`);
+    }
   }
 
   async restore(remotePath?: string, uid?: string): Promise<void> {

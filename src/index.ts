@@ -26,9 +26,11 @@ import {
   DriveNotAuthenticatedError,
   DriveParseError,
 } from "./utils/errors.js";
-import { validateRemotePath, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
+import { validateRemotePath, validateRemotePathList, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
 import { driveSearch, driveTree } from "./services/find.js";
+import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type Direction, type Compare } from "./services/plan.js";
+import { invalidatePath } from "./services/walk.js";
 import { getSyncRoot, readSyncFile, writeSyncFile, syncFileExists } from "./utils/syncfs.js";
 import type { AlbumPhoto } from "./types/index.js";
 
@@ -914,12 +916,61 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "drive_sync_plan",
+    description:
+      "Read-only plan, transfers nothing: diff a local folder against a Drive folder (only local, only Drive, changed; same size but mtime >2 s apart = 'maybe changed'), with byte totals and completeness. Symlinks skipped.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        localPath: { type: "string", description: "Absolute local folder." },
+        drivePath: { type: "string", description: "Absolute remote folder." },
+        direction: { type: "string", enum: ["up", "down", "both"], description: "Default up." },
+        ignore: { type: "array", items: { type: "string" }, description: "Globs (default .git, node_modules, .DS_Store)." },
+        compare: { type: "string", enum: ["size-mtime", "sha1"], description: "Default size-mtime; sha1 hashes same-size files when Drive claims one." },
+        limit: { type: "integer", minimum: 1, maximum: 1000, description: "Per list, default 200." },
+      },
+      required: ["localPath", "drivePath"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_bulk_move",
+    description:
+      "Move up to 200 items into one existing folder, keeping names. Without confirmed: plan and problems only. With confirmed=true: moves only if no problems.",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        sources: { type: "array", items: { type: "string" }, description: "Absolute remote paths." },
+        destinationFolder: { type: "string", description: "Existing folder (not a full new path)." },
+      },
+      required: ["sources", "destinationFolder"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_bulk_trash",
+    description:
+      "Trash up to 200 items (drive_restore recovers). Without confirmed: plan and problems only. With confirmed=true: trashes only if no problems.",
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        paths: { type: "array", items: { type: "string" }, description: "Absolute remote paths." },
+      },
+      required: ["paths"],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 // ---- Tool surface: derived from TOOLS so the literal stays readable ----------
 const CONFIRM_ALWAYS = new Set([
   "drive_auth_logout", "drive_share_invite", "drive_share_revoke", "drive_share_set_url",
   "drive_share_remove_url", "drive_share_leave", "drive_invitation_reject", "photos_remove_from_album",
+  "drive_bulk_move", "drive_bulk_trash",
 ]);
 const CONFIRM_CONDITIONAL: Record<string, string> = {
   drive_upload: "when fileConflictStrategy or folderConflictStrategy is 'replace' (it trashes the existing remote item)",
@@ -1170,6 +1221,42 @@ export async function main() {
           const trashPath = validateRemotePath(a.path);
           await drive.trash(trashPath);
           return ok({ message: `Moved to trash: ${trashPath}` });
+        }
+
+        case "drive_sync_plan": {
+          const direction = a.direction === undefined ? undefined : String(a.direction);
+          if (direction !== undefined && !["up", "down", "both"].includes(direction)) return fail("direction must be up, down or both");
+          const compare = a.compare === undefined ? undefined : String(a.compare);
+          if (compare !== undefined && !["size-mtime", "sha1"].includes(compare)) return fail("compare must be size-mtime or sha1");
+          if (a.ignore !== undefined && (!Array.isArray(a.ignore) || a.ignore.some((g) => typeof g !== "string"))) return fail("ignore must be an array of strings");
+          return ok(await syncPlan(drive, {
+            localPath: a.localPath as string, drivePath: a.drivePath as string,
+            direction: direction as Direction | undefined, compare: compare as Compare | undefined,
+            ignore: a.ignore as string[] | undefined, limit: typeof a.limit === "number" ? a.limit : undefined,
+          }));
+        }
+
+        case "drive_bulk_move": {
+          const sources = validateRemotePathList(a.sources, "sources");
+          const destFolder = validateRemotePath(a.destinationFolder);
+          const movePlan = planBulkMove(sources, destFolder, await loadListing(drive, foldersToList(sources, destFolder)));
+          if (a.confirmed !== true) {
+            return ok({ applied: false, ...movePlan, next: movePlan.problems.length ? "Fix problems first." : "Get user approval, then confirmed=true." });
+          }
+          if (movePlan.problems.length) return fail(`drive_bulk_move not applied, nothing moved: ${JSON.stringify(movePlan.problems)}`);
+          try { await drive.bulkMove(sources, destFolder); } finally { invalidatePath(destFolder); sources.forEach(invalidatePath); }
+          return ok({ applied: true, moved: movePlan.plan.length, plan: movePlan.plan });
+        }
+
+        case "drive_bulk_trash": {
+          const trashPaths = validateRemotePathList(a.paths, "paths");
+          const trashPlan = planBulkTrash(trashPaths, await loadListing(drive, foldersToList(trashPaths)));
+          if (a.confirmed !== true) {
+            return ok({ applied: false, ...trashPlan, next: trashPlan.problems.length ? "Fix problems first." : "Get user approval, then confirmed=true." });
+          }
+          if (trashPlan.problems.length) return fail(`drive_bulk_trash not applied, nothing trashed: ${JSON.stringify(trashPlan.problems)}`);
+          try { await drive.bulkTrash(trashPaths); } finally { trashPaths.forEach(invalidatePath); }
+          return ok({ applied: true, trashed: trashPlan.plan.length, plan: trashPlan.plan });
         }
 
         case "drive_restore": {

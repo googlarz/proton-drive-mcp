@@ -126,6 +126,18 @@
       "description": "Move a file or folder to the Proton Drive trash."
     },
     {
+      "name": "drive_sync_plan",
+      "description": "Read-only plan: compare a local folder with a Proton Drive folder (nothing is transferred)."
+    },
+    {
+      "name": "drive_bulk_move",
+      "description": "Move many items into one Proton Drive folder; returns a plan first, applies only with confirmed=true."
+    },
+    {
+      "name": "drive_bulk_trash",
+      "description": "Trash many items on Proton Drive (recoverable); returns a plan first, applies only with confirmed=true."
+    },
+    {
       "name": "drive_restore",
       "description": "Restore a trashed file or folder back to its original Proton Drive path."
     },
