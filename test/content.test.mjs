@@ -120,7 +120,7 @@ describe("readDriveContent: docx", () => {
   it("extracts paragraphs, tabs, breaks and entities", async () => {
     const r = await read(fakeDrive({ node: fileNode({ mediaType: "application/octet-stream" }), name: "a.docx", bytes: docx({ "word/document.xml": XML }) }), "/my-files/a.docx");
     assert.equal(r.format, "docx");
-    assert.equal(r.text, "Hello\t Q&A\nSecond\nline é");
+    assert.equal(r.text, "Hello\t Q&A\nSecond\nline é\n"); // the trailing <w:p/> is an empty paragraph
   });
   it("docxXmlToText: <w:tab> is not mistaken for <w:t>", () => {
     assert.equal(docxXmlToText("<w:p><w:r><w:tab/></w:r></w:p>"), "\t");

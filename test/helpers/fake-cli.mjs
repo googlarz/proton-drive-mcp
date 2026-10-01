@@ -5,7 +5,9 @@
 //   FAKE_ARGV_LOG     file that receives one JSON line per invocation: {argv, pid}
 //   FAKE_MODE         json | shuffle | empty | undefined-literal | garbage | ansi-prefixed-json |
 //                     fail-stderr | fail-stderr-echo | fail-stdout-crash | hang |
-//                     big-stderr | auth-fail | ok-false-results | locked-then-json | transient-then-json | tree
+//                     big-stderr | auth-fail | ok-false-results | locked-then-json | transient-then-json | tree | download-hang
+//                     download-hang: `filesystem info` prints a small text file node; `filesystem download` writes a partial file into the
+//                     target dir, then hangs like `hang`. Everything else prints "[]".
 //   FAKE_TREE         tree mode: path to a JSON file {"<folder path>": [list items]}; `filesystem list <path>` serves that entry
 //                     (missing entry -> "Item not found" exit 1; a string entry is written to stderr, exit 1). Other commands print "[]".
 //   FAKE_COUNTER      locked-then-json: file holding the number of calls so far
@@ -19,6 +21,7 @@
 //   FAKE_HANG_VERSION 1 = `version` obeys FAKE_MODE (hang); otherwise it always prints version text
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { join } from "node:path";
 
 const argv = process.argv.slice(2);
 const mode = process.env.FAKE_MODE ?? "json";
@@ -92,6 +95,18 @@ switch (mode) {
     process.stderr.write("=====\n");
     process.stdout.write("ENOENT: no such file or directory, open '/nowhere/file.bin'");
     process.exit(1);
+    break;
+  case "download-hang":
+    if (argv[0] === "filesystem" && argv[1] === "info") {
+      process.stdout.write(JSON.stringify({ uid: "f1", type: "file", name: { ok: true, value: "a.txt" }, mediaType: "text/plain", activeRevision: { claimedSize: 10 } }) + "\n");
+      process.exit(0);
+    } else if (argv[0] === "filesystem" && argv[1] === "download") {
+      writeFileSync(join(argv[3], "a.txt"), "partial");
+      hang();
+    } else {
+      process.stdout.write("[]\n");
+      process.exit(0);
+    }
     break;
   case "hang":
     hang();

@@ -2,6 +2,7 @@ import type { DriveService } from "./drive.js";
 import { DriveNotAuthenticatedError } from "../utils/errors.js";
 import { callContext } from "../utils/subprocess.js";
 import { logger } from "../utils/logger.js";
+import { Semaphore } from "../utils/semaphore.js";
 import { indexEnabled, indexMaxAgeMs, readIndex, writeIndex, deleteIndex, INDEX_VERSION, MAX_ENTRIES, type IndexEntry, type IndexFile } from "./walkIndex.js";
 
 /** One node of a walked Drive tree. Sizes are the real (claimed) sizes, not encrypted storage sizes. */
@@ -70,11 +71,14 @@ export const staleFields = (w: Pick<WalkResult, "stale" | "refreshing">) =>
 
 /** Output fields for a result cut short by the time budget (empty otherwise). */
 export const partialFields = (w: Pick<WalkResult, "partial" | "budgetMs">) =>
-  w.partial ? { partial: true, note: `Partial: the drive walk was still running after ${(w.budgetMs ?? 0) / 1000} s; repeat the call in a minute for the full result.` } : {};
+  w.partial ? { partial: true, continuing: true, note: `Partial: the drive walk was still running after ${(w.budgetMs ?? 0) / 1000} s; repeat the call in a minute for the full result.` } : {};
 
 export const DEFAULT_EXCLUDE = [".git", "node_modules"];
 const DEFAULT_MAX_CALLS = 300;
 const MAX_CONCURRENCY = 12; // the CLI's SQLite cache starts failing above this
+// Process-wide cap on simultaneous walk `fs list` calls: per-walk concurrency alone lets overlapping walks exceed it.
+let limiter: Semaphore | undefined;
+const walkLimiter = () => (limiter ??= new Semaphore(defaultConcurrency()));
 const DEFAULT_BUDGET_MS = 25_000; // Claude Desktop gives an MCP request ~60 s
 const defaultConcurrency = () => {
   const v = Math.floor(Number(process.env.PROTON_DRIVE_WALK_CONCURRENCY));
@@ -198,7 +202,12 @@ async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | u
 
   const listOnce = async (path: string) => {
     live.callsMade++;
-    return svc.listEntries(path);
+    const release = await walkLimiter().acquire(signal);
+    try {
+      return await svc.listEntries(path);
+    } finally {
+      release();
+    }
   };
   // One retry covers a transient failure the subprocess layer already gave up on.
   const listWithRetry = async (path: string) => {
@@ -592,6 +601,7 @@ export function invalidatePath(path: string): void {
 
 /** Test hook: drop all in-process state (memory cache, loaded index, background refreshes). */
 export function resetWalkCacheForTests(): void {
+  limiter = undefined;
   abortBackgroundRefreshes();
   refreshes.clear();
   cache.clear();

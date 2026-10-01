@@ -25,7 +25,7 @@ export function docxXmlToText(xml: string): string {
 }
 
 function collectDocxText(xml: string, maxChars: number): { text: string; capped: boolean } {
-  const paras = xml.split("</w:p>");
+  const paras = xml.split(/<\/w:p>|<w:p(?:\s[^<>]*)?\/>/); // a self-closing <w:p/> is an empty paragraph
   paras.pop(); // text after the last paragraph end is the closing body markup
   const run = /<w:t(?:\s[^<>]*)?>([^<]*)<\/w:t>|<w:tab\s*\/>|<w:(?:br|cr)\b[^<>]*\/?>/g;
   const lines: string[] = [];

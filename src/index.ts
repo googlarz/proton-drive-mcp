@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { removeAllTempDirsSync } from "./utils/tempDirs.js";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -1703,9 +1704,10 @@ export async function main() {
   const shutdown = (code: number) => {
     abortBackgroundRefreshes();
     killAllChildren();
+    removeAllTempDirsSync();
     process.exit(code);
   };
-  server.onclose = () => { abortBackgroundRefreshes(); killAllChildren(); };
+  server.onclose = () => { abortBackgroundRefreshes(); killAllChildren(); removeAllTempDirsSync(); };
   process.once("SIGTERM", () => shutdown(0));
   process.once("SIGINT", () => shutdown(0));
   process.stdout.on("error", (e: NodeJS.ErrnoException) => { if (e.code === "EPIPE") shutdown(0); });

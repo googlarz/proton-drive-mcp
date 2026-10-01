@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { registerTempDir, unregisterTempDir } from "../utils/tempDirs.js";
 import { createReadStream } from "node:fs";
 import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -224,6 +225,7 @@ const oneLine = (m: string): string => (m.split("\n")[0] ?? m).slice(0, 160);
 export function makeDriveHasher(drive: DriveService): Hasher {
   const once: Hasher = async (node) => {
     const dir = await mkdtemp(join(tmpdir(), "pdmcp-dup-"));
+    registerTempDir(dir);
     try {
       validateLocalPath(dir); // same local-path rules as drive_download
       const r = await drive.download(node.path, dir, "rename", "skip");
@@ -235,6 +237,7 @@ export function makeDriveHasher(drive: DriveService): Hasher {
       return h.digest("hex");
     } finally {
       await rm(dir, { recursive: true, force: true });
+      unregisterTempDir(dir);
     }
   };
   return (node) => retryOnLocked(() => once(node));

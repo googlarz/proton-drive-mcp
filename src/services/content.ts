@@ -1,4 +1,5 @@
 import { mkdtemp, readdir, readFile, lstat, rm } from "node:fs/promises";
+import { registerTempDir, unregisterTempDir } from "../utils/tempDirs.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DriveService } from "./drive.js";
@@ -131,6 +132,7 @@ export function sliceCodePoints(s: string, offset: number, max: number): { text:
 /** Downloads into a private temp dir; the dir is always removed, also on abort or error. */
 async function downloadBytes(drive: DriveService, path: string, cap: number): Promise<Buffer> {
   const dir = await mkdtemp(join(tmpdir(), "pdmcp-read-"));
+  registerTempDir(dir);
   try {
     validateLocalPath(dir);
     const signal = callContext.getStore()?.signal;
@@ -146,6 +148,7 @@ async function downloadBytes(drive: DriveService, path: string, cap: number): Pr
     return await readFile(file);
   } finally {
     await rm(dir, { recursive: true, force: true });
+    unregisterTempDir(dir);
   }
 }
 
