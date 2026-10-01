@@ -26,6 +26,22 @@
 
 Give Claude Desktop (or any MCP client) full access to your Proton Drive and Proton Photos: list folders, upload and download files, invite collaborators, manage sharing, handle trash, and manage photo albums — all with end-to-end encryption intact. The same capabilities are available as a full CLI for scripting, backups, and cron.
 
+## Quick start (60 seconds)
+
+1. Install the official [Proton Drive CLI](https://proton.me/download/drive/cli/index.html), then sign in once: `proton-drive auth login`.
+2. Connect Claude Desktop, either way:
+   - **Bundle:** install `proton-drive-mcp-<version>.mcpb` from the [latest release](https://github.com/googlarz/proton-drive-mcp/releases/latest) and set **proton-drive CLI path** to the output of `which proton-drive`.
+   - **Global install:** `npm install -g proton-drive-mcp`, then `proton-drive-cli doctor`, then `proton-drive-cli setup-claude-desktop --write`. (`setup-claude-desktop` refuses to run from a temporary `npx` cache, so install globally first.) Fully quit and restart Claude Desktop afterwards.
+3. Try these prompts:
+   - "Find files named *invoice* in my Drive." (`drive_search`)
+   - "What is using my Drive space?" (`drive_usage`)
+   - "Find duplicate files in my Drive." (`drive_find_duplicates`)
+   - "Who has access to my shared folders?" (`drive_sharing_audit`)
+   - "Tidy up /Downloads, show me a plan first." (`drive_bulk_move` / `drive_bulk_trash` preview first, nothing changes until you confirm)
+4. Optional: `PROTON_DRIVE_INDEX=1` keeps a plaintext local copy of file names so searches are instant after a restart ([details](#persistent-index-opt-in)); `PROTON_DRIVE_TOOL_TIER=core` exposes a smaller tool set.
+
+---
+
 ## What you get
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
@@ -442,9 +458,20 @@ These come from the upstream `proton-drive` CLI (v0.8.0), not from this server:
 - Trashed items are addressed by name only. When two items in `/trash` or `/photos-trash` share a name, `drive_restore` and `drive_delete` refuse (listing the uids) instead of acting on an arbitrary one — restore or delete that item in the Proton Drive web or desktop app.
 - When several programs use the CLI at the same moment (e.g. Claude Desktop and Claude Code), its local cache can briefly report `database is locked`. Read-only calls are retried automatically; writes are not (a retry could repeat the change), so just run the write again. The same read-only retry (up to two more attempts, short jittered backoff, honoring a `Retry-After` of at most 5 s and the call's overall timeout) also covers rate limiting (HTTP 429), single-request timeouts (`Request timed out`) and transient network resets; auth and not-found errors are never retried.
 
+## Compatibility
+
+| Component | Tested with |
+|---|---|
+| Proton Drive CLI | 0.8.x (SDK js 0.21) |
+| macOS | Live-tested against a real account |
+| Linux | CI with a fake CLI only |
+| Windows | Not supported (see [Platform support](#platform-support)) |
+
+`proton-drive-cli doctor` warns when the installed CLI is not 0.8.x, and the server logs one warning line to stderr at startup. Other versions may work but are unverified. If something breaks, open an issue at [github.com/googlarz/proton-drive-mcp/issues](https://github.com/googlarz/proton-drive-mcp/issues) with the output of `proton-drive version` and `proton-drive-cli doctor`.
+
 ## Platform support
 
-Developed and live-tested on **macOS**. CI runs the test suite on Ubuntu and macOS (Node 22 and 24). **Windows is not supported yet**: the test suite has never passed there and CI does not run it, and the Windows paths in `doctor` / `setup-claude-desktop` (`%APPDATA%`, `PATHEXT` lookup) are untested. The system-PATH warning in `doctor` only knows POSIX directories. Linux is covered by CI with the fake CLI but has not been live-tested against a real Proton account.
+Developed and live-tested on **macOS**. CI runs the test suite on Ubuntu and macOS (Node 22 and 24). **Windows is not supported.** Proton does ship a Windows build of its CLI (x64 and arm64, per the [CLI download page](https://proton.me/download/drive/cli/index.html)), so the blocker is on this project's side: the test suite has never passed on Windows, CI does not run it, and the Windows paths in `doctor` / `setup-claude-desktop` (`%APPDATA%`, `PATHEXT` lookup) are untested. The system-PATH warning in `doctor` only knows POSIX directories. Supporting Windows would need a Windows CI job, a passing test suite there, and a live test against the Windows CLI. Linux is covered by CI with the fake CLI but has not been live-tested against a real Proton account.
 
 ## Testing status
 

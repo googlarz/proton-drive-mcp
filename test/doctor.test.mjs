@@ -39,7 +39,7 @@ describe("doctor", () => {
     const j = JSON.parse(r.stdout);
     assert.equal(j.ok, true);
     for (const c of j.checks) assert.ok(c.id && ["ok", "warn", "fail"].includes(c.status) && typeof c.message === "string");
-    assert.deepEqual(j.checks.map((c) => c.id).slice(0, 3), ["node", "cli", "auth"]);
+    assert.deepEqual(j.checks.map((c) => c.id).slice(0, 4), ["node", "cli", "cli-version", "auth"]);
   });
   it("human output is a checklist", async () => {
     const r = await run(["doctor"]);

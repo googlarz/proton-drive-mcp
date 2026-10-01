@@ -58,6 +58,10 @@ test/                     Unit tests (injected runner) + real-process tests (fak
 - Names and paths are not trimmed (trailing spaces are real). Tool arguments are type-checked; non-strings are rejected.
 - `set-url` replaces link settings; `sharing remove` and `album create` do not validate membership/uniqueness themselves, so the service does.
 
+## CLI compatibility
+
+Tested against Proton Drive CLI 0.8.x (`TESTED_CLI = "0.8"` in `src/utils/cliVersion.ts`). `doctor` adds a `cli-version` check (warn, never fail, when the major.minor differs or cannot be parsed) and the server logs one stderr warning after `initialize` in the same cases.
+
 ## Safety model
 
 - All argv built as arrays for `spawn` (no shell); flag injection blocked by validators.
@@ -71,7 +75,7 @@ test/                     Unit tests (injected runner) + real-process tests (fak
 - Unit tests drive `DriveService` with an injected runner (argv assertions, response parsing, collision/ambiguity handling).
 - Real-process tests spawn `dist/index.js` / `dist/cli.js` against a fake `PROTON_DRIVE_BIN` over stdio (gates, schema enforcement, error sanitization, lifecycle, symlink launch, parity of tools/README/glama/smithery).
 - `test/live.test.mjs` is an opt-in read-only smoke test against a real account (`PROTON_DRIVE_LIVE=1`).
-- CI: lint + tests on Ubuntu and macOS × Node 22/24 (Windows is not tested), `npm audit`, and a pack-and-install smoke test that launches the real bin symlink.
+- CI: lint + tests on Ubuntu and macOS × Node 22/24 (Windows is not tested or supported: Proton ships a Windows CLI, but this project has no passing Windows suite or CI job), `npm audit`, and a pack-and-install smoke test that launches the real bin symlink.
 
 ## Boundaries
 
