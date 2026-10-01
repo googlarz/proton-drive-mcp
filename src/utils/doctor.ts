@@ -2,6 +2,7 @@ import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DriveService } from "../services/drive.js";
 import { runDriveRaw } from "./subprocess.js";
+import { cliCompatWarning, TESTED_CLI } from "./cliVersion.js";
 import { defaultConfigPath, isDirectory, isExecutableFile, resolveBinary, resolveDriveCli, SERVER_KEY } from "./claudeConfig.js";
 
 export interface Check {
@@ -36,10 +37,17 @@ async function cliChecks(): Promise<{ checks: Check[]; cliPath?: string }> {
   }
   const checks: Check[] = [];
   let version = "";
-  try { version = (await runDriveRaw(["version"])).split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? ""; } catch { /* reported below */ }
+  let versionText = "";
+  try { versionText = await runDriveRaw(["version"]); version = versionText.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? ""; } catch { /* reported below */ }
   checks.push(version
     ? { id: "cli", status: "ok", message: `${cliPath} (${version})` }
     : { id: "cli", status: "warn", message: `${cliPath} (version unreadable)`, hint: "Run `proton-drive version` manually to see why." });
+  if (version) {
+    const warning = cliCompatWarning(versionText);
+    checks.push(warning
+      ? { id: "cli-version", status: "warn", message: version, hint: warning }
+      : { id: "cli-version", status: "ok", message: `matches tested ${TESTED_CLI}.x` });
+  }
 
   try {
     const auth = await new DriveService().authStatus();

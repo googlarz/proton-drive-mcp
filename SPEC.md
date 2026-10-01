@@ -27,7 +27,8 @@ CLI:     node dist/cli.js <command>
 ```
 src/index.ts              MCP server: TOOLS (schemas), tool-surface derivation (gates, pagination),
                           schema enforcement, dispatch, lifecycle (signals, cancellation)
-src/cli.ts                Companion CLI (mirrors 44 of 46 tools; drive_read_file/drive_write_file are MCP-only)
+src/cli.ts                Companion CLI (mirrors 45 of 47 tools; drive_read_file/drive_write_file are MCP-only)
+src/services/content.ts   drive_read_content: private-temp download, text/docx/pdf extraction, paging
 src/services/drive.ts     DriveService: one method per operation, CLI argv building, response parsing
 src/utils/subprocess.ts   Runs the CLI: timeouts, process-group kill, cancellation, sanitized errors
 src/utils/validation.ts   Argument validators (flag injection, traversal, types)
@@ -38,10 +39,10 @@ src/types/index.ts        Shared response types
 test/                     Unit tests (injected runner) + real-process tests (fake CLI over stdio)
 ```
 
-## Tools (46)
+## Tools (47)
 
 - **Auth / meta:** `drive_auth_status`, `drive_auth_logout`, `drive_version`
-- **Filesystem:** `drive_list`, `drive_info`, `drive_tree`, `drive_search`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`
+- **Filesystem:** `drive_list`, `drive_info`, `drive_read_content`, `drive_tree`, `drive_search`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`
 - **Trash:** `drive_list_trash`, `drive_trash`, `drive_restore`, `drive_delete`, `drive_empty_trash`
 - **Sharing:** `drive_share_status`, `drive_share_invite`, `drive_share_revoke`, `drive_share_remove_all`, `drive_share_set_url`, `drive_share_remove_url`, `drive_share_leave`
 - **Invitations:** `drive_list_invitations`, `drive_invitation_accept`, `drive_invitation_reject`
@@ -58,6 +59,10 @@ test/                     Unit tests (injected runner) + real-process tests (fak
 - Names and paths are not trimmed (trailing spaces are real). Tool arguments are type-checked; non-strings are rejected.
 - `set-url` replaces link settings; `sharing remove` and `album create` do not validate membership/uniqueness themselves, so the service does.
 
+## CLI compatibility
+
+Tested against Proton Drive CLI 0.8.x (`TESTED_CLI = "0.8"` in `src/utils/cliVersion.ts`). `doctor` adds a `cli-version` check (warn, never fail, when the major.minor differs or cannot be parsed) and the server logs one stderr warning after `initialize` in the same cases.
+
 ## Safety model
 
 - All argv built as arrays for `spawn` (no shell); flag injection blocked by validators.
@@ -71,7 +76,7 @@ test/                     Unit tests (injected runner) + real-process tests (fak
 - Unit tests drive `DriveService` with an injected runner (argv assertions, response parsing, collision/ambiguity handling).
 - Real-process tests spawn `dist/index.js` / `dist/cli.js` against a fake `PROTON_DRIVE_BIN` over stdio (gates, schema enforcement, error sanitization, lifecycle, symlink launch, parity of tools/README/glama/smithery).
 - `test/live.test.mjs` is an opt-in read-only smoke test against a real account (`PROTON_DRIVE_LIVE=1`).
-- CI: lint + tests on Ubuntu and macOS × Node 22/24 (Windows is not tested), `npm audit`, and a pack-and-install smoke test that launches the real bin symlink.
+- CI: lint + tests on Ubuntu and macOS × Node 22/24 (Windows is not tested or supported: Proton ships a Windows CLI, but this project has no passing Windows suite or CI job), `npm audit`, and a pack-and-install smoke test that launches the real bin symlink.
 
 ## Boundaries
 

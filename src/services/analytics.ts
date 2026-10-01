@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
+import { registerTempDir, unregisterTempDir } from "../utils/tempDirs.js";
 import { createReadStream } from "node:fs";
 import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DriveFile, ShareStatus } from "../types/index.js";
 import type { DriveService } from "./drive.js";
-import { walkTree, staleFields, type WalkNode, type WalkOptions, type WalkResult } from "./walk.js";
+import { walkTree, staleFields, partialFields, type WalkNode, type WalkOptions, type WalkResult } from "./walk.js";
 import { validateLocalPath } from "../utils/validation.js";
 import { callContext } from "../utils/subprocess.js";
+import { retryOnLocked } from "../utils/lockRetry.js";
 
 export type WalkFn = (svc: DriveService, root: string, opts?: WalkOptions) => Promise<WalkResult>;
 
@@ -43,7 +45,7 @@ function breakdown(nodes: WalkNode[], key: (n: WalkNode) => string, top: number)
 }
 
 function walkMeta(w: WalkResult) {
-  return { complete: w.complete, skippedCount: w.skipped.length, skipped: w.skipped.slice(0, 10), fromCache: w.fromCache, ...staleFields(w) };
+  return { complete: w.complete, skippedCount: w.skipped.length, skipped: w.skipped.slice(0, 10), fromCache: w.fromCache, ...staleFields(w), ...partialFields(w) };
 }
 
 // ---- drive_usage ----------------------------------------------------------
@@ -110,7 +112,7 @@ export async function driveUsage(
   return {
     ...summarizeUsage(walk, { top: o.top ?? 10, olderThanDays: o.olderThanDays, now: deps.now ?? Date.now() }),
     trash,
-    note: "Sizes are the sum of file sizes, not the account storage quota.",
+    note: [partialFields(walk).note, "Sizes are the sum of file sizes, not the account storage quota."].filter(Boolean).join(" "),
   };
 }
 
@@ -214,18 +216,16 @@ export async function verifyGroups(
   return out.filter((g) => g.members.length > 1).sort((a, b) => wasted(b) - wasted(a) || (a.members[0].path < b.members[0].path ? -1 : 1));
 }
 
-const LOCKED_RE = /database is locked|SQLITE_BUSY/i;
 const oneLine = (m: string): string => (m.split("\n")[0] ?? m).slice(0, 160);
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
  * Downloads one file into its own private temp dir, sha256s it, and always removes the dir.
- * The CLI's SQLite cache can report "database is locked" at startup when several downloads run
- * at once; nothing has been transferred then, so a fresh attempt is safe (max 4 tries).
+ * A "database is locked" failure is retried in a fresh dir (see retryOnLocked).
  */
 export function makeDriveHasher(drive: DriveService): Hasher {
   const once: Hasher = async (node) => {
     const dir = await mkdtemp(join(tmpdir(), "pdmcp-dup-"));
+    registerTempDir(dir);
     try {
       validateLocalPath(dir); // same local-path rules as drive_download
       const r = await drive.download(node.path, dir, "rename", "skip");
@@ -237,20 +237,10 @@ export function makeDriveHasher(drive: DriveService): Hasher {
       return h.digest("hex");
     } finally {
       await rm(dir, { recursive: true, force: true });
+      unregisterTempDir(dir);
     }
   };
-  return async (node) => {
-    const base = Number(process.env["PROTON_DRIVE_RETRY_BASE_MS"] ?? 250);
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return await once(node);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (attempt >= 4 || !LOCKED_RE.test(msg)) throw e;
-        await sleep(base * attempt + Math.random() * base);
-      }
-    }
-  };
+  return (node) => retryOnLocked(() => once(node));
 }
 
 function reportGroup(g: DuplicateGroup & { verifyNote?: string }) {
@@ -273,7 +263,7 @@ export async function driveFindDuplicates(
   if (o.maxVerifyTotalBytes !== undefined && (!Number.isInteger(o.maxVerifyTotalBytes) || o.maxVerifyTotalBytes < 1 || o.maxVerifyTotalBytes > MAX_VERIFY_TOTAL_BYTES)) {
     throw new Error(`maxVerifyTotalBytes must be an integer between 1 and ${MAX_VERIFY_TOTAL_BYTES}`);
   }
-  const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh, noDisk: true }); // deletion suggestions must come from a current walk
+  const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh, noDisk: true, budgetMs: 0 }); // deletion suggestions must come from a current, complete walk
   const limit = o.limit ?? 20;
   let groups: (DuplicateGroup & { verifyNote?: string })[] = findDuplicateCandidates(walk.nodes, o.minSize ?? 1024);
   let verified = false;
@@ -325,7 +315,7 @@ export async function driveSharingAudit(
   o: { path: string; refresh?: boolean },
   deps: { walk?: WalkFn; status?: (path: string) => Promise<ShareStatus> } = {}
 ) {
-  const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh, noDisk: true }); // a security audit must not read a saved index
+  const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh, noDisk: true, budgetMs: 0 }); // a security audit must not read a saved index or stop at a time budget
   const status = deps.status ?? ((p: string) => drive.shareStatus(p));
   const shared = walk.nodes.filter((n) => (n.isShared || n.isSharedByUrl) && parentOf(n.path) !== "");
   const targets = shared.slice(0, SHARE_AUDIT_CAP);

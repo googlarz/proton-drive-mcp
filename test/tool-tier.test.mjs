@@ -5,7 +5,7 @@ import { makeSandbox, startServer, nonVersionCalls, sleep, fakeEnv, DIST_INDEX }
 import { spawn } from "node:child_process";
 
 const CORE = [
-  "drive_auth_status", "drive_version", "drive_list", "drive_info", "drive_list_trash", "drive_search", "drive_tree",
+  "drive_auth_status", "drive_version", "drive_list", "drive_info", "drive_read_content", "drive_list_trash", "drive_search", "drive_tree",
   "drive_mkdir", "drive_upload", "drive_download", "drive_rename", "drive_move", "drive_copy",
   "drive_trash", "drive_restore", "drive_share_status", "photos_list_timeline", "photos_download",
 ];
@@ -25,7 +25,7 @@ describe("tool tier", () => {
     core = await withServer({ PROTON_DRIVE_TOOL_TIER: "core" }, (c) => c.listTools());
   });
 
-  it("default lists all 46 tools", () => assert.equal(full.length, 46));
+  it("default lists all 47 tools", () => assert.equal(full.length, 47));
 
   it("core lists exactly the curated set, all present in full", () => {
     assert.deepEqual(core.map((t) => t.name).sort(), [...CORE].sort());
@@ -43,9 +43,10 @@ describe("tool tier", () => {
   });
 
   // +100 each in 1.4.0: one sentence in drive_search explaining stale:true (persistent index).
+  // drive_read_content (+~800 bytes, also in core).
   it("tools/list stays within the size budget", () => {
-    assert.ok(size(full) <= 39_300, `full ${size(full)} bytes`);
-    assert.ok(size(core) <= 17_100, `core ${size(core)} bytes`);
+    assert.ok(size(full) <= 40_200, `full ${size(full)} bytes`);
+    assert.ok(size(core) <= 18_000, `core ${size(core)} bytes`);
   });
 
   it("core refuses a hidden tool at call time without touching the CLI", async () => {
@@ -80,7 +81,7 @@ describe("tool tier", () => {
     sb.cleanup();
     const lines = out.split("\n").filter(Boolean).map((l) => JSON.parse(l)); // throws on any non-JSON line
     assert.ok(lines.every((m) => m.jsonrpc === "2.0"));
-    assert.equal(lines.find((m) => m.id === 2).result.tools.length, 46);
+    assert.equal(lines.find((m) => m.id === 2).result.tools.length, 47);
     assert.equal((err.match(/PROTON_DRIVE_TOOL_TIER/g) ?? []).length, 1);
   });
 });

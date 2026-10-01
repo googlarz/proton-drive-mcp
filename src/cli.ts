@@ -26,6 +26,7 @@ import { invalidatePath } from "./services/walk.js";
 import { indexStatus, deleteIndex } from "./services/walkIndex.js";
 import { resolve } from "node:path";
 import { driveSearch, driveTree } from "./services/find.js";
+import { readDriveContent } from "./services/content.js";
 import { driveUsage, driveFindDuplicates, driveSharingAudit } from "./services/analytics.js";
 import { validateRemotePath, validateRemotePathList, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 
@@ -43,6 +44,7 @@ Commands:
   version                                  Show CLI/SDK version
   list <path>                              List files at path
   info <path> [--verbose]                  Show node metadata (--verbose = raw CLI node)
+  read <path> [--max-chars N] [--offset N] Text of a Drive file (text/code, .docx, text .pdf; max 10 MB), paged
   tree [path] [--depth N] [--limit N] [--folders-only] [--refresh]
                                            Folder overview with per-folder counts and sizes (default /my-files, depth 2)
   search [path] [--query S] [--glob G] [--type file|folder] [--media-type P] [--ext pdf,docx]
@@ -267,6 +269,10 @@ async function run() {
 
     case "info":
       print(await drive.info(requirePath(sub, "info <path> [--verbose]"), args.includes("--verbose")));
+      break;
+
+    case "read":
+      print(await readDriveContent(drive, { path: requirePath(sub, "read <path> [--max-chars N] [--offset N]"), maxChars: intFlag("--max-chars"), offset: intFlag("--offset") }));
       break;
 
     case "upload": {

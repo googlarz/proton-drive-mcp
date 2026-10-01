@@ -1,8 +1,8 @@
 // walkTree / invalidatePath against an injected runner (no subprocess).
-import { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { DriveService } from "../dist/services/drive.js";
-import { walkTree, invalidatePath } from "../dist/services/walk.js";
+import { walkTree, invalidatePath, abortBackgroundRefreshes, resetWalkCacheForTests, flushWalkIndexForTests } from "../dist/services/walk.js";
 import { DriveNotAuthenticatedError } from "../dist/utils/errors.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -43,7 +43,10 @@ const small = () => ({
   "/my-files/.git": [file("HEAD", 1)],
 });
 
-beforeEach(() => { invalidatePath("/"); delete process.env.PROTON_DRIVE_WALK_TTL_MS; });
+const clearWalkEnv = () => { for (const k of ["PROTON_DRIVE_WALK_TTL_MS", "PROTON_DRIVE_WALK_BUDGET_MS", "PROTON_DRIVE_WALK_CONCURRENCY"]) delete process.env[k]; };
+// Fresh walk state per test: no cache, limiter slots or background walk carried over from an earlier test.
+beforeEach(() => { resetWalkCacheForTests(); invalidatePath("/"); clearWalkEnv(); });
+afterEach(async () => { abortBackgroundRefreshes(); await flushWalkIndexForTests(); resetWalkCacheForTests(); clearWalkEnv(); });
 
 describe("walkTree", () => {
   it("collects every node with full metadata, excluding .git by default", async () => {
