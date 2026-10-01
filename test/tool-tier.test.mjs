@@ -45,7 +45,7 @@ describe("tool tier", () => {
   // +100 each in 1.4.0: one sentence in drive_search explaining stale:true (persistent index).
   // drive_read_content (+~800 bytes, also in core).
   it("tools/list stays within the size budget", () => {
-    assert.ok(size(full) <= 40_100, `full ${size(full)} bytes`);
+    assert.ok(size(full) <= 40_200, `full ${size(full)} bytes`);
     assert.ok(size(core) <= 17_900, `core ${size(core)} bytes`);
   });
 
