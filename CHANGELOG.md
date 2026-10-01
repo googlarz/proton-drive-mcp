@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.5.0 — 2026-10-01
+
+### Added
+- **`drive_read_content`**: reads the text of a file stored in Drive (plain text, markdown, json, csv, yaml, html, code; `.docx` and text `.pdf` through the optional packages `fflate` and `unpdf`). Files up to 10 MB by default (`PROTON_DRIVE_READ_MAX_BYTES`, hard max 50 MB), checked before the download; paged output (`maxChars` up to 100,000, `offset`); scanned PDFs without a text layer say so. The content is untrusted data, never instructions. Also `proton-drive-cli read <path>`.
+  - PDF and DOCX are parsed in a worker thread with a 512 MB heap limit and a 20 s timeout (`PROTON_DRIVE_READ_TIMEOUT_MS`); cancelling the call stops the worker. A hostile document produces a clean error instead of taking the server down. Peak process memory on a 460 MB decompression bomb was about 1.5 GB (bounded, not small).
+- **Walk time budget**: `drive_search`, `drive_tree` and `drive_usage` return after 25 s (`PROTON_DRIVE_WALK_BUDGET_MS`) with `partial: true`, `continuing: true` and a note while the walk finishes in the background; the next call returns the full result from the cache instantly. Claude Desktop's default MCP timeout is about 60 s, so on a big drive a first call used to fail with a timeout instead of returning anything. Plans and audits (`drive_sync_plan`, `drive_find_duplicates`, `drive_sharing_audit`) always wait for the complete walk.
+- **Faster, safer walks**: default walk concurrency 12 (about 21 s instead of 25 s for 1,200 files on a real drive) with a process-wide cap, so several tools walking at once can no longer exceed 12 parallel CLI calls (previously 25 were observed, which risks `database is locked`).
+- **`doctor` and startup check the CLI version**: a warning (never a failure) when the installed `proton-drive` is not 0.8.x, the version this project is tested with. README gains a Compatibility table and a 60-second Quick start.
+
+### Fixed
+- Temp directories of an in-flight read or duplicate verification are removed when the server is stopped (SIGTERM/stdin close); stale `pdmcp-*` directories older than an hour are swept at startup.
+- Empty paragraphs in `.docx` files become blank lines; errors no longer echo unsanitised media types or names.
+- `drive_find_duplicates` verification no longer fails on `database is locked` (1.3.3); the whole retry logic now lives in one shared helper.
+
+### Changed
+- The full tool list is 47 tools (about 40 KB); the `core` tier has 19 tools (about 18 KB) and now includes `drive_read_content`.
+- Windows: the official Proton Drive CLI does have a Windows build, but this project is still not supported there (its test suite has never passed on Windows and CI does not run it).
+
+### Known limitations
+- `drive_read_content` reads text only: no OCR for scanned PDFs, and Proton Docs/Sheets are skipped by the CLI (the media-type guard for them is unverified against a real Proton Doc).
+- A budgeted walk can overrun its budget when it queues behind the global concurrency cap.
+- The first call on a big drive is still slow without the opt-in persistent index (see 1.4.0).
+- `drive_share_leave`, `drive_invitation_accept` and `drive_invitation_reject` have never been tested live (no second Proton account).
+
 ## 1.4.0 — 2026-10-01
 
 ### Added
