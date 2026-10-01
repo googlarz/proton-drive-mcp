@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.2 — 2026-10-01
+
+### Changed
+- Releases are published through npm Trusted Publishing (OIDC) only; the `NPM_TOKEN` fallback is gone from the publish workflow. No code changes.
+
 ## 1.3.1 — 2026-10-01
 
 ### Changed
