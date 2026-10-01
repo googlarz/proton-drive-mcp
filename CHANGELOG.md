@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.0 — 2026-10-01
+
+### Added
+- **Persistent search index (opt-in).** Every new server process used to walk the whole drive again on its first `drive_search`, `drive_tree`, `drive_usage` or `drive_find_duplicates` (about 30 s for 1,200 files, minutes on big drives). With `PROTON_DRIVE_INDEX=1` (or the **Persistent search index** switch in the MCPB bundle) the last complete walk is saved to disk and a new process answers in about 1.5 s with `stale: true` while a background walk refreshes it. Verified on a real 1,222-file drive: cold 31–34 s, next process 1.3–2.1 s.
+  - **Privacy:** the index is a plaintext copy of file and folder names, paths, sizes, dates and claimed sha1 hashes of your end-to-end-encrypted drive, so it is off by default. It lives in a private directory (`~/Library/Caches/proton-drive-mcp` on macOS, `~/.cache/proton-drive-mcp` on Linux, or `PROTON_DRIVE_INDEX_DIR`), file mode 0600, written atomically; symlinks, foreign owners and loose permissions are refused, and a pre-existing directory is never taken over. `proton-drive-cli index status` and `index clear` inspect and remove it.
+  - **Safety:** before saved data is served, one `list /my-files` confirms it belongs to the logged-in account (a failed check serves nothing; a mismatch deletes the file); data older than `PROTON_DRIVE_INDEX_MAX_AGE_H` (default 24) is ignored; the server's own writes (upload, move, trash, ...) remove the affected entries from memory and disk, and an index that cannot be kept current (read-only directory) is not served. `drive_sync_plan`, `drive_find_duplicates` and `drive_sharing_audit` never use saved data.
+  - Results served from the index carry `stale: true` (and `refreshing: true` while a refresh runs); `refresh: true` always walks.
+
+### Known limitations
+- `drive_tree` with a depth limit is not answered from the saved full walk, and changes made by other clients or processes are not seen until the saved data is refreshed. The refresh cooldown after a failed background walk is per server process.
+
 ## 1.3.3 — 2026-10-01
 
 ### Fixed

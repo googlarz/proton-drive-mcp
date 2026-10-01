@@ -283,7 +283,7 @@ function fingerprint(items: { parentUid?: unknown }[]): string | undefined {
 
 function loadDisk() {
   if (disk === undefined) {
-    const f = readIndex();
+    const f = readIndex({ requireWritable: true });
     disk = f ? { accountKey: f.accountKey, entries: f.entries } : null;
   }
   return disk;

@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -50,10 +50,15 @@ const foreignOrLoose = (st: { uid: number; mode: number }) =>
   (typeof process.getuid === "function" && st.uid !== process.getuid()) || (st.mode & 0o077) !== 0;
 
 /** Reads and validates the index; anything wrong (missing, symlink, loose mode, foreign owner, oversize, corrupt, other version) is "no index". */
-export function readIndex(): IndexFile | undefined {
+export function readIndex(o: { requireWritable?: boolean } = {}): IndexFile | undefined {
   const p = indexPath();
   const dst = lstatOrNull(indexDir());
   if (!dst || !dst.isDirectory()) return undefined;
+  if (o.requireWritable) {
+    // Data we cannot keep current (a read-only directory can neither be rewritten nor cleared after our own
+    // writes) must not be served: a trashed or moved item would reappear in the next process.
+    try { accessSync(indexDir(), constants.W_OK); accessSync(p, constants.W_OK); } catch { return undefined; }
+  }
   let fd: number | undefined;
   try {
     fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW); // a symlink is never followed

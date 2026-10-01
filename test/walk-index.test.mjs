@@ -190,6 +190,23 @@ describe("walk index: serving", () => {
     assert.equal(count(calls, "/my-files"), 1);
   });
 
+  it("an index in a read-only directory is not served (it could not be kept current after our own writes)", async (t) => {
+    if (process.getuid && process.getuid() === 0) return t.skip("root ignores directory permissions");
+    await seed();
+    ageDisk(3_600_000);
+    const dir = indexPath().replace(/[\\/][^\\/]+$/, "");
+    chmodSync(dir, 0o500);
+    try {
+      const { svc, calls } = makeSvc(small([file("new.txt", 1)]));
+      const r = await walkTree(svc, "/my-files");
+      assert.equal(r.fromCache, false);
+      assert.ok(!r.stale);
+      assert.equal(count(calls, "/my-files"), 1);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  });
+
   it("noDisk:true never answers from the saved index (used by the sharing audit)", async () => {
     await seed();
     ageDisk(3_600_000);
