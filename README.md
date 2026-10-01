@@ -58,7 +58,7 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 
 Your files travel: **Proton Drive (cloud, E2E encrypted) → Proton Drive CLI (local, decrypts) → this MCP server (local) → your AI client**.
 
-The Proton Drive CLI handles all cryptography locally. This MCP server calls the CLI as a subprocess and forwards results — it never receives your password, never stores credentials, and never touches the raw encrypted data. Authentication state lives in your OS keychain (macOS Keychain, Windows Credential Manager, Linux libsecret), managed exclusively by the official Proton CLI.
+The Proton Drive CLI handles all cryptography locally. This MCP server calls the CLI as a subprocess and forwards results — it never receives your password, never stores credentials, and never touches the raw encrypted data. Authentication state lives in your OS keychain (macOS Keychain, Linux libsecret; the official CLI also uses Windows Credential Manager on Windows, which this project does not support), managed exclusively by the official Proton CLI.
 
 If you use Claude Desktop with the default Anthropic API, file content you ask Claude to act on is sent to Anthropic per their [privacy policy](https://www.anthropic.com/privacy).
 
@@ -102,7 +102,7 @@ npm install -g proton-drive-mcp
 Add to your `claude_desktop_config.json`:
 
 **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`  
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+**Windows** (informational only, this project does not support Windows): `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
@@ -262,7 +262,7 @@ proton-drive-cli index status                                                   
 proton-drive-cli index clear                                                          # delete the saved index file
 ```
 
-- The first walk of a large drive can take minutes (measured ~21 s per 1,200 files at the default concurrency 12, ~25 s at 8). `drive_search`, `drive_tree` and `drive_usage` stop waiting after 25 s (`PROTON_DRIVE_WALK_BUDGET_MS`, 0 = never) and return what was listed so far with `partial: true`, `continuing: true` (the walk is still running) and a `note`; the same walk keeps running in the background, so repeating the call returns the full result from cache. `drive_find_duplicates`, `drive_sharing_audit` and `drive_sync_plan` always wait for the complete walk. Later calls reuse a 5-minute in-memory cache; `refresh` bypasses it. With the opt-in persistent index, a saved copy up to 24 h old can answer first (marked `stale: true`).
+- The first walk of a large drive can take minutes (measured about 21 s per 1,200 files at the default concurrency (12); about 25 s at concurrency 8). `drive_search`, `drive_tree` and `drive_usage` stop waiting after 25 s (`PROTON_DRIVE_WALK_BUDGET_MS`, 0 = never) and return what was listed so far with `partial: true`, `continuing: true` (the walk is still running) and a `note`; the same walk keeps running in the background, so repeating the call returns the full result from cache. `drive_find_duplicates`, `drive_sharing_audit` and `drive_sync_plan` always wait for the complete walk. Later calls reuse a 5-minute in-memory cache; `refresh` bypasses it. With the opt-in persistent index, a saved copy up to 24 h old can answer first (marked `stale: true`).
 - Walks skip `.git` and `node_modules` by default.
 - With `PROTON_DRIVE_INDEX=1`, results may come from a saved index (`stale: true` = served from the saved index, not a walk made now) while a refresh runs; repeat the call or pass `refresh: true` for a fresh read. Off by default, see [Persistent index](#persistent-index-opt-in).
 - Read-only tools (`drive_search`, `drive_tree`, `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_sync_plan`) change nothing. `drive_bulk_move` and `drive_bulk_trash` are two-step: call without `confirmed` for the plan, then with `confirmed: true` to apply. Bulk trash is reversible with `drive_restore`.
@@ -273,14 +273,14 @@ proton-drive-cli index clear                                                    
 
 ### Persistent index (opt-in)
 
-By default every new server process (each Claude Desktop session) walks the drive again on the first `drive_search`, `drive_tree`, `drive_usage` or `drive_find_duplicates`: about 25 s per 1,200 files, minutes on big drives. Set `PROTON_DRIVE_INDEX=1` to keep completed walks on disk and answer instantly after a restart.
+By default every new server process (each Claude Desktop session) walks the drive again on the first `drive_search`, `drive_tree`, `drive_usage` or `drive_find_duplicates`: about 21 s per 1,200 files at the default concurrency (12), minutes on big drives. Set `PROTON_DRIVE_INDEX=1` to keep completed walks on disk and answer instantly after a restart.
 
 **Privacy: this is off by default.** Your Drive is end-to-end encrypted, but the index is a **plaintext** copy of file and folder names, paths, sizes, dates and claimed sha1 hashes on your local disk. Anyone who can read your user account's files (or your backups) can read it. Enable it only on a machine you trust.
 
 - **What is stored:** the node list of up to 8 recent complete walks under `/my-files` (partial or failed walks are never saved, so a `drive_tree` that stops at its depth limit is not stored), plus a fingerprint of your account's Drive root. No file contents, no credentials, no tokens.
 - **Where:** `PROTON_DRIVE_INDEX_DIR` if set; otherwise `~/Library/Caches/proton-drive-mcp` (macOS) or `$XDG_CACHE_HOME/proton-drive-mcp` / `~/.cache/proton-drive-mcp` (Linux). One file, `walk-index.json`, mode `0600` in a `0700` directory, written atomically. Use a dedicated directory: a pre-existing directory with group/other access (or owned by someone else) is refused with one warning and never chmodded; a missing one is created `0700`. A symlinked directory or file is refused. A saved file with loose permissions, another owner, a future timestamp, or above 200 MB is ignored. Not written above 200 MB.
 - **Account check:** before any saved data is served, one `list /my-files` (~2 s) confirms it belongs to the account that is logged in now; if the check fails (network, rate limit) nothing is served from disk for that call and the file is kept; a proven account mismatch deletes it. Either way the drive is walked fresh.
-- **Freshness:** data up to `PROTON_DRIVE_INDEX_MAX_AGE_H` hours old (default 24; `0` = never use saved data) is returned immediately with `stale: true` (and `refreshing: true` while one background walk replaces it); a repeated call then returns the fresh walk. A failed or incomplete background walk is not retried for 5 minutes within the same server process (`PROTON_DRIVE_INDEX_REFRESH_COOLDOWN_MS`); a new process tries once again. Saved data is first checked against the live account with one `list /my-files`; if that check fails (network, rate limit) nothing is served from disk for that call and the file is kept, and only a proven account mismatch deletes it. `drive_sync_plan`, `drive_find_duplicates` and the sharing audit never use saved data. `refresh: true` always does a blocking fresh walk. Writes made through this server drop the affected entries from memory and disk.
+- **Freshness:** data up to `PROTON_DRIVE_INDEX_MAX_AGE_H` hours old (default 24; `0` = never use saved data) is returned immediately with `stale: true` (and `refreshing: true` while one background walk replaces it); a repeated call then returns the fresh walk. A failed or incomplete background walk is not retried for 5 minutes within the same server process (`PROTON_DRIVE_INDEX_REFRESH_COOLDOWN_MS`); a new process tries once again. The saved data is account-checked first (see above). `drive_sync_plan`, `drive_find_duplicates` and the sharing audit never use saved data. `refresh: true` always does a blocking fresh walk. Writes made through this server drop the affected entries from memory and disk.
 - **Read-only directory:** an index in a directory (or file) you cannot write to is ignored, because it could not be kept current after the server's own writes.
 - **Limits:** `drive_tree` with a depth limit is not answered from the saved full walk (it walks live); changes made by other clients or processes are not seen until the data is refreshed.
 - **Check or remove it:** `proton-drive-cli index status` and `proton-drive-cli index clear` (or just delete the file). In the MCPB bundle, the **Persistent search index** setting is the opt-in.
@@ -347,6 +347,9 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 
 ### Invitations
 `drive_list_invitations` · `drive_invitation_accept` · `drive_invitation_reject` · `drive_share_leave`
+
+### Analytics
+`drive_usage` · `drive_find_duplicates` · `drive_sharing_audit`
 
 ### Photos
 `photos_list_albums` · `photos_create_album` · `photos_update_album` · `photos_delete_album` · `photos_list_album_photos` · `photos_add_to_album` · `photos_remove_from_album` · `photos_list_timeline` · `photos_download` · `photos_upload`
@@ -431,7 +434,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 - `drive_move` accepts a full destination path (parent + new name) for a familiar interface, but the underlying CLI only has separate `move` (change parent) and `rename` (change name) commands — this MCP translates automatically, issuing one or both as needed.
 - `drive_delete` only works on items already in `/trash` or `/photos-trash` — the CLI rejects live paths. Trash an item first with `drive_trash`, or use `drive_empty_trash` to clear everything at once.
 - If the client declares MCP elicitation (form mode), a refused `confirmed` gate is put to the human instead, and `drive_bulk_move` / `drive_bulk_trash` ask before applying a `confirmed: true` call. Only an explicit approval runs the call; decline, cancel, timeout or error keep the refusal, and after 5 declined prompts in a minute the server stops prompting. This only upgrades refusals and bulk applies: a compromised model that supplies `confirmed: true` on any other tool is **not** stopped by it. Clients without elicitation behave as before. Confirmation prompts need a client that supports elicitation (Claude Code CLI today; Claude Desktop is unverified).
-- Walk-based tools (`drive_tree`, `drive_search`, `drive_usage`, `drive_find_duplicates`) read from a cache up to 5 minutes old (with the opt-in persistent index, up to 24 h old and marked `stale: true`; `drive_sharing_audit`, `drive_sync_plan` and `drive_find_duplicates` never use the saved index); changes made by other clients or processes are not seen until it expires or you pass `refresh: true`. The first walk of a large drive can take minutes (measured about 21 s per 1200 files at concurrency 12, about 25 s at 8); `drive_search`, `drive_tree` and `drive_usage` return a `partial: true` result after 25 s and finish the walk in the background.
+- Walk-based tools (`drive_tree`, `drive_search`, `drive_usage`, `drive_find_duplicates`) read from a cache up to 5 minutes old (with the opt-in persistent index, up to 24 h old and marked `stale: true`; `drive_sharing_audit`, `drive_sync_plan` and `drive_find_duplicates` never use the saved index); changes made by other clients or processes are not seen until it expires or you pass `refresh: true`. The first walk of a large drive can take minutes (measured about 21 s per 1,200 files at the default concurrency (12)); `drive_search`, `drive_tree` and `drive_usage` return a `partial: true` result after 25 s and finish the walk in the background.
 - `drive_auth_status` has no native CLI equivalent — it probes by resolving `/my-files` and reports authenticated based on whether that succeeds.
 - Paths are always Drive-absolute: `/my-files/folder/file.pdf`. Relative paths are not supported.
 - All calls include `--json` automatically, except `drive_version`, whose underlying CLI command ignores `--json` and always prints plain text — this MCP parses it directly.
@@ -452,7 +455,7 @@ Left out of `core` (use `full`): permanent deletion (`drive_delete`, `drive_empt
 - **Caps:** files over 10 MB are refused before downloading (`PROTON_DRIVE_READ_MAX_BYTES`, hard maximum 50 MB); a `.docx` whose `document.xml` exceeds 20 MB uncompressed is refused.
 - **Isolation:** `.docx` and `.pdf` parsing runs in a separate worker thread limited to 512 MB of memory and a 20 s timeout (`PROTON_DRIVE_READ_TIMEOUT_MS`, in milliseconds, max 120000); a hostile or oversized file produces a tool error ("too large or complex to read safely") and never takes the server down. Extracted text is capped at 2,000,000 characters.
 - **Untrusted content:** file text comes from your drive and may contain instructions aimed at the model (prompt injection). The tool returns it as data, nothing is executed, and its description tells the model to treat it as data, never as instructions.
-- **Optional packages:** `.docx` needs `fflate` and `.pdf` needs `unpdf`; both are `optionalDependencies` of this package, installed automatically by npm (and included in the MCPB bundle). If your install skipped optional packages, the tool says which to install (`npm install fflate unpdf`); text formats work without them.
+- **Optional packages:** `.docx` needs `fflate` and `.pdf` needs `unpdf`; both are optional dependencies of this package, installed by default (and included in the MCPB bundle). If they were omitted (`npm install --omit=optional`), PDF/DOCX reading returns a clear error naming the package to install (`npm install fflate unpdf`); text formats work without them. The test suite skips the PDF/DOCX groups with a reason when the packages are missing (never on CI, where they fail instead).
 
 ## Known limitations
 
@@ -548,8 +551,8 @@ Or in Claude Desktop config:
 }
 ```
 
-**Windows PATH issues**  
-Use the full path to the `proton-drive.exe` binary in your Claude Desktop config if `npx` can't find it:
+**Windows**  
+Windows is not supported (see [Platform support](#platform-support)). If you try anyway, use the full path to the launcher in your Claude Desktop config if `npx` can't find it:
 ```json
 {
   "mcpServers": {

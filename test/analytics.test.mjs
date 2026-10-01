@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import {
   auditShareStatus, driveUsage, driveFindDuplicates, driveSharingAudit,
 } from "../dist/services/analytics.js";
 import { DriveService } from "../dist/services/drive.js";
+import { usePrivateTmp } from "./helpers/optional-deps.mjs";
 
 const DAY = 86_400_000;
 const NOW = Date.parse("2026-09-30T00:00:00Z");
@@ -170,6 +171,8 @@ describe("verifyGroups", () => {
     assert.equal(hashed.length, 1);
   });
 
+  // Private TMPDIR so the pdmcp-dup-* count only sees this test's directories.
+  usePrivateTmp(beforeEach, afterEach);
   it("an aborted verify still removes the hasher's temp dir", async () => {
     const ac = new AbortController();
     const before = readdirSync(tmpdir()).filter((x) => x.startsWith("pdmcp-dup-")).length;

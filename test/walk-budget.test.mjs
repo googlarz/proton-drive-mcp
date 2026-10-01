@@ -39,7 +39,7 @@ function makeSvc(n, delay) {
 }
 
 beforeEach(() => { resetWalkCacheForTests(); delete process.env.PROTON_DRIVE_WALK_BUDGET_MS; delete process.env.PROTON_DRIVE_WALK_TTL_MS; });
-afterEach(() => { resetWalkCacheForTests(); });
+afterEach(async () => { abortBackgroundRefreshes(); await flushWalkIndexForTests(); resetWalkCacheForTests(); });
 
 // 6 folders at concurrency 1, 40 ms each: root done at 40, f1 at 80, f2 at 120 ... full walk ~280 ms.
 const opts = (extra = {}) => ({ concurrency: 1, budgetMs: 100, ...extra });

@@ -5,7 +5,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DriveService } from "../dist/services/drive.js";
-import { walkTree, resetWalkCacheForTests, partialFields } from "../dist/services/walk.js";
+import { walkTree, abortBackgroundRefreshes, resetWalkCacheForTests, flushWalkIndexForTests, partialFields } from "../dist/services/walk.js";
 import { Semaphore } from "../dist/utils/semaphore.js";
 import { docxXmlToText } from "../dist/services/contentExtract.js";
 import { makeSandbox, startServer, waitFor, readPids, sleep } from "./helpers/mcp-client.mjs";
@@ -33,7 +33,7 @@ function makeSvc(stats, n, delay, { failFrom } = {}) {
 }
 
 beforeEach(() => { process.env.PROTON_DRIVE_WALK_CONCURRENCY = "3"; resetWalkCacheForTests(); });
-afterEach(() => { delete process.env.PROTON_DRIVE_WALK_CONCURRENCY; resetWalkCacheForTests(); });
+afterEach(async () => { delete process.env.PROTON_DRIVE_WALK_CONCURRENCY; abortBackgroundRefreshes(); await flushWalkIndexForTests(); resetWalkCacheForTests(); });
 
 describe("process-wide walk limiter", () => {
   it("three overlapping walks of concurrency 8 never exceed the global cap", async () => {

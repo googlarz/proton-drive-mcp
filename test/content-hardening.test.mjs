@@ -1,6 +1,6 @@
 // drive_read_content hardening: ReDoS-safe docx regexes, PDF/DOCX parsing isolated in a worker with
 // memory/time limits, output cap, sanitised error echoes, stale temp-dir sweep, ANSI-safe CLI version.
-import { describe, it, before } from "node:test";
+import { describe, it, before, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, mkdtempSync, utimesSync, readdirSync, existsSync, symlinkSync, rmSync } from "node:fs";
 import { deflateSync } from "node:zlib";
@@ -10,7 +10,7 @@ import { readDriveContent, docxXmlToText } from "../dist/services/content.js";
 import { callContext } from "../dist/utils/subprocess.js";
 import { sweepStaleTempDirs } from "../dist/utils/tempSweep.js";
 import { parseCliMajorMinor, cliCompatWarning } from "../dist/utils/cliVersion.js";
-import { loadOptional, makePdf } from "./helpers/optional-deps.mjs";
+import { loadOptional, makePdf, skipUnlessOptional } from "./helpers/optional-deps.mjs";
 
 function fakeDrive({ node, name = "f", bytes }) {
   return {
@@ -57,7 +57,8 @@ describe("docx regexes are linear on hostile input", () => {
   });
 });
 
-describe("PDF/DOCX parsing runs in a limited worker", () => {
+const needBoth = await skipUnlessOptional("fflate", "unpdf");
+describe("PDF/DOCX parsing runs in a limited worker", needBoth, () => {
   let fflate;
   before(async () => { fflate = await loadOptional("fflate"); });
   const docx = (xml, extra = {}) => Buffer.from(fflate.zipSync({ "word/document.xml": new TextEncoder().encode(xml), ...extra }));

@@ -1,5 +1,5 @@
 // drive_read_content: text of a Drive file via a private temp download.
-import { describe, it, before, afterEach } from "node:test";
+import { describe, it, before, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, writeFileSync, symlinkSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,9 +7,13 @@ import { join } from "node:path";
 import { readDriveContent, sliceCodePoints, docxXmlToText } from "../dist/services/content.js";
 import { callContext } from "../dist/utils/subprocess.js";
 import { makeSandbox, startServer } from "./helpers/mcp-client.mjs";
-import { loadOptional, makePdf } from "./helpers/optional-deps.mjs";
+import { loadOptional, makePdf, skipUnlessOptional, usePrivateTmp } from "./helpers/optional-deps.mjs";
 
 const deps = {};
+// Private TMPDIR per test: readDirs() must only ever see this test's own pdmcp-read-* dirs.
+usePrivateTmp(beforeEach, afterEach);
+const needFflate = await skipUnlessOptional("fflate");
+const needUnpdf = await skipUnlessOptional("unpdf");
 const readDirs = () => readdirSync(tmpdir()).filter((n) => n.startsWith("pdmcp-read-"));
 const LOCK = () => new Error("SQLiteError: database is locked");
 
@@ -31,7 +35,6 @@ const read = (drive, path, args = {}, d = deps) => readDriveContent(drive, { pat
 const withEnv = async (k, v, fn) => { const o = process.env[k]; process.env[k] = v; try { return await fn(); } finally { if (o === undefined) delete process.env[k]; else process.env[k] = o; } };
 
 describe("readDriveContent: text formats", () => {
-  const before0 = readDirs().length;
   for (const [file, body, format] of [
     ["/my-files/a.txt", "hello world", "text"], ["/my-files/a.md", "# Title\n\nbody", "text"], ["/my-files/a.json", '{"a":1}', "text"],
     ["/my-files/a.csv", "a,b\n1,2\n", "text"], ["/my-files/x.html", "<p>raw <b>tags</b></p>", "text"], ["/my-files/s.ts", "export const x = 1;", "text"],
@@ -56,7 +59,10 @@ describe("readDriveContent: text formats", () => {
   it("NUL bytes -> 'not text'", async () => {
     await assert.rejects(read(fakeDrive({ node: fileNode(), bytes: Buffer.from("ab\0cd") }), "/my-files/a.txt"), /not text.*NUL/);
   });
-  it("leaves no temp dir behind", () => assert.equal(readDirs().length, before0));
+  it("leaves no temp dir behind", async () => {
+    await read(fakeDrive({ node: fileNode(), bytes: "x" }), "/my-files/a.txt");
+    assert.equal(readDirs().length, 0);
+  });
 });
 
 describe("readDriveContent: refusals before download", () => {
@@ -111,7 +117,7 @@ describe("readDriveContent: pagination", () => {
   });
 });
 
-describe("readDriveContent: docx", () => {
+describe("readDriveContent: docx", needFflate, () => {
   let fflate;
   before(async () => { fflate = await loadOptional("fflate"); });
   const docx = (entries) => Buffer.from(fflate.zipSync(Object.fromEntries(Object.entries(entries).map(([k, v]) => [k, typeof v === "string" ? new TextEncoder().encode(v) : v]))));
@@ -141,7 +147,7 @@ describe("readDriveContent: docx", () => {
   });
 });
 
-describe("readDriveContent: pdf", () => {
+describe("readDriveContent: pdf", needUnpdf, () => {
   it("extracts the text layer", async () => {
     const r = await read(fakeDrive({ node: fileNode({ mediaType: "application/pdf" }), name: "a.pdf", bytes: makePdf("Hello PDF") }), "/my-files/a.pdf");
     assert.equal(r.format, "pdf");
