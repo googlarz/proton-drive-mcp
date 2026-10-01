@@ -151,7 +151,7 @@ describe("verifyGroups", () => {
     const out = await verifyGroups([g1, g2], async (n) => { hashed.push(n.path); return "h"; }, { maxVerifyBytes: 1e6, maxTotalBytes: 1500 });
     assert.deepEqual(hashed.sort(), ["/my-files/p1", "/my-files/p2"]);
     assert.equal(out.find((g) => g.members[0].path === "/my-files/q1").kind, "same-size");
-    assert.match(out.find((g) => g.members[0].path === "/my-files/q1").verifyNote, /total verify budget/);
+    assert.match(out.find((g) => g.members[0].path === "/my-files/q1").verifyNote, /verify budget reached \(maxVerifyTotalBytes \d+\)/);
   });
 
   it("caps the number of members verified", async () => {
@@ -288,7 +288,7 @@ describe("driveFindDuplicates verify budget", () => {
     let hashed = 0;
     const r = await driveFindDuplicates(drive, { path: "/my-files", verify: true, maxVerifyTotalBytes: 100 }, { ...walk, hash: async () => { hashed++; return "h"; } });
     assert.equal(hashed, 0);
-    assert.match(r.groups[0].verifyNote, /total verify budget/);
+    assert.match(r.groups[0].verifyNote, /verify budget reached \(maxVerifyTotalBytes \d+\)/);
   });
 });
 
