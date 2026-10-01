@@ -41,15 +41,16 @@ function makeSvc(n, delay) {
 beforeEach(() => { resetWalkCacheForTests(); delete process.env.PROTON_DRIVE_WALK_BUDGET_MS; delete process.env.PROTON_DRIVE_WALK_TTL_MS; });
 afterEach(async () => { abortBackgroundRefreshes(); await flushWalkIndexForTests(); resetWalkCacheForTests(); });
 
-// 6 folders at concurrency 1, 40 ms each: root done at 40, f1 at 80, f2 at 120 ... full walk ~280 ms.
-const opts = (extra = {}) => ({ concurrency: 1, budgetMs: 100, ...extra });
+// 6 folders at concurrency 1, 160 ms each: root done at 160, f1 at 320, f2 at 480 ... full walk ~1120 ms.
+// Budget 400 ms falls between f1 and f2 with ~80 ms margin on both sides (slow CI runners still pass).
+const opts = (extra = {}) => ({ concurrency: 1, budgetMs: 400, ...extra });
 
 describe("walk time budget", () => {
   it("returns a partial result at the budget, finishes in the background, then serves the full walk from cache", async () => {
-    const { svc, stats } = makeSvc(6, 40);
+    const { svc, stats } = makeSvc(6, 160);
     const t0 = Date.now();
     const r = await walkTree(svc, "/my-files", opts());
-    assert.ok(Date.now() - t0 < 200, "returned at the budget, not after the full walk");
+    assert.ok(Date.now() - t0 < 900, "returned at the budget, not after the full walk");
     assert.equal(r.partial, true);
     assert.equal(r.continuing, true);
     assert.equal(r.complete, false);
@@ -79,7 +80,7 @@ describe("walk time budget", () => {
   });
 
   it("two callers during one in-flight walk share it", async () => {
-    const { svc, stats } = makeSvc(6, 40);
+    const { svc, stats } = makeSvc(6, 160);
     const [a, b] = await Promise.all([walkTree(svc, "/my-files", opts()), walkTree(svc, "/my-files", opts())]);
     assert.equal(a.partial, true);
     assert.equal(b.partial, true);
@@ -91,7 +92,7 @@ describe("walk time budget", () => {
   });
 
   it("budgetMs 0 waits for the full walk; a joiner with budget 0 waits for the walk another caller left running", async () => {
-    const { svc, stats } = makeSvc(6, 40);
+    const { svc, stats } = makeSvc(6, 160);
     const partial = await walkTree(svc, "/my-files", opts());
     assert.equal(partial.partial, true);
     const full = await walkTree(svc, "/my-files", opts({ budgetMs: 0 }));
@@ -106,7 +107,7 @@ describe("walk time budget", () => {
     process.env.PROTON_DRIVE_INDEX = "1";
     process.env.PROTON_DRIVE_INDEX_DIR = join(tmp, "idx");
     try {
-      const { svc } = makeSvc(6, 40);
+      const { svc } = makeSvc(6, 160);
       const r = await walkTree(svc, "/my-files", opts());
       assert.equal(r.partial, true);
       assert.equal(readIndex(), undefined, "nothing on disk while the walk is unfinished");
@@ -125,20 +126,20 @@ describe("walk time budget", () => {
   });
 
   it("a caller abort before the budget expires cancels the walk", async () => {
-    const { svc, stats } = makeSvc(6, 40);
+    const { svc, stats } = makeSvc(6, 160);
     const ctl = new AbortController();
-    setTimeout(() => ctl.abort(new Error("caller gave up")), 50);
+    setTimeout(() => ctl.abort(new Error("caller gave up")), 200);
     await assert.rejects(walkTree(svc, "/my-files", opts({ budgetMs: 1000, signal: ctl.signal })), /caller gave up/);
     const n = stats.calls.length;
-    await sleep(150);
+    await sleep(600);
     assert.equal(stats.calls.length, n, "the walk stopped listing");
     assert.ok(n < 7);
   });
 
   it("one of two waiters aborting does not cancel the shared walk", async () => {
-    const { svc, stats } = makeSvc(4, 30);
+    const { svc, stats } = makeSvc(4, 120);
     const ctl = new AbortController();
-    setTimeout(() => ctl.abort(new Error("one gave up")), 40);
+    setTimeout(() => ctl.abort(new Error("one gave up")), 160);
     const [x, y] = await Promise.allSettled([
       walkTree(svc, "/my-files", { concurrency: 1, budgetMs: 0, signal: ctl.signal }),
       walkTree(svc, "/my-files", { concurrency: 1, budgetMs: 0 }),
@@ -150,7 +151,7 @@ describe("walk time budget", () => {
   });
 
   it("a caller abort after a partial was returned does not kill the background walk", async () => {
-    const { svc, stats } = makeSvc(6, 40);
+    const { svc, stats } = makeSvc(6, 160);
     const ctl = new AbortController();
     const r = await walkTree(svc, "/my-files", opts({ signal: ctl.signal }));
     assert.equal(r.partial, true);
@@ -161,13 +162,13 @@ describe("walk time budget", () => {
   });
 
   it("shutdown stops the background walk and caches nothing", async () => {
-    const { svc, stats } = makeSvc(6, 40);
+    const { svc, stats } = makeSvc(6, 160);
     const r = await walkTree(svc, "/my-files", opts());
     assert.equal(r.partial, true);
     abortBackgroundRefreshes();
     await flushWalkIndexForTests();
     const n = stats.calls.length;
-    await sleep(120);
+    await sleep(480);
     assert.equal(stats.calls.length, n);
     assert.ok(n < 7);
     resetWalkCacheForTests();
@@ -175,7 +176,7 @@ describe("walk time budget", () => {
   });
 
   it("invalidatePath during the background walk prevents caching the stale tree", async () => {
-    const { svc, stats } = makeSvc(6, 40);
+    const { svc, stats } = makeSvc(6, 160);
     const r = await walkTree(svc, "/my-files", opts());
     assert.equal(r.partial, true);
     invalidatePath("/my-files/f1");
@@ -188,9 +189,9 @@ describe("walk time budget", () => {
   });
 
   it("an invalidation while a caller still waits does not cache that walk's result", async () => {
-    const { svc } = makeSvc(3, 30);
+    const { svc } = makeSvc(3, 120);
     const p = walkTree(svc, "/my-files", { concurrency: 1, budgetMs: 0 });
-    await sleep(20);
+    await sleep(80);
     invalidatePath("/my-files/f1");
     const r = await p;
     assert.equal(r.complete, true);
