@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.3 — 2026-10-01
+
+### Fixed
+- `drive_find_duplicates` with `verify`: on a real 1,125-file drive about half of the verification downloads failed with `database is locked` (the CLI's SQLite cache, hit by 4 parallel downloads) and left groups unverified. Verification now retries that error in a fresh temp dir (max 4 attempts), runs 2 downloads at a time by default, and failure notes are a single line instead of a SQLite dump. Re-run on the same drive: 30 of 30 groups verified, no lock errors.
+
 ## 1.3.2 — 2026-10-01
 
 ### Changed
