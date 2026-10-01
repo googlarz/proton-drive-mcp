@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, lstatSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { ROOT_PATHS, splitRemotePath, joinRemote, type DriveService } from "./drive.js";
-import { walkTree, type WalkResult } from "./walk.js";
+import { walkTree, staleFields, type WalkResult } from "./walk.js";
 import { globMatch } from "../utils/glob.js";
 import { validateLocalPath, validateRemotePath } from "../utils/validation.js";
 import { isProtectedEntry } from "../utils/localguard.js";
@@ -138,7 +138,7 @@ export async function syncPlan(svc: DriveService, a: SyncPlanArgs, walk: typeof 
   const patterns = a.ignore ?? DEFAULT_IGNORE;
   const ignore = makeIgnore(patterns);
 
-  const w = await walk(svc, driveRoot, { exclude: patterns.filter((p) => !/[*?/]/.test(p)) });
+  const w = await walk(svc, driveRoot, { exclude: patterns.filter((p) => !/[*?/]/.test(p)), noDisk: true }); // a plan must come from a current walk
   const scan = scanLocal(localRoot, ignore);
   const diff = await diffTrees(scan.files, w, { compare, ignore, hashLocal: (rel) => sha1File(join(localRoot, ...rel.split("/"))) });
 
@@ -155,6 +155,7 @@ export async function syncPlan(svc: DriveService, a: SyncPlanArgs, walk: typeof 
     listsTruncated: [diff.onlyLocal, diff.onlyDrive, diff.changed].some((l) => l.length > limit),
     complete: w.complete && !scan.truncated,
     driveWalkComplete: w.complete,
+    ...staleFields(w),
     skipped: cap(w.skipped),
     local: { scanned: scan.scanned, symlinksSkipped: scan.symlinksSkipped, unreadable: scan.unreadable, protectedSkipped: scan.protectedSkipped, truncated: scan.truncated, maxEntries: MAX_LOCAL_ENTRIES },
     note: "Plan only. onlyLocal = not on Drive, onlyDrive = not local; 'maybe changed' compares mtime (Drive claimed time) and can be a false positive." +

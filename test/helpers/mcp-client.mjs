@@ -53,7 +53,7 @@ export const readPids = (file) => readJsonLines(file);
 /** Base env for a server/CLI process talking to the fake binary. */
 export function fakeEnv(mode, sandbox, extra = {}) {
   const env = { ...process.env };
-  for (const k of Object.keys(env)) if (k.startsWith("FAKE_") || k === "PROTON_DRIVE_SYNC_PATH" || k === "PROTON_DRIVE_LOCAL_ROOT") delete env[k];
+  for (const k of Object.keys(env)) if (k.startsWith("FAKE_") || k === "PROTON_DRIVE_SYNC_PATH" || k.startsWith("PROTON_DRIVE_INDEX") || k === "PROTON_DRIVE_LOCAL_ROOT") delete env[k];
   return {
     ...env,
     PROTON_DRIVE_BIN: FAKE_CLI,

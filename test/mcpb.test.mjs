@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { ROOT, makeSandbox, startServer } from "./helpers/mcp-client.mjs";
 
@@ -27,13 +28,35 @@ describe("mcpb manifest", () => {
     const refs = Object.values(env).map((v) => v.match(/^\$\{user_config\.(\w+)\}$/)?.[1]);
     assert.ok(refs.every(Boolean));
     assert.deepEqual([...refs].sort(), Object.keys(manifest.user_config).sort());
-    assert.deepEqual(Object.keys(env).sort(), ["PROTON_DRIVE_BIN", "PROTON_DRIVE_SYNC_PATH"]);
+    assert.deepEqual(Object.keys(env).sort(), ["PROTON_DRIVE_BIN", "PROTON_DRIVE_INDEX", "PROTON_DRIVE_SYNC_PATH"]);
     assert.ok(Object.values(manifest.user_config).every((c) => c.required === false));
   });
 
   it("launcher exists and args point to it", () => {
     assert.deepEqual(manifest.server.mcp_config.args, ["${__dirname}/launcher.mjs"]);
     assert.match(read("mcpb", "launcher.mjs"), /delete process\.env\[key\]/);
+  });
+
+  it("persistent_index is an opt-in boolean (default false) with the plaintext warning", () => {
+    const c = manifest.user_config.persistent_index;
+    assert.equal(c.type, "boolean");
+    assert.equal(c.default, false);
+    assert.match(c.description, /NOT encrypted/);
+  });
+
+  it("launcher turns only true into PROTON_DRIVE_INDEX=1 and unsets false, empty and placeholders", () => {
+    const src = read("mcpb", "launcher.mjs").split("// index.js only")[0];
+    const run = (v) => {
+      const env = { ...process.env };
+      delete env.PROTON_DRIVE_INDEX;
+      if (v !== undefined) env.PROTON_DRIVE_INDEX = v;
+      const out = execFileSync(process.execPath, ["--input-type=module", "-e", `${src}\nconsole.log(JSON.stringify(process.env.PROTON_DRIVE_INDEX ?? null));`], { env, encoding: "utf8" });
+      return JSON.parse(out);
+    };
+    assert.equal(run("true"), "1");
+    assert.equal(run("TRUE"), "1");
+    assert.equal(run("1"), "1");
+    for (const v of ["false", "", "  ", "0", "${user_config.persistent_index}", undefined]) assert.equal(run(v), null, String(v));
   });
 
   it("tool names equal the server's real tools/list", async () => {

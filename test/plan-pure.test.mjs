@@ -102,6 +102,12 @@ describe("scanLocal and syncPlan (real temp dir, injected walk)", () => {
     assert.deepEqual(calls, []);
   });
 
+  it("never reads a saved index (noDisk): a plan must come from a current walk", async () => {
+    let seen;
+    await syncPlan({}, { localPath: dir, drivePath: "/my-files/p" }, async (_s, _p, opts) => { seen = opts; return walk([]); });
+    assert.equal(seen.noDisk, true);
+  });
+
   it("up direction reports no download bytes; sha1 equals node's hash of the content", async () => {
     const r = await syncPlan({}, { localPath: dir, drivePath: "/my-files/p" }, async () => walk([]));
     assert.equal("download" in r.bytes, false);
