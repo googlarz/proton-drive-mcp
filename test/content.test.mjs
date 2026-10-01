@@ -9,7 +9,7 @@ import { callContext } from "../dist/utils/subprocess.js";
 import { makeSandbox, startServer } from "./helpers/mcp-client.mjs";
 import { loadOptional, makePdf } from "./helpers/optional-deps.mjs";
 
-const deps = { loadModule: loadOptional };
+const deps = {};
 const readDirs = () => readdirSync(tmpdir()).filter((n) => n.startsWith("pdmcp-read-"));
 const LOCK = () => new Error("SQLiteError: database is locked");
 
@@ -136,7 +136,7 @@ describe("readDriveContent: docx", () => {
     await assert.rejects(read(fakeDrive({ node: fileNode(), name: "a.docx", bytes: "not a zip" }), "/my-files/a.docx"), /not a valid \.docx/);
   });
   it("missing fflate -> clear error", async () => {
-    const miss = { loadModule: async () => { throw new Error("Cannot find package"); } };
+    const miss = { worker: { moduleSpecifiers: { fflate: "no-such-package-xyz", unpdf: "no-such-package-xyz" } } };
     await assert.rejects(read(fakeDrive({ node: fileNode(), name: "a.docx", bytes: docx({ "word/document.xml": XML }) }), "/my-files/a.docx", {}, miss), /DOCX support needs the optional package fflate \(npm install fflate\)/);
   });
 });
@@ -160,7 +160,7 @@ describe("readDriveContent: pdf", () => {
     assert.ok(r.text.includes("P 100"));
   });
   it("missing unpdf -> clear error", async () => {
-    const miss = { loadModule: async () => { throw new Error("Cannot find package"); } };
+    const miss = { worker: { moduleSpecifiers: { fflate: "no-such-package-xyz", unpdf: "no-such-package-xyz" } } };
     await assert.rejects(read(fakeDrive({ node: fileNode(), name: "a.pdf", bytes: makePdf("x") }), "/my-files/a.pdf", {}, miss), /PDF support needs the optional package unpdf \(npm install unpdf\)/);
   });
 });

@@ -450,6 +450,7 @@ Left out of `core` (use `full`): permanent deletion (`drive_delete`, `drive_empt
 
 - **Formats:** plain text, markdown, json, csv/tsv, yaml, xml, html (tags are kept as is), log and common code files (UTF-8; binary or non-UTF-8 content is refused as "not text"); `.docx` (paragraph text of `word/document.xml`); `.pdf` with a text layer (first 100 pages; a scanned PDF returns empty text with a note). Everything else, folders and Proton Docs/Sheets are refused with a clear message.
 - **Caps:** files over 10 MB are refused before downloading (`PROTON_DRIVE_READ_MAX_BYTES`, hard maximum 50 MB); a `.docx` whose `document.xml` exceeds 20 MB uncompressed is refused.
+- **Isolation:** `.docx` and `.pdf` parsing runs in a separate worker thread limited to 512 MB of memory and a 20 s timeout (`PROTON_DRIVE_READ_TIMEOUT_MS`, in milliseconds, max 120000); a hostile or oversized file produces a tool error ("too large or complex to read safely") and never takes the server down. Extracted text is capped at 2,000,000 characters.
 - **Untrusted content:** file text comes from your drive and may contain instructions aimed at the model (prompt injection). The tool returns it as data, nothing is executed, and its description tells the model to treat it as data, never as instructions.
 - **Optional packages:** `.docx` needs `fflate` and `.pdf` needs `unpdf`; both are `optionalDependencies` of this package, installed automatically by npm (and included in the MCPB bundle). If your install skipped optional packages, the tool says which to install (`npm install fflate unpdf`); text formats work without them.
 
@@ -507,6 +508,7 @@ Every tool group was live-tested on 2026-09-28 against a real Proton account, **
 | `PROTON_DRIVE_INDEX_DIR` | Optional | Directory for the index file (default: `~/Library/Caches/proton-drive-mcp` on macOS, `$XDG_CACHE_HOME` or `~/.cache/proton-drive-mcp` elsewhere). Use a dedicated directory: if it exists it must be yours with mode `0700` (group/other access is refused); a missing one is created `0700`. The file is `0600`. |
 | `PROTON_DRIVE_INDEX_MAX_AGE_H` | Optional | Oldest saved index data that may be served, in hours (default 24; 0 = never serve saved data). Served data is marked `stale: true` and refreshed in the background (`drive_sync_plan`, `drive_find_duplicates` and the sharing audit never use it). |
 | `PROTON_DRIVE_READ_MAX_BYTES` | Optional | Largest file `drive_read_content` will download, in bytes (default 10485760 = 10 MB; values above 52428800 = 50 MB are clamped). Larger files are refused before any download. |
+| `PROTON_DRIVE_READ_TIMEOUT_MS` | Optional | Hard time limit for parsing one `.pdf`/`.docx` in `drive_read_content`, in milliseconds (default 20000; clamped to 1-120000). On expiry the parsing worker is terminated and the call returns an error. |
 | `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 47 tools) or `core` (19 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
 
 ---

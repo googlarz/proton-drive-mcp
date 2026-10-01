@@ -39,6 +39,8 @@ import { invalidatePath, abortBackgroundRefreshes } from "./services/walk.js";
 import { getSyncRoot, readSyncFile, writeSyncFile, syncFileExists } from "./utils/syncfs.js";
 import type { AlbumPhoto } from "./types/index.js";
 import { readDriveContent } from "./services/content.js";
+import { showValue } from "./utils/text.js";
+import { sweepStaleTempDirs } from "./utils/tempSweep.js";
 import { driveUsage, driveFindDuplicates, driveSharingAudit } from "./services/analytics.js";
 
 const require = createRequire(import.meta.url);
@@ -1155,12 +1157,7 @@ export function resolveTier(raw: string | undefined): "full" | "core" {
   return "full";
 }
 
-// Text shown to the human: control characters and newlines are neutralised and the MIDDLE of a
-// long value is elided, so two long names sharing a prefix (or a spoofed line break) stay distinguishable.
-export function showValue(v: unknown, head = 120, tail = 60): string {
-  const t = (typeof v === "string" ? v : JSON.stringify(v) ?? String(v)).replace(/[\x00-\x1f\x7f\u2028\u2029]/g, " ");
-  return t.length > head + tail + 1 ? `${t.slice(0, head)}…${t.slice(-tail)}` : t;
-}
+export { showValue };
 
 export function describeArgs(args: Record<string, unknown>): string {
   return Object.entries(args).filter(([k]) => k !== "confirmed").map(([k, v]) => {
@@ -1723,6 +1720,7 @@ export async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   logger.info(`proton-drive-mcp v${VERSION} running`);
+  void sweepStaleTempDirs(); // after connect so it can never delay initialize; best-effort, never throws
 
   // Probe the CLI after connecting so a slow `version` can never delay
   // `initialize` (hosts time out at ~5s). A missing CLI still leaves the server

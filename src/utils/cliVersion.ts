@@ -4,7 +4,7 @@ export const ISSUES_URL = "https://github.com/googlarz/proton-drive-mcp/issues";
 
 /** Extracts the CLI's "major.minor" from `proton-drive version` output ("Proton Drive CLI cli-drive@0.8.0+abc"), or undefined. */
 export function parseCliMajorMinor(text: string): string | undefined {
-  const m = text.match(/Proton Drive CLI\s+\S*?(\d+\.\d+)\.\d+/);
+  const m = text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").match(/Proton Drive CLI\s+\S*?(\d+\.\d+)\.\d+/);
   return m?.[1];
 }
 

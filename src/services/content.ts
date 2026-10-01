@@ -5,13 +5,20 @@ import type { DriveService } from "./drive.js";
 import { validateLocalPath } from "../utils/validation.js";
 import { callContext } from "../utils/subprocess.js";
 import { retryOnLocked } from "../utils/lockRetry.js";
+import { showValue } from "../utils/text.js";
+import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
+
+export { docxXmlToText } from "./contentExtract.js";
 
 export const DEFAULT_MAX_CHARS = 20_000;
 export const MAX_MAX_CHARS = 100_000;
 const DEFAULT_READ_MAX_BYTES = 10 * 1024 * 1024;
 const HARD_READ_MAX_BYTES = 50 * 1024 * 1024;
-const DOCX_MAX_UNCOMPRESSED = 20 * 1024 * 1024;
-const PDF_MAX_PAGES = 100;
+/** Text collected from a PDF/DOCX stops here (code units); the parent never holds more. */
+const MAX_EXTRACT_CHARS = 2_000_000;
+const DEFAULT_READ_TIMEOUT_MS = 20_000;
+const MAX_READ_TIMEOUT_MS = 120_000;
 
 const TEXT_EXTS = new Set([
   "txt", "text", "md", "markdown", "json", "jsonl", "csv", "tsv", "yaml", "yml", "xml", "html", "htm", "log", "ini", "toml", "cfg", "conf", "env",
@@ -26,8 +33,11 @@ export interface ReadContentResult {
   truncated: boolean; nextOffset?: number; note?: string;
 }
 export interface ReadContentDeps {
-  /** Loads an optional package ("fflate", "unpdf"); defaults to a dynamic import. */
-  loadModule?: (name: string) => Promise<any>;
+  /** Overrides for the PDF/DOCX worker (tests): limits, text cap, package specifiers, a hook receiving the Worker. */
+  worker?: {
+    maxOldGenerationSizeMb?: number; timeoutMs?: number; maxTextChars?: number;
+    moduleSpecifiers?: Record<string, string>; onWorker?: (w: Worker) => void;
+  };
 }
 
 /** Download cap in bytes: PROTON_DRIVE_READ_MAX_BYTES, default 10 MB, never above 50 MB. */
@@ -35,8 +45,6 @@ export function readMaxBytes(): number {
   const n = Number(process.env["PROTON_DRIVE_READ_MAX_BYTES"]);
   return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), HARD_READ_MAX_BYTES) : DEFAULT_READ_MAX_BYTES;
 }
-
-const defaultLoad = (name: string): Promise<any> => import(name);
 
 function extOf(path: string): string {
   const name = path.slice(path.lastIndexOf("/") + 1);
@@ -62,69 +70,45 @@ function decodeUtf8(buf: Buffer): string {
   }
 }
 
-const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
-function decodeEntities(s: string): string {
-  return s.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (m, e: string) => {
-    if (e[0] !== "#") return ENTITIES[e.toLowerCase()] ?? m;
-    const cp = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-    return cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff) ? String.fromCodePoint(cp) : "";
+/** Hard timeout for one PDF/DOCX parse: PROTON_DRIVE_READ_TIMEOUT_MS, default 20 s, clamped to 1 ms .. 120 s. */
+export function readTimeoutMs(): number {
+  const n = Number(process.env["PROTON_DRIVE_READ_TIMEOUT_MS"]);
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.max(Math.floor(n), 1), MAX_READ_TIMEOUT_MS) : DEFAULT_READ_TIMEOUT_MS;
+}
+
+interface Extracted { text: string; note?: string; capped: boolean }
+
+/**
+ * Parses in a worker thread with a memory cap, a hard timeout and the request's abort signal, so a hostile
+ * PDF/DOCX can take down only the worker. The bytes are copied and transferred; the worker needs no file access.
+ */
+async function extractInWorker(format: "pdf" | "docx", buf: Buffer, opts: NonNullable<ReadContentDeps["worker"]>): Promise<Extracted> {
+  const tooBig = new Error(`${format.toUpperCase()} is too large or complex to read safely`);
+  const signal = callContext.getStore()?.signal;
+  if (signal?.aborted) throw new Error("cancelled");
+  const bytes = new Uint8Array(buf.length); // not buf.buffer: small Buffers share a pooled ArrayBuffer
+  bytes.set(buf);
+  const w = new Worker(fileURLToPath(new URL("./contentWorker.js", import.meta.url)), {
+    workerData: { kind: format, bytes, maxChars: opts.maxTextChars ?? MAX_EXTRACT_CHARS, moduleSpecifiers: opts.moduleSpecifiers },
+    transferList: [bytes.buffer],
+    resourceLimits: { maxOldGenerationSizeMb: opts.maxOldGenerationSizeMb ?? 512, maxYoungGenerationSizeMb: 32 },
   });
-}
-
-/** Text of word/document.xml: one line per paragraph, w:t runs, w:tab and w:br handled minimally. */
-export function docxXmlToText(xml: string): string {
-  const paras = xml.split("</w:p>");
-  paras.pop(); // text after the last paragraph end is the closing body markup
-  const run = /<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>|<w:tab\s*\/>|<w:(?:br|cr)\b[^>]*\/?>/g;
-  return paras
-    .map((p) => {
-      let line = "";
-      for (const m of p.matchAll(run)) line += m[1] !== undefined ? decodeEntities(m[1]) : m[0].startsWith("<w:tab") ? "\t" : "\n";
-      return line;
-    })
-    .join("\n");
-}
-
-async function docxText(buf: Buffer, load: (n: string) => Promise<any>): Promise<string> {
-  let fflate: any;
-  try { fflate = await load("fflate"); } catch { throw new Error("DOCX support needs the optional package fflate (npm install fflate)"); }
-  let tooBig = false;
-  let files: Record<string, Uint8Array>;
+  opts.onWorker?.(w);
+  let onAbort: (() => void) | undefined;
+  let timer: NodeJS.Timeout | undefined;
   try {
-    files = fflate.unzipSync(new Uint8Array(buf), {
-      filter: (f: { name: string; originalSize: number }) => {
-        if (f.name !== "word/document.xml") return false;
-        if (f.originalSize > DOCX_MAX_UNCOMPRESSED) { tooBig = true; return false; }
-        return true;
-      },
+    return await new Promise<Extracted>((resolve, reject) => {
+      timer = setTimeout(() => reject(tooBig), opts.timeoutMs ?? readTimeoutMs());
+      onAbort = () => reject(new Error("cancelled"));
+      signal?.addEventListener("abort", onAbort, { once: true });
+      w.once("message", (m: { ok: boolean; error?: string } & Extracted) => (m.ok ? resolve(m) : reject(new Error(m.error ?? "read failed"))));
+      w.once("error", () => reject(tooBig)); // ERR_WORKER_OUT_OF_MEMORY or a crash inside the parser
+      w.once("exit", () => reject(tooBig)); // no-op once settled
     });
-  } catch {
-    throw new Error("not a valid .docx (could not unzip)");
-  }
-  if (tooBig) throw new Error(`refused: word/document.xml is larger than ${DOCX_MAX_UNCOMPRESSED / 1048576} MB uncompressed`);
-  const entry = files["word/document.xml"];
-  if (!entry) throw new Error("not a valid .docx (no word/document.xml)");
-  return docxXmlToText(new TextDecoder("utf-8").decode(entry));
-}
-
-async function pdfText(buf: Buffer, load: (n: string) => Promise<any>): Promise<{ text: string; note?: string }> {
-  let unpdf: any;
-  try { unpdf = await load("unpdf"); } catch { throw new Error("PDF support needs the optional package unpdf (npm install unpdf)"); }
-  const pdf = await unpdf.getDocumentProxy(new Uint8Array(buf));
-  try {
-    const pages = Math.min(pdf.numPages as number, PDF_MAX_PAGES);
-    const parts: string[] = [];
-    for (let i = 1; i <= pages; i++) {
-      const tc = await (await pdf.getPage(i)).getTextContent();
-      parts.push(tc.items.map((it: { str?: string; hasEOL?: boolean }) => (it.str ?? "") + (it.hasEOL ? "\n" : "")).join(""));
-    }
-    const text = parts.join("\n\n");
-    const notes: string[] = [];
-    if (!text.trim()) notes.push("no text layer (scanned?)");
-    if (pdf.numPages > PDF_MAX_PAGES) notes.push(`only the first ${PDF_MAX_PAGES} of ${pdf.numPages} pages were read`);
-    return { text, note: notes.join("; ") || undefined };
   } finally {
-    await pdf.destroy?.();
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+    await w.terminate();
   }
 }
 
@@ -173,29 +157,33 @@ export async function readDriveContent(drive: DriveService, args: ReadContentArg
   if (!Number.isInteger(offset) || offset < 0) throw new Error("offset must be a non-negative integer");
   const node = ((await drive.info(path)) ?? {}) as Record<string, any>;
   const mediaType = typeof node.mediaType === "string" ? node.mediaType : "";
-  if (node.type === "folder" || node.type === "album") throw new Error(`${path} is a folder; drive_read_content reads files (use drive_list).`);
+  if (node.type === "folder" || node.type === "album") throw new Error(`${showValue(path)} is a folder; drive_read_content reads files (use drive_list).`);
   if (/^application\/vnd\.proton\./i.test(mediaType)) {
-    throw new Error(`${path} is a Proton Docs/Sheets document; the CLI cannot download these, so its text cannot be read.`);
+    throw new Error(`${showValue(path)} is a Proton Docs/Sheets document; the CLI cannot download these, so its text cannot be read.`);
   }
   const format = pickFormat(path, mediaType);
-  if (!format) throw new Error(`unsupported format for ${path}${mediaType ? ` (${mediaType})` : ""}. Supported: ${SUPPORTED}.`);
+  if (!format) throw new Error(`unsupported format for ${showValue(path)}${mediaType ? ` (${showValue(mediaType, 60, 20)})` : ""}. Supported: ${SUPPORTED}.`);
   const cap = readMaxBytes();
+  // claimedSize is uploader-controlled: a lying claim only costs download bandwidth, since the
+  // post-download lstat size check (and the worker limits) still apply to the real bytes.
   const declared = node.activeRevision?.claimedSize;
   if (typeof declared === "number" && declared > cap) {
-    throw new Error(`${path} is ${declared} bytes, over the read cap of ${cap} bytes (PROTON_DRIVE_READ_MAX_BYTES, max ${HARD_READ_MAX_BYTES}). Use drive_download.`);
+    throw new Error(`${showValue(path)} is ${declared} bytes, over the read cap of ${cap} bytes (PROTON_DRIVE_READ_MAX_BYTES, max ${HARD_READ_MAX_BYTES}). Use drive_download.`);
   }
 
   const buf = await retryOnLocked(() => downloadBytes(drive, path, cap));
-  const load = deps.loadModule ?? defaultLoad;
   let text: string;
   let note: string | undefined;
+  let capped = false;
   if (format === "text") text = decodeUtf8(buf);
-  else if (format === "docx") text = await docxText(buf, load);
-  else ({ text, note } = await pdfText(buf, load));
+  else {
+    ({ text, note, capped } = await extractInWorker(format, buf, deps.worker ?? {}));
+    if (capped) note = [note, `text capped at ${deps.worker?.maxTextChars ?? MAX_EXTRACT_CHARS} characters; the rest of the file was not read`].filter(Boolean).join("; ");
+  }
   text = text.replaceAll("\0", "");
 
   const s = sliceCodePoints(text, offset, maxChars);
-  const truncated = s.end < s.total;
+  const truncated = s.end < s.total || capped;
   return {
     path, format, size: buf.length, chars: s.total, offset, text: s.text, truncated,
     ...(truncated ? { nextOffset: s.end } : {}),
