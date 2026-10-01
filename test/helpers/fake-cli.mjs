@@ -15,6 +15,7 @@
 //   FAKE_STDOUT       payload printed in json / ansi-prefixed-json mode (default "[]")
 //   FAKE_SLEEP_MS     delay before answering in json mode
 //   FAKE_PIDFILE      hang mode appends {role,pid,argv0} lines (child + grandchild)
+//   FAKE_CLI_VERSION  version text override for `version` (default: CLI 0.8.0 / SDK 0.21.0 text; set verbatim, e.g. "garbage")
 //   FAKE_HANG_VERSION 1 = `version` obeys FAKE_MODE (hang); otherwise it always prints version text
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -41,7 +42,7 @@ function hang() {
 }
 
 if (isVersion && process.env.FAKE_HANG_VERSION !== "1") {
-  process.stdout.write("Proton Drive CLI cli-drive@0.8.0+abc\nProton Drive SDK js@0.21.0+abc\n");
+  process.stdout.write(process.env.FAKE_CLI_VERSION ?? "Proton Drive CLI cli-drive@0.8.0+abc\nProton Drive SDK js@0.21.0+abc\n");
   process.exit(0);
 }
 

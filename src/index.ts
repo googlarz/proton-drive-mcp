@@ -22,7 +22,7 @@ import {
 } from "./services/drive.js";
 import { PROMPTS, getPromptText } from "./prompts.js";
 import { isMainModule } from "./utils/isMainModule.js";
-import { checkCliAvailable, callContext, killAllChildren } from "./utils/subprocess.js";
+import { checkCliAvailable, runDriveRaw, callContext, killAllChildren } from "./utils/subprocess.js";
 import {
   DriveCliNotFoundError,
   DriveCliError,
@@ -32,6 +32,7 @@ import {
 } from "./utils/errors.js";
 import { validateRemotePath, validateRemotePathList, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
+import { cliCompatWarning } from "./utils/cliVersion.js";
 import { driveSearch, driveTree } from "./services/find.js";
 import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type Direction, type Compare } from "./services/plan.js";
 import { invalidatePath, abortBackgroundRefreshes } from "./services/walk.js";
@@ -1709,6 +1710,9 @@ export async function main() {
       logger.error(cliCheck.reason === "not_executable"
         ? "proton-drive CLI found but not executable. Run: chmod +x $(which proton-drive)"
         : "proton-drive CLI not found. Download from https://proton.me/download/drive/cli/index.html, or set PROTON_DRIVE_BIN to its absolute path (find it with `which proton-drive`).");
+    } else {
+      // One stderr line (the logger never writes stdout); best effort, never fatal.
+      runDriveRaw(["version"]).then((t) => { const w = cliCompatWarning(t); if (w) logger.warn(w); }, () => {});
     }
   });
 }
