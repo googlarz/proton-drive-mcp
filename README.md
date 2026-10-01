@@ -108,7 +108,7 @@ Restart Claude Desktop. Check **`+` → Connectors → proton-drive-mcp** to con
 
 ### One-click install (MCPB bundle)
 
-Instead of editing JSON, download `proton-drive-mcp-<version>.mcpb` from the [latest GitHub release](https://github.com/googlarz/proton-drive-mcp/releases/latest) and open it (or drag it into **Settings → Extensions** in Claude Desktop). In the extension settings, set **proton-drive CLI path** to the output of `which proton-drive` (usually `~/.local/bin/proton-drive`); optionally set the **Proton Drive sync folder** to enable `drive_read_file` / `drive_write_file`. You still need the official `proton-drive` CLI installed and `proton-drive auth login` done once.
+Instead of editing JSON, download `proton-drive-mcp-<version>.mcpb` from the [latest GitHub release](https://github.com/googlarz/proton-drive-mcp/releases/latest) and open it (or drag it into **Settings → Extensions** in Claude Desktop). In the extension settings, set **proton-drive CLI path** to the output of `which proton-drive` (usually `~/.local/bin/proton-drive`); optionally set the **Proton Drive sync folder** to enable `drive_read_file` / `drive_write_file`, and the **Persistent search index** switch (off by default; it stores file names in plain text on this computer, see [Persistent index](#persistent-index-opt-in)). You still need the official `proton-drive` CLI installed and `proton-drive auth login` done once.
 
 ### If installed globally
 
@@ -245,7 +245,7 @@ proton-drive-cli index status                                                   
 proton-drive-cli index clear                                                          # delete the saved index file
 ```
 
-- The first walk of a large drive can take minutes (measured ~25 s per 1,200 files at concurrency 8). Later calls reuse a 5-minute cache; `refresh` bypasses it.
+- The first walk of a large drive can take minutes (measured ~25 s per 1,200 files at concurrency 8). Later calls reuse a 5-minute in-memory cache; `refresh` bypasses it. With the opt-in persistent index, a saved copy up to 24 h old can answer first (marked `stale: true`).
 - Walks skip `.git` and `node_modules` by default.
 - With `PROTON_DRIVE_INDEX=1`, results may come from a saved index (`stale: true` = served from the saved index, not a walk made now) while a refresh runs; repeat the call or pass `refresh: true` for a fresh read. Off by default, see [Persistent index](#persistent-index-opt-in).
 - Read-only tools (`drive_search`, `drive_tree`, `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_sync_plan`) change nothing. `drive_bulk_move` and `drive_bulk_trash` are two-step: call without `confirmed` for the plan, then with `confirmed: true` to apply. Bulk trash is reversible with `drive_restore`.
@@ -411,7 +411,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 - `drive_move` accepts a full destination path (parent + new name) for a familiar interface, but the underlying CLI only has separate `move` (change parent) and `rename` (change name) commands — this MCP translates automatically, issuing one or both as needed.
 - `drive_delete` only works on items already in `/trash` or `/photos-trash` — the CLI rejects live paths. Trash an item first with `drive_trash`, or use `drive_empty_trash` to clear everything at once.
 - If the client declares MCP elicitation (form mode), a refused `confirmed` gate is put to the human instead, and `drive_bulk_move` / `drive_bulk_trash` ask before applying a `confirmed: true` call. Only an explicit approval runs the call; decline, cancel, timeout or error keep the refusal, and after 5 declined prompts in a minute the server stops prompting. This only upgrades refusals and bulk applies: a compromised model that supplies `confirmed: true` on any other tool is **not** stopped by it. Clients without elicitation behave as before. Confirmation prompts need a client that supports elicitation (Claude Code CLI today; Claude Desktop is unverified).
-- Walk-based tools (`drive_tree`, `drive_search`, `drive_usage`, `drive_find_duplicates`) read from a cache up to 5 minutes old; changes made by other clients or processes are not seen until it expires or you pass `refresh: true`. The first walk of a large drive can take minutes (measured about 25 s per 1200 files at concurrency 8).
+- Walk-based tools (`drive_tree`, `drive_search`, `drive_usage`, `drive_find_duplicates`) read from a cache up to 5 minutes old (with the opt-in persistent index, up to 24 h old and marked `stale: true`; `drive_sharing_audit`, `drive_sync_plan` and `drive_find_duplicates` never use the saved index); changes made by other clients or processes are not seen until it expires or you pass `refresh: true`. The first walk of a large drive can take minutes (measured about 25 s per 1200 files at concurrency 8).
 - `drive_auth_status` has no native CLI equivalent — it probes by resolving `/my-files` and reports authenticated based on whether that succeeds.
 - Paths are always Drive-absolute: `/my-files/folder/file.pdf`. Relative paths are not supported.
 - All calls include `--json` automatically, except `drive_version`, whose underlying CLI command ignores `--json` and always prints plain text — this MCP parses it directly.
