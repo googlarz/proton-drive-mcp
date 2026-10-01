@@ -1,10 +1,10 @@
 // Persistent walk index store: file safety, limits, opt-in default.
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync, readdirSync, symlinkSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, readdirSync, symlinkSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { indexEnabled, indexDir, indexPath, readIndex, writeIndex, deleteIndex, indexStatus, MAX_ENTRIES } from "../dist/services/walkIndex.js";
+import { indexEnabled, indexDir, indexPath, readIndex, writeIndex, deleteIndex, indexStatus, MAX_ENTRIES, MAX_BYTES } from "../dist/services/walkIndex.js";
 
 let tmp;
 const entry = (i, nodes = 1) => ({
@@ -55,11 +55,39 @@ describe("walk index store", () => {
     assert.equal(back.entries[0].nodes.length, 3);
   });
 
-  it("tightens a pre-existing loose directory", () => {
-    mkdirSync(indexDir(), { recursive: true, mode: 0o755 });
-    assert.equal(writeIndex(file([entry(1)])), "ok");
-    assert.equal(statSync(indexDir()).mode & 0o077, 0);
+  it("never chmods or writes into a pre-existing directory with group/other access; warns once", () => {
+    mkdirSync(indexDir(), { recursive: true });
+    chmodSync(indexDir(), 0o755);
+    const warns = [];
+    const orig = process.stderr.write;
+    process.stderr.write = (m) => { warns.push(String(m)); return true; };
+    let r1, r2;
+    try { r1 = writeIndex(file([entry(1)])); r2 = writeIndex(file([entry(1)])); } finally { process.stderr.write = orig; }
+    assert.equal(r1, "refused");
+    assert.equal(r2, "refused");
+    assert.equal(statSync(indexDir()).mode & 0o777, 0o755);
+    assert.deepEqual(readdirSync(indexDir()), []);
+    assert.equal(warns.filter((w) => w.includes(indexDir())).length, 1);
   });
+
+  it("accepts a pre-existing 0700 directory", () => {
+    mkdirSync(indexDir(), { recursive: true, mode: 0o700 });
+    chmodSync(indexDir(), 0o700);
+    assert.equal(writeIndex(file([entry(1)])), "ok");
+  });
+
+  for (const mask of [0o000, 0o022]) {
+    it(`creates a new directory 0700 under umask ${mask.toString(8).padStart(3, "0")}, leaving parents alone`, () => {
+      const old = process.umask(mask);
+      try {
+        process.env.PROTON_DRIVE_INDEX_DIR = join(tmp, "new-parent", "idx");
+        assert.equal(writeIndex(file([entry(1)])), "ok");
+        assert.equal(statSync(indexDir()).mode & 0o777, 0o700);
+        assert.equal(statSync(indexPath()).mode & 0o777, 0o600);
+        assert.equal(statSync(join(tmp, "new-parent")).mode & 0o777, 0o777 & ~mask);
+      } finally { process.umask(old); }
+    });
+  }
 
   it("refuses a symlinked directory", () => {
     const real = join(tmp, "real"); mkdirSync(real);
@@ -85,6 +113,36 @@ describe("walk index store", () => {
     }
     assert.equal(writeIndex(file([entry(1)])), "ok");
     assert.equal(readIndex().entries.length, 1);
+  });
+
+  it("rejects a file with group/other permission bits (planted 0666)", () => {
+    assert.equal(writeIndex(file([entry(1)])), "ok");
+    chmodSync(indexPath(), 0o666);
+    assert.equal(readIndex(), undefined);
+    chmodSync(indexPath(), 0o640);
+    assert.equal(readIndex(), undefined);
+    chmodSync(indexPath(), 0o600);
+    assert.ok(readIndex());
+  });
+
+  it("rejects a non-regular index file and an oversize one before reading it", () => {
+    mkdirSync(indexPath(), { recursive: true, mode: 0o700 }); // a directory in the way
+    assert.equal(readIndex(), undefined);
+    rmSync(indexPath(), { recursive: true });
+    writeFileSync(indexPath(), "", { mode: 0o600 });
+    truncateSync(indexPath(), MAX_BYTES + 1); // sparse
+    assert.equal(readIndex(), undefined);
+  });
+
+  it("rejects entries completed more than 5 minutes in the future; a small skew is fine", () => {
+    assert.equal(writeIndex(file([{ ...entry(1), completedAt: Date.now() + 3_600_000 }])), "ok");
+    assert.equal(readIndex(), undefined);
+    assert.equal(writeIndex(file([{ ...entry(1), completedAt: Date.now() + 60_000 }])), "ok");
+    assert.ok(readIndex());
+    for (const bad of [null, "x", Infinity]) {
+      writeFileSync(indexPath(), JSON.stringify(file([{ ...entry(1), completedAt: bad }])), { mode: 0o600 });
+      assert.equal(readIndex(), undefined);
+    }
   });
 
   it("keeps only the most recent entries", () => {

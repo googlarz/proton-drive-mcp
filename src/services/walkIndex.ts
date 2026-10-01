@@ -1,6 +1,6 @@
-import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { WalkNode } from "./walk.js";
 import { logger } from "../utils/logger.js";
@@ -8,7 +8,7 @@ import { logger } from "../utils/logger.js";
 /**
  * Opt-in on-disk copy of completed Drive walks (PROTON_DRIVE_INDEX=1). It holds
  * file names, paths and hashes of an end-to-end-encrypted drive in PLAINTEXT, so
- * it is off by default; the file is 0600 in a 0700 directory.
+ * it is off by default; the file is 0600 in a 0700 directory that this code created or that was already private to the user.
  */
 export const INDEX_VERSION = 1;
 export const MAX_ENTRIES = 8;
@@ -45,24 +45,34 @@ export function indexMaxAgeMs(): number {
 
 const lstatOrNull = (p: string) => { try { return lstatSync(p); } catch { return null; } };
 
-/** Reads and validates the index; anything wrong (missing, symlink, corrupt, other version) is "no index". */
+const FUTURE_SKEW_MS = 5 * 60_000;
+const foreignOrLoose = (st: { uid: number; mode: number }) =>
+  (typeof process.getuid === "function" && st.uid !== process.getuid()) || (st.mode & 0o077) !== 0;
+
+/** Reads and validates the index; anything wrong (missing, symlink, loose mode, foreign owner, oversize, corrupt, other version) is "no index". */
 export function readIndex(): IndexFile | undefined {
   const p = indexPath();
-  const st = lstatOrNull(p);
-  if (!st || !st.isFile()) return undefined; // lstat: a symlink is not a regular file
   const dst = lstatOrNull(indexDir());
   if (!dst || !dst.isDirectory()) return undefined;
+  let fd: number | undefined;
   try {
-    const j = JSON.parse(readFileSync(p, "utf8")) as Partial<IndexFile> | null;
+    fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW); // a symlink is never followed
+    const st = fstatSync(fd);
+    if (!st.isFile() || foreignOrLoose(st) || st.size > MAX_BYTES) return undefined; // checked before reading
+    const j = JSON.parse(readFileSync(fd, "utf8")) as Partial<IndexFile> | null;
     if (!j || j.version !== INDEX_VERSION || typeof j.accountKey !== "string" || !Array.isArray(j.entries)) return undefined;
-    const ok = j.entries.every((e) => e && typeof e.key === "string" && typeof e.root === "string" && typeof e.completedAt === "number" && Array.isArray(e.nodes) && e.opts && Array.isArray(e.opts.exclude));
+    const horizon = Date.now() + FUTURE_SKEW_MS;
+    const ok = j.entries.every((e) => e && typeof e.key === "string" && typeof e.root === "string" && Number.isFinite(e.completedAt) && e.completedAt <= horizon && Array.isArray(e.nodes) && e.opts && Array.isArray(e.opts.exclude));
     return ok ? (j as IndexFile) : undefined;
   } catch {
     return undefined;
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
   }
 }
 
 let warnedSize = false;
+const warnedDirs = new Set<string>();
 
 /** Atomic write. Never throws; the result says what happened. */
 export function writeIndex(file: IndexFile, o: { maxBytes?: number } = {}): "ok" | "disabled" | "refused" | "too-large" | "error" {
@@ -76,12 +86,23 @@ export function writeIndex(file: IndexFile, o: { maxBytes?: number } = {}): "ok"
       if (!warnedSize) { warnedSize = true; logger.warn("Persistent walk index not saved: it would exceed the size cap."); }
       return "too-large";
     }
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const dst = lstatSync(dir);
-    if (dst.isSymbolicLink() || !dst.isDirectory()) return "refused";
-    if (typeof process.getuid === "function" && dst.uid !== process.getuid()) return "refused";
-    if ((dst.mode & 0o077) !== 0) chmodSync(dir, 0o700);
-    if ((lstatSync(dir).mode & 0o077) !== 0) return "refused";
+    const existing = lstatOrNull(dir);
+    if (existing) {
+      // Never chmod or take over a directory this code did not create.
+      if (!existing.isDirectory() || foreignOrLoose(existing)) {
+        if (!warnedDirs.has(dir)) {
+          warnedDirs.add(dir);
+          logger.warn(`Persistent walk index not saved: ${dir} must be a real directory owned by you with no group/other access (mode 0700). Use a dedicated directory.`);
+        }
+        return "refused";
+      }
+    } else {
+      mkdirSync(dirname(dir), { recursive: true });
+      mkdirSync(dir, { mode: 0o700 });
+      chmodSync(dir, 0o700); // umask-proof; safe because we just created it
+      const made = lstatSync(dir);
+      if (!made.isDirectory() || foreignOrLoose(made)) return "refused";
+    }
     const target = join(dir, FILE_NAME);
     const tst = lstatOrNull(target);
     if (tst && !tst.isFile()) return "refused"; // symlink or directory in the way

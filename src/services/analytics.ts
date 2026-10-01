@@ -273,7 +273,7 @@ export async function driveFindDuplicates(
   if (o.maxVerifyTotalBytes !== undefined && (!Number.isInteger(o.maxVerifyTotalBytes) || o.maxVerifyTotalBytes < 1 || o.maxVerifyTotalBytes > MAX_VERIFY_TOTAL_BYTES)) {
     throw new Error(`maxVerifyTotalBytes must be an integer between 1 and ${MAX_VERIFY_TOTAL_BYTES}`);
   }
-  const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh });
+  const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh, noDisk: true }); // deletion suggestions must come from a current walk
   const limit = o.limit ?? 20;
   let groups: (DuplicateGroup & { verifyNote?: string })[] = findDuplicateCandidates(walk.nodes, o.minSize ?? 1024);
   let verified = false;

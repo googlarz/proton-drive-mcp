@@ -33,7 +33,7 @@ export interface WalkOptions {
   exclude?: string[];
   /** Ignore the cache and re-walk. */
   refresh?: boolean;
-  /** Never answer from the persistent index (memory cache is still used); for tools where stale data is unsafe. */
+  /** Never answer from the persistent index (memory cache is still used); for tools where saved data is unsafe (plans, deletion suggestions, audits). */
   noDisk?: boolean;
   signal?: AbortSignal;
 }
@@ -47,7 +47,7 @@ export interface WalkResult {
   skipped: { path: string; reason: string }[];
   fromCache: boolean;
   ageMs: number;
-  /** Served from the persistent index (PROTON_DRIVE_INDEX=1) and older than the in-memory TTL. */
+  /** Served from the saved index (PROTON_DRIVE_INDEX=1), not from a walk made in this process; may be hours old (see ageMs). */
   stale?: boolean;
   /** A background re-walk is replacing the stale data. */
   refreshing?: boolean;
@@ -259,7 +259,15 @@ function remember(p: WalkParams, w: RawWalk): void {
 const ACCOUNT_ROOT = "/my-files";
 /** undefined = not loaded yet, null = nothing usable on disk. */
 let disk: { accountKey: string; entries: IndexEntry[] } | null | undefined;
-let diskVerified: Promise<boolean> | undefined;
+type Verdict = "match" | "mismatch" | "unknown";
+let diskVerified: { at: number; ctl: AbortController; promise: Promise<Verdict> } | undefined;
+const VERIFY_TTL_MS = 10 * 60_000;
+let shuttingDown = false;
+const refreshFailedAt = new Map<string, number>();
+const cooldownMs = () => {
+  const v = Number(process.env.PROTON_DRIVE_INDEX_REFRESH_COOLDOWN_MS ?? 300_000);
+  return Number.isFinite(v) && v >= 0 ? v : 300_000;
+};
 let knownAccountKey: string | undefined;
 let persistChain: Promise<void> = Promise.resolve();
 let invalidationSeq = 0;
@@ -286,19 +294,45 @@ function discardDisk(): void {
   try { deleteIndex(); } catch { /* best effort */ }
 }
 
-function verifyDisk(svc: DriveService, signal: AbortSignal | undefined): Promise<boolean> {
-  diskVerified ??= (async () => {
-    try {
-      const current = fingerprint((await svc.listEntries(ACCOUNT_ROOT)).map((e) => e.item));
-      if (current) knownAccountKey = current;
-      if (current && disk && disk.accountKey === current) return true;
-    } catch (err) {
-      if (signal?.aborted) { diskVerified = undefined; throw err; } // cancelled by the caller: keep the file
-    }
-    discardDisk();
-    return false;
-  })();
-  return diskVerified;
+/** Rejects with the caller's own abort reason without touching the shared promise. */
+function raceAbort<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortError(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+/**
+ * One `list /my-files` proves the saved data belongs to the live account. Only a
+ * successful comparison that differs deletes the file; any failure (network, rate
+ * limit, empty or unreadable listing) just serves nothing from disk this time and is
+ * not remembered. The check is shared by concurrent callers on its own signal, so one
+ * caller's abort cannot fail the others, and it is repeated after 10 minutes.
+ */
+async function verifyDisk(svc: DriveService, signal: AbortSignal | undefined): Promise<boolean> {
+  if (diskVerified && Date.now() - diskVerified.at > VERIFY_TTL_MS) diskVerified = undefined;
+  if (!diskVerified) {
+    const ctl = new AbortController();
+    const promise = callContext.run({ signal: ctl.signal }, async (): Promise<Verdict> => {
+      try {
+        const current = fingerprint((await svc.listEntries(ACCOUNT_ROOT)).map((e) => e.item));
+        if (!current) return "unknown";
+        knownAccountKey = current;
+        if (disk && disk.accountKey === current) return "match";
+        discardDisk();
+        return "mismatch";
+      } catch {
+        return "unknown";
+      }
+    });
+    const rec = { at: Date.now(), ctl, promise };
+    diskVerified = rec;
+    void promise.then((v) => { if (v === "unknown" && diskVerified === rec) diskVerified = undefined; });
+  }
+  return (await raceAbort(diskVerified.promise, signal)) === "match";
 }
 
 const toCacheEntry = (e: IndexEntry): CacheEntry => ({
@@ -309,17 +343,17 @@ const toCacheEntry = (e: IndexEntry): CacheEntry => ({
 function diskCandidates(): CacheEntry[] {
   const st = loadDisk();
   const now = Date.now(), maxAge = indexMaxAgeMs();
-  return st ? st.entries.filter((e) => now - e.completedAt <= maxAge).map(toCacheEntry) : [];
+  return st ? st.entries.filter((e) => { const age = now - e.completedAt; return Number.isFinite(age) && age >= 0 && age <= maxAge; }).map(toCacheEntry) : [];
 }
 
 function persist(svc: DriveService, p: WalkParams, w: RawWalk, startSeq: number): void {
   if (!indexEnabled() || !w.complete || !isUnder(p.root, ACCOUNT_ROOT)) return;
   persistChain = persistChain.then(async () => {
     try {
-      if (invalidationSeq !== startSeq) return; // a write happened mid-walk: do not save a possibly outdated tree
+      if (shuttingDown || invalidationSeq !== startSeq) return; // a write happened mid-walk: do not save a possibly outdated tree
       let acct = knownAccountKey ?? (p.root === ACCOUNT_ROOT ? fingerprint(w.nodes.filter((n) => depthOf(n.path) === 2)) : undefined);
       if (!acct) acct = fingerprint((await svc.listEntries(ACCOUNT_ROOT)).map((e) => e.item));
-      if (!acct || invalidationSeq !== startSeq) return;
+      if (!acct || shuttingDown || invalidationSeq !== startSeq) return;
       knownAccountKey = acct;
       const cur = loadDisk();
       const base = cur && cur.accountKey === acct ? cur.entries : [];
@@ -328,7 +362,7 @@ function persist(svc: DriveService, p: WalkParams, w: RawWalk, startSeq: number)
       const file: IndexFile = { version: INDEX_VERSION, accountKey: acct, savedAt: Date.now(), entries };
       if (writeIndex(file) === "ok") {
         disk = { accountKey: acct, entries };
-        diskVerified = Promise.resolve(true); // saved under the live drive's own account key
+        diskVerified = { at: Date.now(), ctl: new AbortController(), promise: Promise.resolve("match") }; // saved under the live drive's own account key
       }
     } catch (err) {
       logger.warn("Persistent walk index not updated:", err instanceof Error ? err.message : String(err));
@@ -338,11 +372,16 @@ function persist(svc: DriveService, p: WalkParams, w: RawWalk, startSeq: number)
 
 /** Stops background index refreshes (process shutdown). */
 export function abortBackgroundRefreshes(): void {
+  shuttingDown = true;
+  diskVerified?.ctl.abort(new Error("walk aborted"));
   for (const r of refreshes.values()) r.controller.abort(new Error("walk aborted"));
 }
 
-function startRefresh(svc: DriveService, p: WalkParams): void {
-  if (refreshes.has(p.key)) return;
+/** True when a refresh is running (or was just started); false while a failed one cools down. */
+function startRefresh(svc: DriveService, p: WalkParams): boolean {
+  if (refreshes.has(p.key)) return true;
+  const failed = refreshFailedAt.get(p.key);
+  if (failed !== undefined && Date.now() - failed < cooldownMs()) return false;
   if (!exitHooked) { exitHooked = true; process.once("exit", abortBackgroundRefreshes); }
   const controller = new AbortController();
   const rec = { controller, root: p.root, superseded: false, promise: Promise.resolve() };
@@ -351,14 +390,19 @@ function startRefresh(svc: DriveService, p: WalkParams): void {
   // Own signal, not the triggering request's: that request has already returned.
   rec.promise = callContext.run({ signal: controller.signal }, () => runWalk(svc, p, controller.signal))
     .then((w) => {
-      if (rec.superseded || !w.complete) return; // keep the stale entry rather than store a partial tree
+      if (rec.superseded) return;
+      if (!w.complete) { refreshFailedAt.set(p.key, Date.now()); return; } // keep the stale entry rather than store a partial tree
+      refreshFailedAt.delete(p.key);
       remember(p, w);
       persist(svc, p, w, startSeq);
     })
     .catch((err) => {
-      if (!controller.signal.aborted) logger.warn("Background walk refresh failed:", err instanceof Error ? err.message : String(err));
+      if (controller.signal.aborted) return;
+      refreshFailedAt.set(p.key, Date.now());
+      logger.warn("Background walk refresh failed:", err instanceof Error ? err.message : String(err));
     })
     .finally(() => { if (refreshes.get(p.key) === rec) refreshes.delete(p.key); });
+  return true;
 }
 
 async function diskLookup(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined): Promise<WalkResult | undefined> {
@@ -369,9 +413,8 @@ async function diskLookup(svc: DriveService, p: WalkParams, signal: AbortSignal 
   const hit = find(); // the file may have been invalidated or discarded while we checked the account
   if (!hit) return undefined;
   const res = fromCache(hit.e, p.root, p.maxDepth, p.exclude, hit.exact);
-  if (res.ageMs < ttlMs()) return { ...res, stale: false };
-  startRefresh(svc, p);
-  return { ...res, stale: true, refreshing: true };
+  if (res.ageMs < ttlMs()) return { ...res, stale: true };
+  return { ...res, stale: true, ...(startRefresh(svc, p) ? { refreshing: true } : {}) };
 }
 
 /**
@@ -418,16 +461,22 @@ export function invalidatePath(path: string): void {
   invalidationSeq++;
   for (const [k, e] of cache) if (related(e.root)) cache.delete(k);
   for (const r of refreshes.values()) if (related(r.root)) { r.superseded = true; r.controller.abort(new Error("walk superseded")); }
+  // Memory first: nothing related may be served from the loaded state, whatever happens to the file.
+  if (disk) {
+    const keepMem = disk.entries.filter((e) => !related(e.root));
+    disk = keepMem.length ? { accountKey: disk.accountKey, entries: keepMem } : null;
+  }
   if (!indexEnabled()) return;
   try {
     const f = readIndex(); // re-read: another process may have saved since we loaded
     if (!f) return;
     const keep = f.entries.filter((e) => !related(e.root));
     if (keep.length === f.entries.length) return;
-    if (keep.length === 0) deleteIndex();
-    else writeIndex({ ...f, savedAt: Date.now(), entries: keep });
-    disk = keep.length ? { accountKey: f.accountKey, entries: keep } : null;
-  } catch { /* never fail a write because of the index */ }
+    // If the rewrite does not succeed, remove the file so no deleted/moved item can outlive this call.
+    if (keep.length === 0 || writeIndex({ ...f, savedAt: Date.now(), entries: keep }) !== "ok") deleteIndex();
+  } catch {
+    try { deleteIndex(); } catch { /* never fail a write because of the index */ }
+  }
 }
 
 /** Test hook: drop all in-process state (memory cache, loaded index, background refreshes). */
@@ -438,6 +487,8 @@ export function resetWalkCacheForTests(): void {
   disk = undefined;
   diskVerified = undefined;
   knownAccountKey = undefined;
+  refreshFailedAt.clear();
+  shuttingDown = false;
 }
 
 /** Test hook: resolves when background refreshes and index writes have finished. */

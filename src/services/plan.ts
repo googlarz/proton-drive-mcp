@@ -138,7 +138,7 @@ export async function syncPlan(svc: DriveService, a: SyncPlanArgs, walk: typeof 
   const patterns = a.ignore ?? DEFAULT_IGNORE;
   const ignore = makeIgnore(patterns);
 
-  const w = await walk(svc, driveRoot, { exclude: patterns.filter((p) => !/[*?/]/.test(p)) });
+  const w = await walk(svc, driveRoot, { exclude: patterns.filter((p) => !/[*?/]/.test(p)), noDisk: true }); // a plan must come from a current walk
   const scan = scanLocal(localRoot, ignore);
   const diff = await diffTrees(scan.files, w, { compare, ignore, hashLocal: (rel) => sha1File(join(localRoot, ...rel.split("/"))) });
 

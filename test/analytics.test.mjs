@@ -346,6 +346,15 @@ describe("driveFindDuplicates limit", () => {
   });
 });
 
+describe("driveFindDuplicates saved index", () => {
+  it("never reads a saved index (noDisk): deletion suggestions come from a current walk", async () => {
+    let seen;
+    const walk = async (_d, _p, opts) => { seen = opts; return walkOf([]); };
+    await driveFindDuplicates(new DriveService(async () => []), { path: "/my-files" }, { walk });
+    assert.equal(seen.noDisk, true);
+  });
+});
+
 describe("driveSharingAudit", () => {
   const share = (path, extra = {}) => f(path, 1, { isShared: true, ...extra });
   it("never reads a saved index (noDisk) so the shared/public state is current", async () => {

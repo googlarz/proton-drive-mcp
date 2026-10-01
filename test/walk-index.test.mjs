@@ -1,13 +1,13 @@
 // walkTree + persistent index (stale-while-revalidate) against an injected runner.
-import { describe, it, beforeEach, afterEach } from "node:test";
+import { describe, it, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DriveService } from "../dist/services/drive.js";
-import { walkTree, invalidatePath, resetWalkCacheForTests, flushWalkIndexForTests } from "../dist/services/walk.js";
+import { walkTree, invalidatePath, resetWalkCacheForTests, flushWalkIndexForTests, abortBackgroundRefreshes } from "../dist/services/walk.js";
 import { driveSearch, driveTree } from "../dist/services/find.js";
-import { readIndex, writeIndex, indexPath } from "../dist/services/walkIndex.js";
+import { readIndex, writeIndex, indexPath, indexDir, deleteIndex } from "../dist/services/walkIndex.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const folder = (name, i) => ({ uid: `d-${name}-${i}`, parentUid: "p", type: "folder", name: { ok: true, value: name } });
@@ -133,13 +133,13 @@ describe("walk index: serving", () => {
     assert.ok(Date.now() - readIndex().entries[0].completedAt < 60_000, "disk entry replaced");
   });
 
-  it("serves an entry younger than the memory TTL as fresh, with no refresh", async () => {
+  it("serves an entry younger than the memory TTL without a refresh, still marked stale (it is saved data)", async () => {
     await seed();
     const { svc, calls } = makeSvc(small());
     const r = await walkTree(svc, "/my-files");
     await flushWalkIndexForTests();
     assert.equal(r.fromCache, true);
-    assert.equal(r.stale, false);
+    assert.equal(r.stale, true);
     assert.ok(!r.refreshing);
     assert.deepEqual(calls, ["/my-files"]); // the account check only
   });
@@ -228,16 +228,65 @@ describe("walk index: serving", () => {
     assert.equal(readIndex().accountKey, "p"); // rewritten for the current account
   });
 
-  it("a failed account check discards the disk index and walks fresh", async () => {
+  it("a failed account check serves nothing from disk, walks fresh, and keeps the file", async () => {
     await seed();
     ageDisk(3_600_000);
     const t = small();
     let n = 0;
     t["/my-files"] = () => { if (++n === 1) throw new Error("flaky"); return small()["/my-files"]; };
+    t["/my-files/b"] = () => { throw new Error("down"); }; // incomplete walk: never persisted, so a surviving file is the old one
     const { svc } = makeSvc(t);
     const r = await walkTree(svc, "/my-files");
     assert.equal(r.fromCache, false);
     assert.ok(!r.stale);
+    await flushWalkIndexForTests();
+    assert.equal(readIndex().entries[0].nodes.length, 8, "file kept");
+    const next = await walkTree(svc, "/my-files/a"); // the failure was not cached as a verdict
+    assert.equal(next.fromCache, true);
+    assert.equal(next.stale, true);
+  });
+
+  it("an empty account listing keeps the file and serves nothing from it", async () => {
+    await seed();
+    ageDisk(3_600_000);
+    const { svc } = makeSvc({ "/my-files": [] });
+    const r = await walkTree(svc, "/my-files");
+    assert.equal(r.fromCache, false);
+    assert.equal(r.nodes.length, 0);
+    await flushWalkIndexForTests();
+    assert.equal(readIndex().entries[0].nodes.length, 8);
+  });
+
+  it("re-checks the account when the last check is older than 10 minutes", async () => {
+    process.env.PROTON_DRIVE_WALK_TTL_MS = "1000000000000";
+    await seed();
+    const { svc, calls } = makeSvc(small());
+    assert.equal((await walkTree(svc, "/my-files")).fromCache, true);
+    assert.equal((await walkTree(svc, "/my-files/a")).fromCache, true);
+    assert.equal(count(calls, "/my-files"), 1, "checked once");
+    const real = Date.now;
+    mock.method(Date, "now", () => real() + 11 * 60_000);
+    try {
+      const other = small();
+      other["/my-files"] = other["/my-files"].map((e) => ({ ...e, parentUid: "q" })); // account switched
+      const { svc: svc2, calls: calls2 } = makeSvc(other);
+      const r = await walkTree(svc2, "/my-files");
+      assert.equal(count(calls2, "/my-files"), 2, "re-verified: check + fresh walk");
+      assert.equal(r.fromCache, false);
+    } finally { mock.restoreAll(); }
+  });
+
+  it("one caller's abort does not poison concurrent callers sharing the account check", async () => {
+    await seed();
+    const { svc } = makeSvc(small(), { delay: 30 });
+    const ac = new AbortController();
+    const p1 = walkTree(svc, "/my-files", { signal: ac.signal });
+    const p2 = walkTree(svc, "/my-files");
+    setTimeout(() => ac.abort(new Error("caller gave up")), 5);
+    await assert.rejects(p1, /caller gave up/);
+    const r2 = await p2;
+    assert.equal(r2.fromCache, true);
+    assert.equal(r2.nodes.length, 8);
   });
 
   it("a background walk superseded by invalidatePath is discarded", async () => {
@@ -269,5 +318,69 @@ describe("walk index: serving", () => {
     assert.equal(tree.stale, true);
     assert.equal(tree.refreshing, true);
     await flushWalkIndexForTests();
+  });
+});
+
+describe("walk index: invalidation", () => {
+  it("invalidatePath drops loaded entries even when the file is gone (index clear while running)", async () => {
+    await seed();
+    const { svc } = makeSvc(small());
+    assert.equal((await walkTree(svc, "/my-files")).fromCache, true); // loads the file into memory
+    deleteIndex();
+    invalidatePath("/my-files/a");
+    const r = await walkTree(svc, "/my-files");
+    assert.equal(r.fromCache, false, "deleted data must not be served");
+  });
+
+  it("deletes the file when the rewrite after an invalidation fails", async () => {
+    const { svc } = makeSvc(small());
+    await walkTree(svc, "/my-files/a", { refresh: true });
+    await walkTree(svc, "/my-files/b", { refresh: true });
+    await flushWalkIndexForTests();
+    assert.equal(readIndex().entries.length, 2);
+    chmodSync(indexDir(), 0o750); // makes writeIndex refuse; unlink still works
+    invalidatePath("/my-files/a/deep");
+    assert.equal(existsSync(indexPath()), false, "no stale entry may survive for the next process");
+    chmodSync(indexDir(), 0o700);
+  });
+});
+
+describe("walk index: refresh storms and shutdown", () => {
+  const failing = (what) => {
+    const t = small();
+    let n = 0;
+    t["/my-files"] = () => { if (++n > 1 && what === "root") throw new Error("offline"); return small()["/my-files"]; };
+    if (what === "partial") t["/my-files/b"] = () => { throw new Error("down"); };
+    return t;
+  };
+  for (const what of ["root", "partial"]) {
+    it(`does not retry a ${what === "root" ? "failed" : "incomplete"} background refresh during the cooldown`, async () => {
+      await seed();
+      ageDisk(3_600_000);
+      const { svc, calls } = makeSvc(failing(what));
+      assert.equal((await walkTree(svc, "/my-files")).refreshing, true);
+      await flushWalkIndexForTests();
+      const after1 = calls.length;
+      const again = await walkTree(svc, "/my-files");
+      await flushWalkIndexForTests();
+      assert.equal(again.stale, true);
+      assert.ok(!again.refreshing);
+      assert.equal(calls.length, after1, "no new background walk");
+      process.env.PROTON_DRIVE_INDEX_REFRESH_COOLDOWN_MS = "0";
+      try {
+        assert.equal((await walkTree(svc, "/my-files")).refreshing, true);
+        await flushWalkIndexForTests();
+        assert.ok(calls.length > after1, "cooldown 0 allows a retry");
+      } finally { delete process.env.PROTON_DRIVE_INDEX_REFRESH_COOLDOWN_MS; }
+    });
+  }
+
+  it("persist does nothing after abortBackgroundRefreshes (no account list, no write)", async () => {
+    abortBackgroundRefreshes();
+    const { svc, calls } = makeSvc(small());
+    await walkTree(svc, "/my-files/a"); // subfolder walk: persisting would need `list /my-files`
+    await flushWalkIndexForTests();
+    assert.equal(count(calls, "/my-files"), 0);
+    assert.equal(existsSync(indexPath()), false);
   });
 });
