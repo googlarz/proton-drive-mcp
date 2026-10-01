@@ -186,7 +186,8 @@ export async function verifyGroups(
     }
     const groupBytes = g.members.reduce((s, m) => s + byteSize(m), 0);
     if (totalBytes + groupBytes > maxTotal || totalMembers + g.members.length > maxMembers) {
-      out.push({ ...g, verifyNote: `skipped: total verify budget reached (maxVerifyTotalBytes ${maxTotal}, ${maxMembers} files)` });
+      const limit = totalBytes + groupBytes > maxTotal ? `maxVerifyTotalBytes ${maxTotal}` : `${maxMembers} files`;
+      out.push({ ...g, verifyNote: `skipped: verify budget reached (${limit})` });
       continue;
     }
     totalBytes += groupBytes;

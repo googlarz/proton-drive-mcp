@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.1 — 2026-10-01
+
+### Changed
+- Trusted Publishing is now configured on npm for this package; the publish workflow keeps the `NPM_TOKEN` fallback until an OIDC publish has been confirmed.
+
+### Fixed
+- `drive_find_duplicates` with `verify`: the "verify budget reached" note now names the limit that was actually hit (bytes or file count) instead of always listing both.
+
 ## 1.3.0 — 2026-09-30
 
 Proton Drive has no search, and its end-to-end encryption rules out server-side indexing. This release adds the client-side layer: find things, understand what uses your space, and clean up safely. 4 builders worked in parallel, then 3 verifiers (live on a real account, an independent security review, packaging/CI) and a re-check of every fix. Review findings fixed before release include two ReDoS vectors in search and a local-path guard gap.
