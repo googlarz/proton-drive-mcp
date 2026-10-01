@@ -1,5 +1,5 @@
 import type { DriveService } from "./drive.js";
-import { baseName, depthOf, parentPath, DEFAULT_EXCLUDE, walkTree, staleFields, type WalkNode, type WalkResult } from "./walk.js";
+import { baseName, depthOf, parentPath, DEFAULT_EXCLUDE, walkTree, staleFields, partialFields, type WalkNode, type WalkResult } from "./walk.js";
 import { validateRemotePath } from "../utils/validation.js";
 import { globMatch } from "../utils/glob.js";
 
@@ -54,7 +54,7 @@ function root(a: Args): string {
 
 function walkInfo(w: WalkResult, scanned: number, scanCapped: boolean) {
   return {
-    complete: w.complete, fromCache: w.fromCache, ...staleFields(w), ageMs: w.ageMs, callsMade: w.callsMade, scanned,
+    complete: w.complete, fromCache: w.fromCache, ...staleFields(w), ...partialFields(w), ageMs: w.ageMs, callsMade: w.callsMade, scanned,
     ...(scanCapped ? { scanCapped: true } : {}),
     ...(w.skipped.length ? { skippedCount: w.skipped.length, skipped: w.skipped.slice(0, SKIPPED_SHOWN) } : {}),
   };
@@ -198,7 +198,7 @@ export async function driveTree(svc: DriveService, a: Args) {
     complete: w.skipped.length === 0,
     ...(unexpandedCount ? { unexpanded: unexpandedCount } : {}),
     ...(w.skipped.length ? { skippedCount: w.skipped.length, skipped: w.skipped.slice(0, SKIPPED_SHOWN) } : {}),
-    fromCache: w.fromCache, ...staleFields(w), ageMs: w.ageMs, callsMade: w.callsMade,
+    fromCache: w.fromCache, ...staleFields(w), ...partialFields(w), ageMs: w.ageMs, callsMade: w.callsMade,
     tree: top.children ?? [], ...(top.more ? { more: top.more } : {}),
   };
 }

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DriveFile, ShareStatus } from "../types/index.js";
 import type { DriveService } from "./drive.js";
-import { walkTree, staleFields, type WalkNode, type WalkOptions, type WalkResult } from "./walk.js";
+import { walkTree, staleFields, partialFields, type WalkNode, type WalkOptions, type WalkResult } from "./walk.js";
 import { validateLocalPath } from "../utils/validation.js";
 import { callContext } from "../utils/subprocess.js";
 
@@ -43,7 +43,7 @@ function breakdown(nodes: WalkNode[], key: (n: WalkNode) => string, top: number)
 }
 
 function walkMeta(w: WalkResult) {
-  return { complete: w.complete, skippedCount: w.skipped.length, skipped: w.skipped.slice(0, 10), fromCache: w.fromCache, ...staleFields(w) };
+  return { complete: w.complete, skippedCount: w.skipped.length, skipped: w.skipped.slice(0, 10), fromCache: w.fromCache, ...staleFields(w), ...partialFields(w) };
 }
 
 // ---- drive_usage ----------------------------------------------------------
@@ -110,7 +110,7 @@ export async function driveUsage(
   return {
     ...summarizeUsage(walk, { top: o.top ?? 10, olderThanDays: o.olderThanDays, now: deps.now ?? Date.now() }),
     trash,
-    note: "Sizes are the sum of file sizes, not the account storage quota.",
+    note: [partialFields(walk).note, "Sizes are the sum of file sizes, not the account storage quota."].filter(Boolean).join(" "),
   };
 }
 
@@ -273,7 +273,7 @@ export async function driveFindDuplicates(
   if (o.maxVerifyTotalBytes !== undefined && (!Number.isInteger(o.maxVerifyTotalBytes) || o.maxVerifyTotalBytes < 1 || o.maxVerifyTotalBytes > MAX_VERIFY_TOTAL_BYTES)) {
     throw new Error(`maxVerifyTotalBytes must be an integer between 1 and ${MAX_VERIFY_TOTAL_BYTES}`);
   }
-  const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh, noDisk: true }); // deletion suggestions must come from a current walk
+  const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh, noDisk: true, budgetMs: 0 }); // deletion suggestions must come from a current, complete walk
   const limit = o.limit ?? 20;
   let groups: (DuplicateGroup & { verifyNote?: string })[] = findDuplicateCandidates(walk.nodes, o.minSize ?? 1024);
   let verified = false;
@@ -325,7 +325,7 @@ export async function driveSharingAudit(
   o: { path: string; refresh?: boolean },
   deps: { walk?: WalkFn; status?: (path: string) => Promise<ShareStatus> } = {}
 ) {
-  const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh, noDisk: true }); // a security audit must not read a saved index
+  const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh, noDisk: true, budgetMs: 0 }); // a security audit must not read a saved index or stop at a time budget
   const status = deps.status ?? ((p: string) => drive.shareStatus(p));
   const shared = walk.nodes.filter((n) => (n.isShared || n.isSharedByUrl) && parentOf(n.path) !== "");
   const targets = shared.slice(0, SHARE_AUDIT_CAP);

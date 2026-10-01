@@ -27,7 +27,7 @@ export interface WalkOptions {
   maxDepth?: number;
   /** Hard cap on `fs list` calls (default 300). */
   maxCalls?: number;
-  /** Parallel `fs list` calls (default 8, max 12). */
+  /** Parallel `fs list` calls (default 12, max 12; PROTON_DRIVE_WALK_CONCURRENCY overrides the default). */
   concurrency?: number;
   /** Folder names skipped entirely (default: .git, node_modules). */
   exclude?: string[];
@@ -35,6 +35,11 @@ export interface WalkOptions {
   refresh?: boolean;
   /** Never answer from the persistent index (memory cache is still used); for tools where saved data is unsafe (plans, deletion suggestions, audits). */
   noDisk?: boolean;
+  /**
+   * Soft time budget in ms (default 25 s, PROTON_DRIVE_WALK_BUDGET_MS; 0 = wait for the whole walk). When it expires
+   * the nodes collected so far are returned with `partial: true` while the same walk finishes in the background.
+   */
+  budgetMs?: number;
   signal?: AbortSignal;
 }
 
@@ -51,15 +56,34 @@ export interface WalkResult {
   stale?: boolean;
   /** A background re-walk is replacing the stale data. */
   refreshing?: boolean;
+  /** The time budget expired: only part of the drive was listed so far (see skipped); never cached or saved as complete. */
+  partial?: boolean;
+  /** The same walk is still running in the background and will fill the cache for the next call. */
+  continuing?: boolean;
+  /** The budget that expired (set with `partial`). */
+  budgetMs?: number;
 }
 
 /** Output fields for results served from the persistent index while a refresh runs (empty otherwise). */
 export const staleFields = (w: Pick<WalkResult, "stale" | "refreshing">) =>
   w.stale ? { stale: true, ...(w.refreshing ? { refreshing: true } : {}) } : {};
 
+/** Output fields for a result cut short by the time budget (empty otherwise). */
+export const partialFields = (w: Pick<WalkResult, "partial" | "budgetMs">) =>
+  w.partial ? { partial: true, note: `Partial: the drive walk was still running after ${(w.budgetMs ?? 0) / 1000} s; repeat the call in a minute for the full result.` } : {};
+
 export const DEFAULT_EXCLUDE = [".git", "node_modules"];
 const DEFAULT_MAX_CALLS = 300;
 const MAX_CONCURRENCY = 12; // the CLI's SQLite cache starts failing above this
+const DEFAULT_BUDGET_MS = 25_000; // Claude Desktop gives an MCP request ~60 s
+const defaultConcurrency = () => {
+  const v = Math.floor(Number(process.env.PROTON_DRIVE_WALK_CONCURRENCY));
+  return v >= 1 ? Math.min(v, MAX_CONCURRENCY) : MAX_CONCURRENCY;
+};
+const defaultBudgetMs = () => {
+  const v = Number(process.env.PROTON_DRIVE_WALK_BUDGET_MS ?? DEFAULT_BUDGET_MS);
+  return Number.isFinite(v) && v >= 0 ? v : DEFAULT_BUDGET_MS;
+};
 const RETRY_PAUSE_MS = 300;
 const CACHE_ENTRIES = 16;
 
@@ -161,19 +185,19 @@ interface WalkParams {
   key: string;
   excludeKey: string;
 }
+/** Walk state a time-budget snapshot can read while the walk runs. */
+interface LiveWalk { nodes: WalkNode[]; skipped: { path: string; reason: string }[]; queue: { path: string; depth: number }[]; active: Set<string>; callsMade: number }
+const newLive = (root: string): LiveWalk => ({ nodes: [], skipped: [], queue: [{ path: root, depth: 0 }], active: new Set(), callsMade: 0 });
 interface RawWalk { nodes: WalkNode[]; skipped: { path: string; reason: string }[]; callsMade: number; complete: boolean }
 
 /** The actual breadth-first walk (no caching). */
-async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined): Promise<RawWalk> {
+async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined, live: LiveWalk = newLive(p.root)): Promise<RawWalk> {
   const { root, maxDepth, maxCalls, concurrency, exclude } = p;
-  const nodes: WalkNode[] = [];
-  const skipped: { path: string; reason: string }[] = [];
-  const queue: { path: string; depth: number }[] = [{ path: root, depth: 0 }];
-  let callsMade = 0;
+  const { nodes, skipped, queue } = live;
   let active = 0;
 
   const listOnce = async (path: string) => {
-    callsMade++;
+    live.callsMade++;
     return svc.listEntries(path);
   };
   // One retry covers a transient failure the subprocess layer already gave up on.
@@ -181,7 +205,7 @@ async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | u
     try {
       return await listOnce(path);
     } catch (err) {
-      if (err instanceof DriveNotAuthenticatedError || signal?.aborted || callsMade >= maxCalls) throw err;
+      if (err instanceof DriveNotAuthenticatedError || signal?.aborted || live.callsMade >= maxCalls) throw err;
       await new Promise((r) => setTimeout(r, RETRY_PAUSE_MS));
       if (signal?.aborted) throw err;
       return listOnce(path);
@@ -222,19 +246,20 @@ async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | u
     const pump = () => {
       if (settled) return;
       while (active < concurrency && queue.length) {
-        if (callsMade >= maxCalls) {
+        if (live.callsMade >= maxCalls) {
           for (const q of queue.splice(0)) skipped.push({ path: q.path, reason: `not listed: maxCalls (${maxCalls}) reached` });
           break;
         }
         const job = queue.shift()!;
         active++;
+        live.active.add(job.path);
         listWithRetry(job.path)
           .then((entries) => handle(job, entries))
           .catch((err) => {
             if (job.depth === 0 || err instanceof DriveNotAuthenticatedError) return finish(err);
             skipped.push({ path: job.path, reason: String(err instanceof Error ? err.message : err).slice(0, 200) });
           })
-          .finally(() => { active--; pump(); });
+          .finally(() => { active--; live.active.delete(job.path); pump(); });
       }
       if (active === 0 && queue.length === 0) finish();
     };
@@ -243,7 +268,7 @@ async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | u
 
   nodes.sort(byPath);
   skipped.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  return { nodes, skipped, callsMade, complete: skipped.length === 0 && !isDepthCut(nodes, depthOf(root), maxDepth, exclude) };
+  return { nodes, skipped, callsMade: live.callsMade, complete: skipped.length === 0 && !isDepthCut(nodes, depthOf(root), maxDepth, exclude) };
 }
 
 function remember(p: WalkParams, w: RawWalk): void {
@@ -271,7 +296,14 @@ const cooldownMs = () => {
 let knownAccountKey: string | undefined;
 let persistChain: Promise<void> = Promise.resolve();
 let invalidationSeq = 0;
-const refreshes = new Map<string, { controller: AbortController; root: string; superseded: boolean; promise: Promise<void> }>();
+/** Background refreshes of stale index data, and (key prefixed FG) foreground walks that callers share and that may outlive a budgeted call. */
+interface WalkRec {
+  controller: AbortController; root: string; superseded: boolean; promise: Promise<void>;
+  /** Foreground walks only. */
+  fg?: { live: LiveWalk; startedAt: number; waiters: number; partialReturned: boolean; done: Promise<RawWalk> };
+}
+const refreshes = new Map<string, WalkRec>();
+const FG = "fg\0";
 let exitHooked = false;
 
 /** The parentUid shared by the first-level children of /my-files identifies the account's Drive root. */
@@ -429,7 +461,7 @@ export async function walkTree(svc: DriveService, rootPath: string, opts: WalkOp
   const root = normalizeRoot(rootPath);
   const maxDepth = opts.maxDepth === undefined ? undefined : Math.max(1, Math.floor(opts.maxDepth));
   const maxCalls = Math.max(1, Math.floor(opts.maxCalls ?? DEFAULT_MAX_CALLS));
-  const concurrency = Math.min(MAX_CONCURRENCY, Math.max(1, Math.floor(opts.concurrency ?? 8)));
+  const concurrency = Math.min(MAX_CONCURRENCY, Math.max(1, Math.floor(opts.concurrency ?? defaultConcurrency())));
   const excludeList = [...new Set(opts.exclude ?? DEFAULT_EXCLUDE)].sort();
   const exclude = new Set(excludeList);
   const signal = opts.signal ?? callContext.getStore()?.signal;
@@ -447,11 +479,85 @@ export async function walkTree(svc: DriveService, rootPath: string, opts: WalkOp
     }
   }
 
-  const startSeq = invalidationSeq;
-  const w = await runWalk(svc, params, signal);
-  remember(params, w);
-  persist(svc, params, w, startSeq);
+  const budgetMs = opts.budgetMs !== undefined && Number.isFinite(opts.budgetMs) && opts.budgetMs >= 0 ? opts.budgetMs : defaultBudgetMs();
+  const rec = joinOrStartWalk(svc, params);
+  const out = await waitForWalk(rec, signal, budgetMs);
+  if (out.partial) return out.partial;
+  const w = out.full;
   return { root, nodes: w.nodes.slice(), complete: w.complete, callsMade: w.callsMade, skipped: w.skipped.slice(), fromCache: false, ageMs: 0 };
+}
+
+/** One shared walk per key: it runs on its own signal, caches itself when done, and callers only wait for it. */
+function joinOrStartWalk(svc: DriveService, p: WalkParams): WalkRec & { fg: NonNullable<WalkRec["fg"]> } {
+  const existing = refreshes.get(FG + p.key);
+  if (existing?.fg && !existing.superseded && !existing.controller.signal.aborted) return existing as WalkRec & { fg: NonNullable<WalkRec["fg"]> };
+  if (!exitHooked) { exitHooked = true; process.once("exit", abortBackgroundRefreshes); }
+  const controller = new AbortController();
+  const live = newLive(p.root);
+  const startSeq = invalidationSeq;
+  const rec: WalkRec = { controller, root: p.root, superseded: false, promise: Promise.resolve() };
+  const done = callContext.run({ signal: controller.signal }, () => runWalk(svc, p, controller.signal, live)).then(
+    (w) => {
+      if (refreshes.get(FG + p.key) === rec) refreshes.delete(FG + p.key);
+      if (!rec.superseded) { remember(p, w); persist(svc, p, w, startSeq); }
+      return w;
+    },
+    (err) => {
+      if (refreshes.get(FG + p.key) === rec) refreshes.delete(FG + p.key);
+      throw err;
+    }
+  );
+  rec.fg = { live, startedAt: Date.now(), waiters: 0, partialReturned: false, done };
+  rec.promise = done.then(() => undefined, () => undefined);
+  refreshes.set(FG + p.key, rec);
+  return rec as WalkRec & { fg: NonNullable<WalkRec["fg"]> };
+}
+
+type Waited = { full: RawWalk; partial?: undefined } | { partial: WalkResult; full?: undefined };
+
+/**
+ * Waits for the shared walk. At the budget it returns what the walk has so far and leaves the walk running. A caller's
+ * abort rejects only that caller; it stops the walk only when nobody else waits and no partial result was handed out.
+ */
+function waitForWalk(rec: WalkRec & { fg: NonNullable<WalkRec["fg"]> }, signal: AbortSignal | undefined, budgetMs: number): Promise<Waited> {
+  const { fg } = rec;
+  fg.waiters++;
+  return new Promise<Waited>((resolve, reject) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const leave = () => { settled = true; fg.waiters--; clearTimeout(timer); signal?.removeEventListener("abort", onAbort); };
+    const onAbort = () => {
+      if (settled) return;
+      leave();
+      if (fg.waiters === 0 && !fg.partialReturned) rec.controller.abort(abortError(signal));
+      reject(abortError(signal));
+    };
+    if (signal?.aborted) return onAbort(); // aborted while the index lookup ran
+    signal?.addEventListener("abort", onAbort, { once: true });
+    fg.done.then(
+      (full) => { if (!settled) { leave(); resolve({ full }); } },
+      (err) => { if (!settled) { leave(); reject(err); } }
+    );
+    if (budgetMs > 0) {
+      timer = setTimeout(() => {
+        if (settled) return;
+        leave();
+        fg.partialReturned = true;
+        resolve({ partial: snapshot(rec, budgetMs) });
+      }, Math.max(0, budgetMs - (Date.now() - fg.startedAt)));
+    }
+  });
+}
+
+/** What the walk has listed so far; every folder not yet listed is reported as skipped. */
+function snapshot(rec: WalkRec & { fg: NonNullable<WalkRec["fg"]> }, budgetMs: number): WalkResult {
+  const { live } = rec.fg;
+  const unlisted = [...live.queue.map((q) => q.path), ...live.active].map((path) => ({ path, reason: "not listed yet: time budget" }));
+  const skipped = [...live.skipped, ...unlisted].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return {
+    root: rec.root, nodes: live.nodes.slice().sort(byPath), skipped, complete: false, callsMade: live.callsMade,
+    fromCache: false, ageMs: 0, partial: true, continuing: true, budgetMs,
+  };
 }
 
 /** Drop cached walks that contain `path` (call after the server itself writes there). */
@@ -460,7 +566,12 @@ export function invalidatePath(path: string): void {
   const related = (root: string) => isUnder(root, p) || isUnder(p, root);
   invalidationSeq++;
   for (const [k, e] of cache) if (related(e.root)) cache.delete(k);
-  for (const r of refreshes.values()) if (related(r.root)) { r.superseded = true; r.controller.abort(new Error("walk superseded")); }
+  for (const r of refreshes.values()) {
+    if (!related(r.root)) continue;
+    r.superseded = true;
+    // A foreground walk someone still waits for finishes for them (as before) but is not cached.
+    if (!r.fg || r.fg.waiters === 0) r.controller.abort(new Error("walk superseded"));
+  }
   // Memory first: nothing related may be served from the loaded state, whatever happens to the file.
   if (disk) {
     const keepMem = disk.entries.filter((e) => !related(e.root));

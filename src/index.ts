@@ -233,7 +233,7 @@ const TOOLS = [
   {
     name: "drive_search",
     description:
-      "Find files/folders under a path by name, type, extension, size or date in one walk. Filters are ANDed. Returns {total, hasMore, items [{path, type, size?, mtime?, sha1?}], walk {complete, fromCache, skipped?}}; walk.complete=false means matches may be missing. Cached 5 min; refresh=true re-reads; skips .git/node_modules. With PROTON_DRIVE_INDEX=1 a saved index may answer first (stale:true); repeat the call or pass refresh:true.",
+      "Find files/folders under a path by name, type, extension, size or date in one walk. Filters are ANDed. Returns {total, hasMore, items [{path, type, size?, mtime?, sha1?}], walk {complete, fromCache, skipped?}}; walk.complete=false means matches may be missing. Cached 5 min; refresh=true re-reads; skips .git/node_modules. After 25 s returns partial:true and keeps walking; call again. With PROTON_DRIVE_INDEX=1 a saved index may answer first (stale:true); repeat the call or pass refresh:true.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: "object",
