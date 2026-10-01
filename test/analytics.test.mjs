@@ -212,6 +212,43 @@ describe("makeDriveHasher", () => {
   });
 });
 
+describe("makeDriveHasher under SQLite lock", () => {
+  const LOCK = () => new Error("SQLiteError: database is locked\nerrno: 261,\nbyteOffset: -1,\ncode: \"SQLITE_BUSY_RECOVERY\"");
+  const withFastRetry = async (fn) => {
+    const old = process.env.PROTON_DRIVE_RETRY_BASE_MS;
+    process.env.PROTON_DRIVE_RETRY_BASE_MS = "1";
+    try { return await fn(); } finally { if (old === undefined) delete process.env.PROTON_DRIVE_RETRY_BASE_MS; else process.env.PROTON_DRIVE_RETRY_BASE_MS = old; }
+  };
+
+  it("retries a lock error in a fresh temp dir and succeeds", () => withFastRetry(async () => {
+    const dirs = [];
+    let calls = 0;
+    const drive = { download: async (_r, dir) => { dirs.push(dir); if (++calls < 3) throw LOCK(); writeFileSync(join(dir, "f.bin"), "hello"); return { downloaded: 1, skipped: 0, failed: 0 }; } };
+    assert.equal(await makeDriveHasher(drive)(f("/my-files/x", 5)), "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+    assert.equal(calls, 3);
+    assert.equal(new Set(dirs).size, 3);
+    for (const d of dirs) assert.equal(existsSync(d), false);
+  }));
+
+  it("gives up after 4 attempts and verifyGroups reports a one-line note", () => withFastRetry(async () => {
+    let calls = 0;
+    const drive = { download: async () => { calls++; throw LOCK(); } };
+    const out = await verifyGroups([{ kind: "claimed-sha1", members: [f("/my-files/a", 10), f("/my-files/b", 10)] }], makeDriveHasher(drive), { maxVerifyBytes: 1e6, concurrency: 1 });
+    assert.equal(calls, 8); // 2 members x 4 attempts
+    assert.equal(out.length, 1);
+    assert.match(out[0].verifyNote, /not verified/);
+    assert.equal(out[0].verifyNote.includes("\n"), false, "no multi-line SQLite dump in the note");
+    assert.equal(out[0].verifyNote.includes("errno"), false);
+  }));
+
+  it("does not retry other failures", () => withFastRetry(async () => {
+    let calls = 0;
+    const drive = { download: async () => { calls++; return { downloaded: 0, skipped: 0, failed: 1 }; } };
+    await assert.rejects(makeDriveHasher(drive)(f("/my-files/x", 5)), /download failed/);
+    assert.equal(calls, 1);
+  }));
+});
+
 describe("auditShareStatus", () => {
   it("flags a public link with no expiry and editor role, without exposing the URL", () => {
     const r = auditShareStatus("/my-files/x", { path: "/my-files/x", isShared: true, members: [], shareUrl: "https://drive.proton.me/urls/T#key", shareUrlRole: "editor", sharePasswordProtected: false });

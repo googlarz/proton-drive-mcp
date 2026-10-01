@@ -194,12 +194,12 @@ export async function verifyGroups(
     totalMembers += g.members.length;
     const digests = new Map<WalkNode, string>();
     const failed: string[] = [];
-    await pool(g.members, o.concurrency ?? 4, async (m) => {
+    await pool(g.members, o.concurrency ?? 2, async (m) => {
       if (o.signal?.aborted) return;
       try {
         digests.set(m, await hash(m));
       } catch (e) {
-        failed.push(`${m.path}: ${e instanceof Error ? e.message : String(e)}`);
+        failed.push(`${m.path}: ${oneLine(e instanceof Error ? e.message : String(e))}`);
       }
     });
     stop(); // the hasher's own finally already removed any temp dir
@@ -214,9 +214,17 @@ export async function verifyGroups(
   return out.filter((g) => g.members.length > 1).sort((a, b) => wasted(b) - wasted(a) || (a.members[0].path < b.members[0].path ? -1 : 1));
 }
 
-/** Downloads one file into its own private temp dir, sha256s it, and always removes the dir. */
+const LOCKED_RE = /database is locked|SQLITE_BUSY/i;
+const oneLine = (m: string): string => (m.split("\n")[0] ?? m).slice(0, 160);
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Downloads one file into its own private temp dir, sha256s it, and always removes the dir.
+ * The CLI's SQLite cache can report "database is locked" at startup when several downloads run
+ * at once; nothing has been transferred then, so a fresh attempt is safe (max 4 tries).
+ */
 export function makeDriveHasher(drive: DriveService): Hasher {
-  return async (node) => {
+  const once: Hasher = async (node) => {
     const dir = await mkdtemp(join(tmpdir(), "pdmcp-dup-"));
     try {
       validateLocalPath(dir); // same local-path rules as drive_download
@@ -229,6 +237,18 @@ export function makeDriveHasher(drive: DriveService): Hasher {
       return h.digest("hex");
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  };
+  return async (node) => {
+    const base = Number(process.env["PROTON_DRIVE_RETRY_BASE_MS"] ?? 250);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await once(node);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (attempt >= 4 || !LOCKED_RE.test(msg)) throw e;
+        await sleep(base * attempt + Math.random() * base);
+      }
     }
   };
 }
