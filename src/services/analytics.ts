@@ -8,6 +8,7 @@ import type { DriveService } from "./drive.js";
 import { walkTree, staleFields, partialFields, type WalkNode, type WalkOptions, type WalkResult } from "./walk.js";
 import { validateLocalPath } from "../utils/validation.js";
 import { callContext } from "../utils/subprocess.js";
+import { retryOnLocked } from "../utils/lockRetry.js";
 
 export type WalkFn = (svc: DriveService, root: string, opts?: WalkOptions) => Promise<WalkResult>;
 
@@ -214,14 +215,11 @@ export async function verifyGroups(
   return out.filter((g) => g.members.length > 1).sort((a, b) => wasted(b) - wasted(a) || (a.members[0].path < b.members[0].path ? -1 : 1));
 }
 
-const LOCKED_RE = /database is locked|SQLITE_BUSY/i;
 const oneLine = (m: string): string => (m.split("\n")[0] ?? m).slice(0, 160);
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
  * Downloads one file into its own private temp dir, sha256s it, and always removes the dir.
- * The CLI's SQLite cache can report "database is locked" at startup when several downloads run
- * at once; nothing has been transferred then, so a fresh attempt is safe (max 4 tries).
+ * A "database is locked" failure is retried in a fresh dir (see retryOnLocked).
  */
 export function makeDriveHasher(drive: DriveService): Hasher {
   const once: Hasher = async (node) => {
@@ -239,18 +237,7 @@ export function makeDriveHasher(drive: DriveService): Hasher {
       await rm(dir, { recursive: true, force: true });
     }
   };
-  return async (node) => {
-    const base = Number(process.env["PROTON_DRIVE_RETRY_BASE_MS"] ?? 250);
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return await once(node);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (attempt >= 4 || !LOCKED_RE.test(msg)) throw e;
-        await sleep(base * attempt + Math.random() * base);
-      }
-    }
-  };
+  return (node) => retryOnLocked(() => once(node));
 }
 
 function reportGroup(g: DuplicateGroup & { verifyNote?: string }) {

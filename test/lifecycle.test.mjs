@@ -52,7 +52,7 @@ describe("launch and startup", () => {
     const c = track(new McpClient({ script: join(dir, ".bin", "proton-drive-mcp"), env: fakeEnv("json", sb) }));
     const res = await c.initialize({ timeout: 5000 });
     assert.equal(res.result.serverInfo.name, "proton-drive-mcp");
-    assert.equal((await c.listTools()).length, 46);
+    assert.equal((await c.listTools()).length, 47);
     await c.close();
   });
 
@@ -75,7 +75,7 @@ describe("launch and startup", () => {
     const elapsed = Date.now() - t0;
     assert.ok(elapsed < 2000, `initialize took ${elapsed}ms`);
     const tools = await c.listTools();
-    assert.equal(tools.length, 46);
+    assert.equal(tools.length, 47);
     c.kill("SIGTERM");
     await c.exitPromise;
   });
@@ -118,7 +118,7 @@ describe("cancellation", () => {
     c.notify("notifications/cancelled", { requestId: id, reason: "test" });
     await assertDead([child, grandchild], 3000, "cancel");
     assert.equal(c.exited, false, "server must survive a cancellation");
-    assert.equal((await c.listTools()).length, 46);
+    assert.equal((await c.listTools()).length, 47);
     await c.close();
   });
 

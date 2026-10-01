@@ -32,6 +32,7 @@ tools:
   - drive_restore
   - drive_empty_trash
   - drive_read_file
+  - drive_read_content
   - drive_write_file
   - drive_copy
   - drive_list_invitations
