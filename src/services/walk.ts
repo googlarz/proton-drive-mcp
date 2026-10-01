@@ -33,6 +33,8 @@ export interface WalkOptions {
   exclude?: string[];
   /** Ignore the cache and re-walk. */
   refresh?: boolean;
+  /** Never answer from the persistent index (memory cache is still used); for tools where stale data is unsafe. */
+  noDisk?: boolean;
   signal?: AbortSignal;
 }
 
@@ -396,8 +398,10 @@ export async function walkTree(svc: DriveService, rootPath: string, opts: WalkOp
   if (!opts.refresh) {
     const hit = lookup(root, maxDepth, key, excludeKey, exclude);
     if (hit) return hit;
-    const fromDisk = await diskLookup(svc, params, signal);
-    if (fromDisk) return fromDisk;
+    if (!opts.noDisk) {
+      const fromDisk = await diskLookup(svc, params, signal);
+      if (fromDisk) return fromDisk;
+    }
   }
 
   const startSeq = invalidationSeq;

@@ -325,7 +325,7 @@ export async function driveSharingAudit(
   o: { path: string; refresh?: boolean },
   deps: { walk?: WalkFn; status?: (path: string) => Promise<ShareStatus> } = {}
 ) {
-  const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh });
+  const walk = await (deps.walk ?? walkTree)(drive, o.path, { refresh: o.refresh, noDisk: true }); // a security audit must not read a saved index
   const status = deps.status ?? ((p: string) => drive.shareStatus(p));
   const shared = walk.nodes.filter((n) => (n.isShared || n.isSharedByUrl) && parentOf(n.path) !== "");
   const targets = shared.slice(0, SHARE_AUDIT_CAP);

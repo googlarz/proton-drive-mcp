@@ -190,6 +190,17 @@ describe("walk index: serving", () => {
     assert.equal(count(calls, "/my-files"), 1);
   });
 
+  it("noDisk:true never answers from the saved index (used by the sharing audit)", async () => {
+    await seed();
+    ageDisk(3_600_000);
+    const { svc, calls } = makeSvc(small([file("new.txt", 1)]));
+    const r = await walkTree(svc, "/my-files", { noDisk: true });
+    assert.equal(r.fromCache, false);
+    assert.ok(!r.stale);
+    assert.equal(r.nodes.length, 9);
+    assert.equal(count(calls, "/my-files"), 1);
+  });
+
   it("an ancestor on disk answers a subfolder, but not an excluded folder (exclude rule)", async () => {
     await seed();
     ageDisk(3_600_000);
