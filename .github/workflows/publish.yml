@@ -53,12 +53,9 @@ jobs:
       - name: Packaging smoke test
         run: node scripts/pack-smoke.mjs
 
-      # OWNER ACTION to finish the migration to npm Trusted Publishing (OIDC):
-      #   1. npmjs.com -> package proton-drive-mcp -> Settings -> Trusted publishing:
-      #      repo googlarz/proton-drive-mcp, workflow publish.yml, environment npm-publish.
-      #   2. Delete the NPM_TOKEN secret and remove the env block below.
-      # Until then NODE_AUTH_TOKEN remains as a fallback; npm tries OIDC first.
+      # Publishes through npm Trusted Publishing (OIDC): no token. Configured on npmjs.com for
+      # repo googlarz/proton-drive-mcp, workflow publish.yml, environment npm-publish.
+      # If a publish fails with an auth error, the trusted publisher settings do not match this
+      # workflow; re-add `env: NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` here as a fallback.
       - name: Publish
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
