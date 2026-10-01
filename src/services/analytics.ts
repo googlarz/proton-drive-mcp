@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DriveFile, ShareStatus } from "../types/index.js";
 import type { DriveService } from "./drive.js";
-import { walkTree, type WalkNode, type WalkOptions, type WalkResult } from "./walk.js";
+import { walkTree, staleFields, type WalkNode, type WalkOptions, type WalkResult } from "./walk.js";
 import { validateLocalPath } from "../utils/validation.js";
 import { callContext } from "../utils/subprocess.js";
 
@@ -43,7 +43,7 @@ function breakdown(nodes: WalkNode[], key: (n: WalkNode) => string, top: number)
 }
 
 function walkMeta(w: WalkResult) {
-  return { complete: w.complete, skippedCount: w.skipped.length, skipped: w.skipped.slice(0, 10), fromCache: w.fromCache };
+  return { complete: w.complete, skippedCount: w.skipped.length, skipped: w.skipped.slice(0, 10), fromCache: w.fromCache, ...staleFields(w) };
 }
 
 // ---- drive_usage ----------------------------------------------------------

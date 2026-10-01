@@ -34,7 +34,7 @@ import { validateRemotePath, validateRemotePathList, validateLocalPath, validate
 import { logger } from "./utils/logger.js";
 import { driveSearch, driveTree } from "./services/find.js";
 import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type Direction, type Compare } from "./services/plan.js";
-import { invalidatePath } from "./services/walk.js";
+import { invalidatePath, abortBackgroundRefreshes } from "./services/walk.js";
 import { getSyncRoot, readSyncFile, writeSyncFile, syncFileExists } from "./utils/syncfs.js";
 import type { AlbumPhoto } from "./types/index.js";
 import { driveUsage, driveFindDuplicates, driveSharingAudit } from "./services/analytics.js";
@@ -233,7 +233,7 @@ const TOOLS = [
   {
     name: "drive_search",
     description:
-      "Find files/folders under a path by name, type, extension, size or date in one walk. Filters are ANDed. Returns {total, hasMore, items [{path, type, size?, mtime?, sha1?}], walk {complete, fromCache, skipped?}}; walk.complete=false means matches may be missing. Cached 5 min; refresh=true re-reads; skips .git/node_modules.",
+      "Find files/folders under a path by name, type, extension, size or date in one walk. Filters are ANDed. Returns {total, hasMore, items [{path, type, size?, mtime?, sha1?}], walk {complete, fromCache, skipped?}}; walk.complete=false means matches may be missing. Cached 5 min; refresh=true re-reads; skips .git/node_modules. With PROTON_DRIVE_INDEX=1 a saved index may answer first (stale:true); repeat the call or pass refresh:true.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: "object",
@@ -1681,10 +1681,11 @@ export async function main() {
   });
 
   const shutdown = (code: number) => {
+    abortBackgroundRefreshes();
     killAllChildren();
     process.exit(code);
   };
-  server.onclose = () => killAllChildren();
+  server.onclose = () => { abortBackgroundRefreshes(); killAllChildren(); };
   process.once("SIGTERM", () => shutdown(0));
   process.once("SIGINT", () => shutdown(0));
   process.stdout.on("error", (e: NodeJS.ErrnoException) => { if (e.code === "EPIPE") shutdown(0); });

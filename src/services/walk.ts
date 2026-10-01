@@ -1,6 +1,8 @@
 import type { DriveService } from "./drive.js";
 import { DriveNotAuthenticatedError } from "../utils/errors.js";
 import { callContext } from "../utils/subprocess.js";
+import { logger } from "../utils/logger.js";
+import { indexEnabled, indexMaxAgeMs, readIndex, writeIndex, deleteIndex, INDEX_VERSION, MAX_ENTRIES, type IndexEntry, type IndexFile } from "./walkIndex.js";
 
 /** One node of a walked Drive tree. Sizes are the real (claimed) sizes, not encrypted storage sizes. */
 export interface WalkNode {
@@ -43,7 +45,15 @@ export interface WalkResult {
   skipped: { path: string; reason: string }[];
   fromCache: boolean;
   ageMs: number;
+  /** Served from the persistent index (PROTON_DRIVE_INDEX=1) and older than the in-memory TTL. */
+  stale?: boolean;
+  /** A background re-walk is replacing the stale data. */
+  refreshing?: boolean;
 }
+
+/** Output fields for results served from the persistent index while a refresh runs (empty otherwise). */
+export const staleFields = (w: Pick<WalkResult, "stale" | "refreshing">) =>
+  w.stale ? { stale: true, ...(w.refreshing ? { refreshing: true } : {}) } : {};
 
 export const DEFAULT_EXCLUDE = [".git", "node_modules"];
 const DEFAULT_MAX_CALLS = 300;
@@ -115,12 +125,10 @@ function fromCache(entry: CacheEntry, root: string, maxDepth: number | undefined
   };
 }
 
-function lookup(root: string, maxDepth: number | undefined, key: string, excludeKey: string, exclude: Set<string>): WalkResult | undefined {
-  const now = Date.now(), ttl = ttlMs();
+function pick(entries: Iterable<CacheEntry>, root: string, maxDepth: number | undefined, key: string, excludeKey: string, exclude: Set<string>): { e: CacheEntry; exact: boolean } | undefined {
   let best: CacheEntry | undefined;
-  for (const [k, e] of cache) {
-    if (now - e.createdAt >= ttl) { cache.delete(k); continue; }
-    if (e.key === key) return fromCache(e, root, maxDepth, exclude, true); // same request, even if it was partial
+  for (const e of entries) {
+    if (e.key === key) return { e, exact: true }; // same request, even if it was partial
     // An ancestor's walk can answer a subfolder request if it saw everything and went deep enough.
     if (e.excludeKey !== excludeKey || e.skipped.length > 0 || !isUnder(root, e.root)) continue;
     // A subpath the ancestor never saw as a folder must be walked fresh so it fails like a cold call.
@@ -131,33 +139,31 @@ function lookup(root: string, maxDepth: number | undefined, key: string, exclude
     if (reach < (maxDepth ?? Infinity)) continue;
     if (!best || e.root.length > best.root.length) best = e;
   }
-  return best && fromCache(best, root, maxDepth, exclude, false);
+  return best && { e: best, exact: false };
 }
 
-/**
- * Breadth-first walk of a Drive folder with bounded parallelism. A folder that
- * still fails after one retry goes to `skipped` (its subtree is never dropped
- * silently); maxCalls/maxDepth cuts set `complete: false`. Results are cached
- * for PROTON_DRIVE_WALK_TTL_MS (default 5 min); a walk of a subfolder can be
- * served from a cached walk of an ancestor.
- */
-export async function walkTree(svc: DriveService, rootPath: string, opts: WalkOptions = {}): Promise<WalkResult> {
-  const root = normalizeRoot(rootPath);
-  const maxDepth = opts.maxDepth === undefined ? undefined : Math.max(1, Math.floor(opts.maxDepth));
-  const maxCalls = Math.max(1, Math.floor(opts.maxCalls ?? DEFAULT_MAX_CALLS));
-  const concurrency = Math.min(MAX_CONCURRENCY, Math.max(1, Math.floor(opts.concurrency ?? 8)));
-  const excludeList = [...new Set(opts.exclude ?? DEFAULT_EXCLUDE)].sort();
-  const exclude = new Set(excludeList);
-  const signal = opts.signal ?? callContext.getStore()?.signal;
-  if (signal?.aborted) throw abortError(signal);
+function lookup(root: string, maxDepth: number | undefined, key: string, excludeKey: string, exclude: Set<string>): WalkResult | undefined {
+  const now = Date.now(), ttl = ttlMs();
+  for (const [k, e] of cache) if (now - e.createdAt >= ttl) cache.delete(k);
+  const hit = pick(cache.values(), root, maxDepth, key, excludeKey, exclude);
+  return hit && fromCache(hit.e, root, maxDepth, exclude, hit.exact);
+}
 
-  const excludeKey = excludeList.join("\0");
-  const key = [root, maxDepth ?? "", maxCalls, excludeKey].join("\0");
-  if (!opts.refresh) {
-    const hit = lookup(root, maxDepth, key, excludeKey, exclude);
-    if (hit) return hit;
-  }
+interface WalkParams {
+  root: string;
+  maxDepth?: number;
+  maxCalls: number;
+  concurrency: number;
+  excludeList: string[];
+  exclude: Set<string>;
+  key: string;
+  excludeKey: string;
+}
+interface RawWalk { nodes: WalkNode[]; skipped: { path: string; reason: string }[]; callsMade: number; complete: boolean }
 
+/** The actual breadth-first walk (no caching). */
+async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined): Promise<RawWalk> {
+  const { root, maxDepth, maxCalls, concurrency, exclude } = p;
   const nodes: WalkNode[] = [];
   const skipped: { path: string; reason: string }[] = [];
   const queue: { path: string; depth: number }[] = [{ path: root, depth: 0 }];
@@ -235,15 +241,205 @@ export async function walkTree(svc: DriveService, rootPath: string, opts: WalkOp
 
   nodes.sort(byPath);
   skipped.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  const complete = skipped.length === 0 && !isDepthCut(nodes, depthOf(root), maxDepth, exclude);
-  cache.delete(key);
-  cache.set(key, { root, key, excludeKey, maxDepth, createdAt: Date.now(), nodes, skipped, complete });
+  return { nodes, skipped, callsMade, complete: skipped.length === 0 && !isDepthCut(nodes, depthOf(root), maxDepth, exclude) };
+}
+
+function remember(p: WalkParams, w: RawWalk): void {
+  cache.delete(p.key);
+  cache.set(p.key, { root: p.root, key: p.key, excludeKey: p.excludeKey, maxDepth: p.maxDepth, createdAt: Date.now(), nodes: w.nodes, skipped: w.skipped, complete: w.complete });
   while (cache.size > CACHE_ENTRIES) cache.delete(cache.keys().next().value as string);
-  return { root, nodes: nodes.slice(), complete, callsMade, skipped: skipped.slice(), fromCache: false, ageMs: 0 };
+}
+
+// ---- persistent index (opt-in, PROTON_DRIVE_INDEX=1) ------------------------
+// Disk data is only served after one `list /my-files` proves it belongs to the
+// current account, and is served stale-while-revalidate.
+
+const ACCOUNT_ROOT = "/my-files";
+/** undefined = not loaded yet, null = nothing usable on disk. */
+let disk: { accountKey: string; entries: IndexEntry[] } | null | undefined;
+let diskVerified: Promise<boolean> | undefined;
+let knownAccountKey: string | undefined;
+let persistChain: Promise<void> = Promise.resolve();
+let invalidationSeq = 0;
+const refreshes = new Map<string, { controller: AbortController; root: string; superseded: boolean; promise: Promise<void> }>();
+let exitHooked = false;
+
+/** The parentUid shared by the first-level children of /my-files identifies the account's Drive root. */
+function fingerprint(items: { parentUid?: unknown }[]): string | undefined {
+  const ids = new Set(items.map((i) => i.parentUid));
+  const [only] = ids;
+  return ids.size === 1 && typeof only === "string" ? only : undefined;
+}
+
+function loadDisk() {
+  if (disk === undefined) {
+    const f = readIndex();
+    disk = f ? { accountKey: f.accountKey, entries: f.entries } : null;
+  }
+  return disk;
+}
+
+function discardDisk(): void {
+  disk = null;
+  try { deleteIndex(); } catch { /* best effort */ }
+}
+
+function verifyDisk(svc: DriveService, signal: AbortSignal | undefined): Promise<boolean> {
+  diskVerified ??= (async () => {
+    try {
+      const current = fingerprint((await svc.listEntries(ACCOUNT_ROOT)).map((e) => e.item));
+      if (current) knownAccountKey = current;
+      if (current && disk && disk.accountKey === current) return true;
+    } catch (err) {
+      if (signal?.aborted) { diskVerified = undefined; throw err; } // cancelled by the caller: keep the file
+    }
+    discardDisk();
+    return false;
+  })();
+  return diskVerified;
+}
+
+const toCacheEntry = (e: IndexEntry): CacheEntry => ({
+  root: e.root, key: e.key, excludeKey: e.opts.exclude.join("\0"), maxDepth: e.opts.maxDepth,
+  createdAt: e.completedAt, nodes: e.nodes, skipped: [], complete: true,
+});
+
+function diskCandidates(): CacheEntry[] {
+  const st = loadDisk();
+  const now = Date.now(), maxAge = indexMaxAgeMs();
+  return st ? st.entries.filter((e) => now - e.completedAt <= maxAge).map(toCacheEntry) : [];
+}
+
+function persist(svc: DriveService, p: WalkParams, w: RawWalk, startSeq: number): void {
+  if (!indexEnabled() || !w.complete || !isUnder(p.root, ACCOUNT_ROOT)) return;
+  persistChain = persistChain.then(async () => {
+    try {
+      if (invalidationSeq !== startSeq) return; // a write happened mid-walk: do not save a possibly outdated tree
+      let acct = knownAccountKey ?? (p.root === ACCOUNT_ROOT ? fingerprint(w.nodes.filter((n) => depthOf(n.path) === 2)) : undefined);
+      if (!acct) acct = fingerprint((await svc.listEntries(ACCOUNT_ROOT)).map((e) => e.item));
+      if (!acct || invalidationSeq !== startSeq) return;
+      knownAccountKey = acct;
+      const cur = loadDisk();
+      const base = cur && cur.accountKey === acct ? cur.entries : [];
+      const entry: IndexEntry = { key: p.key, root: p.root, opts: { maxDepth: p.maxDepth, maxCalls: p.maxCalls, exclude: p.excludeList }, completedAt: Date.now(), nodes: w.nodes };
+      const entries = [entry, ...base.filter((e) => e.key !== p.key)].sort((a, b) => b.completedAt - a.completedAt).slice(0, MAX_ENTRIES);
+      const file: IndexFile = { version: INDEX_VERSION, accountKey: acct, savedAt: Date.now(), entries };
+      if (writeIndex(file) === "ok") {
+        disk = { accountKey: acct, entries };
+        diskVerified = Promise.resolve(true); // saved under the live drive's own account key
+      }
+    } catch (err) {
+      logger.warn("Persistent walk index not updated:", err instanceof Error ? err.message : String(err));
+    }
+  });
+}
+
+/** Stops background index refreshes (process shutdown). */
+export function abortBackgroundRefreshes(): void {
+  for (const r of refreshes.values()) r.controller.abort(new Error("walk aborted"));
+}
+
+function startRefresh(svc: DriveService, p: WalkParams): void {
+  if (refreshes.has(p.key)) return;
+  if (!exitHooked) { exitHooked = true; process.once("exit", abortBackgroundRefreshes); }
+  const controller = new AbortController();
+  const rec = { controller, root: p.root, superseded: false, promise: Promise.resolve() };
+  const startSeq = invalidationSeq;
+  refreshes.set(p.key, rec);
+  // Own signal, not the triggering request's: that request has already returned.
+  rec.promise = callContext.run({ signal: controller.signal }, () => runWalk(svc, p, controller.signal))
+    .then((w) => {
+      if (rec.superseded || !w.complete) return; // keep the stale entry rather than store a partial tree
+      remember(p, w);
+      persist(svc, p, w, startSeq);
+    })
+    .catch((err) => {
+      if (!controller.signal.aborted) logger.warn("Background walk refresh failed:", err instanceof Error ? err.message : String(err));
+    })
+    .finally(() => { if (refreshes.get(p.key) === rec) refreshes.delete(p.key); });
+}
+
+async function diskLookup(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined): Promise<WalkResult | undefined> {
+  if (!indexEnabled() || indexMaxAgeMs() <= 0) return undefined;
+  const find = () => pick(diskCandidates(), p.root, p.maxDepth, p.key, p.excludeKey, p.exclude);
+  if (!find()) return undefined;
+  if (!(await verifyDisk(svc, signal))) return undefined;
+  const hit = find(); // the file may have been invalidated or discarded while we checked the account
+  if (!hit) return undefined;
+  const res = fromCache(hit.e, p.root, p.maxDepth, p.exclude, hit.exact);
+  if (res.ageMs < ttlMs()) return { ...res, stale: false };
+  startRefresh(svc, p);
+  return { ...res, stale: true, refreshing: true };
+}
+
+/**
+ * Breadth-first walk of a Drive folder with bounded parallelism. A folder that
+ * still fails after one retry goes to `skipped` (its subtree is never dropped
+ * silently); maxCalls/maxDepth cuts set `complete: false`. Results are cached
+ * for PROTON_DRIVE_WALK_TTL_MS (default 5 min); a walk of a subfolder can be
+ * served from a cached walk of an ancestor. With PROTON_DRIVE_INDEX=1 complete
+ * walks are also saved to disk and served stale-while-revalidate in a new process.
+ */
+export async function walkTree(svc: DriveService, rootPath: string, opts: WalkOptions = {}): Promise<WalkResult> {
+  const root = normalizeRoot(rootPath);
+  const maxDepth = opts.maxDepth === undefined ? undefined : Math.max(1, Math.floor(opts.maxDepth));
+  const maxCalls = Math.max(1, Math.floor(opts.maxCalls ?? DEFAULT_MAX_CALLS));
+  const concurrency = Math.min(MAX_CONCURRENCY, Math.max(1, Math.floor(opts.concurrency ?? 8)));
+  const excludeList = [...new Set(opts.exclude ?? DEFAULT_EXCLUDE)].sort();
+  const exclude = new Set(excludeList);
+  const signal = opts.signal ?? callContext.getStore()?.signal;
+  if (signal?.aborted) throw abortError(signal);
+
+  const excludeKey = excludeList.join("\0");
+  const key = [root, maxDepth ?? "", maxCalls, excludeKey].join("\0");
+  const params: WalkParams = { root, maxDepth, maxCalls, concurrency, excludeList, exclude, key, excludeKey };
+  if (!opts.refresh) {
+    const hit = lookup(root, maxDepth, key, excludeKey, exclude);
+    if (hit) return hit;
+    const fromDisk = await diskLookup(svc, params, signal);
+    if (fromDisk) return fromDisk;
+  }
+
+  const startSeq = invalidationSeq;
+  const w = await runWalk(svc, params, signal);
+  remember(params, w);
+  persist(svc, params, w, startSeq);
+  return { root, nodes: w.nodes.slice(), complete: w.complete, callsMade: w.callsMade, skipped: w.skipped.slice(), fromCache: false, ageMs: 0 };
 }
 
 /** Drop cached walks that contain `path` (call after the server itself writes there). */
 export function invalidatePath(path: string): void {
   const p = normalizeRoot(path);
-  for (const [k, e] of cache) if (isUnder(e.root, p) || isUnder(p, e.root)) cache.delete(k);
+  const related = (root: string) => isUnder(root, p) || isUnder(p, root);
+  invalidationSeq++;
+  for (const [k, e] of cache) if (related(e.root)) cache.delete(k);
+  for (const r of refreshes.values()) if (related(r.root)) { r.superseded = true; r.controller.abort(new Error("walk superseded")); }
+  if (!indexEnabled()) return;
+  try {
+    const f = readIndex(); // re-read: another process may have saved since we loaded
+    if (!f) return;
+    const keep = f.entries.filter((e) => !related(e.root));
+    if (keep.length === f.entries.length) return;
+    if (keep.length === 0) deleteIndex();
+    else writeIndex({ ...f, savedAt: Date.now(), entries: keep });
+    disk = keep.length ? { accountKey: f.accountKey, entries: keep } : null;
+  } catch { /* never fail a write because of the index */ }
+}
+
+/** Test hook: drop all in-process state (memory cache, loaded index, background refreshes). */
+export function resetWalkCacheForTests(): void {
+  abortBackgroundRefreshes();
+  refreshes.clear();
+  cache.clear();
+  disk = undefined;
+  diskVerified = undefined;
+  knownAccountKey = undefined;
+}
+
+/** Test hook: resolves when background refreshes and index writes have finished. */
+export async function flushWalkIndexForTests(): Promise<void> {
+  do {
+    await Promise.allSettled([...refreshes.values()].map((r) => r.promise));
+    await persistChain;
+  } while (refreshes.size > 0);
 }

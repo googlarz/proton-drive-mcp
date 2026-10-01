@@ -34,7 +34,8 @@
       ],
       "env": {
         "PROTON_DRIVE_BIN": "${user_config.proton_drive_bin}",
-        "PROTON_DRIVE_SYNC_PATH": "${user_config.sync_path}"
+        "PROTON_DRIVE_SYNC_PATH": "${user_config.sync_path}",
+        "PROTON_DRIVE_INDEX": "${user_config.persistent_index}"
       }
     }
   },
@@ -49,6 +50,13 @@
       "type": "directory",
       "title": "Proton Drive sync folder",
       "description": "Optional. Root of your locally synced Proton Drive folder; enables drive_read_file and drive_write_file.",
+      "required": false
+    },
+    "persistent_index": {
+      "type": "boolean",
+      "title": "Persistent search index (plaintext on disk)",
+      "description": "Optional, off by default. Saves file names, paths and hashes from folder scans to a local file (owner-only permissions) so searches are fast after a restart. Your Drive is end-to-end encrypted, but this local copy is NOT encrypted. Clear it with `proton-drive-cli index clear`.",
+      "default": false,
       "required": false
     }
   },

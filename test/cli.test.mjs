@@ -3,6 +3,7 @@ import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { makeSandbox, fakeEnv, nonVersionCalls, McpClient, DIST_CLI } from "./helpers/mcp-client.mjs";
 
@@ -201,5 +202,47 @@ describe("no arguments", () => {
       assert.equal(res.result.serverInfo.name, "proton-drive-mcp");
       assert.equal((await c.listTools()).length, 46);
     } finally { await c.close(); }
+  });
+});
+
+describe("index status / clear", () => {
+  const dir = mkdtempSync(join(TMP, "pdcli-idx-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const env = { PROTON_DRIVE_INDEX: "1", PROTON_DRIVE_INDEX_DIR: dir };
+
+  it("status is safe when disabled or missing, and never calls the account CLI", async () => {
+    const r = await runCli(["index", "status", "--json"], { env: { PROTON_DRIVE_INDEX: "", PROTON_DRIVE_INDEX_DIR: dir } });
+    assert.equal(r.code, 0, r.stderr);
+    const j = JSON.parse(r.stdout);
+    assert.equal(j.enabled, false);
+    assert.equal(j.exists, false);
+    assert.equal(j.path, join(dir, "walk-index.json"));
+    assert.equal(r.calls.length, 0);
+  });
+
+  it("status lists entries, clear deletes the file and reports it", async () => {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = join(dir, "walk-index.json");
+    writeFileSync(file, JSON.stringify({
+      version: 1, accountKey: "a", savedAt: Date.now(),
+      entries: [{ key: "k", root: "/my-files", opts: { maxCalls: 300, exclude: [] }, completedAt: Date.now(), nodes: [{ path: "/my-files/a", uid: "u", type: "file" }] }],
+    }), { mode: 0o600 });
+    const s = JSON.parse((await runCli(["index", "status", "--json"], { env })).stdout);
+    assert.equal(s.enabled, true);
+    assert.equal(s.exists, true);
+    assert.deepEqual(s.entries.map((e) => [e.root, e.nodes]), [["/my-files", 1]]);
+    const c = await runCli(["index", "clear", "--json"], { env });
+    assert.equal(c.code, 0, c.stderr);
+    assert.equal(JSON.parse(c.stdout).deleted, true);
+    assert.equal(existsSync(file), false);
+    const again = JSON.parse((await runCli(["index", "clear", "--json"], { env })).stdout);
+    assert.equal(again.deleted, false);
+    assert.equal(c.calls.length, 0);
+  });
+
+  it("rejects an unknown subcommand", async () => {
+    const r = await runCli(["index", "bogus"], { env });
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /Usage: index status\|clear/);
   });
 });

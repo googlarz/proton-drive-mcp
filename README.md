@@ -241,15 +241,30 @@ proton-drive-cli share audit /my-files
 proton-drive-cli sync-plan ./local /my-files/backup --direction up
 proton-drive-cli bulk-move /my-files/Archive /my-files/a.pdf /my-files/b.pdf          # plan only
 proton-drive-cli bulk-trash /my-files/old1.txt /my-files/old2.txt --confirm           # apply
+proton-drive-cli index status                                                         # persistent index: enabled?, path, size, age, entries
+proton-drive-cli index clear                                                          # delete the saved index file
 ```
 
 - The first walk of a large drive can take minutes (measured ~25 s per 1,200 files at concurrency 8). Later calls reuse a 5-minute cache; `refresh` bypasses it.
 - Walks skip `.git` and `node_modules` by default.
+- With `PROTON_DRIVE_INDEX=1`, results may come from a saved index (`stale: true`) while a refresh runs; repeat the call or pass `refresh: true` for a fresh read. Off by default, see [Persistent index](#persistent-index-opt-in).
 - Read-only tools (`drive_search`, `drive_tree`, `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_sync_plan`) change nothing. `drive_bulk_move` and `drive_bulk_trash` are two-step: call without `confirmed` for the plan, then with `confirmed: true` to apply. Bulk trash is reversible with `drive_restore`.
 - Duplicate detection uses the sha1 the uploader claimed, which is unverified. `verify: true` downloads the candidates and hashes them.
 - The sharing audit flags an invitee as external when the address is outside Proton domains, so Proton users on a custom domain are over-flagged.
 - Sizes are sums of file sizes, not your account quota.
 - `drive_usage` trash stats always make one uncached `/trash` listing (~2.5 s), even when the walk is cached.
+
+### Persistent index (opt-in)
+
+By default every new server process (each Claude Desktop session) walks the drive again on the first `drive_search`, `drive_tree`, `drive_usage` or `drive_find_duplicates`: about 25 s per 1,200 files, minutes on big drives. Set `PROTON_DRIVE_INDEX=1` to keep completed walks on disk and answer instantly after a restart.
+
+**Privacy: this is off by default.** Your Drive is end-to-end encrypted, but the index is a **plaintext** copy of file and folder names, paths, sizes, dates and claimed sha1 hashes on your local disk. Anyone who can read your user account's files (or your backups) can read it. Enable it only on a machine you trust.
+
+- **What is stored:** the node list of up to 8 recent complete walks under `/my-files` (partial or failed walks are never saved, so a `drive_tree` that stops at its depth limit is not stored), plus a fingerprint of your account's Drive root. No file contents, no credentials, no tokens.
+- **Where:** `PROTON_DRIVE_INDEX_DIR` if set; otherwise `~/Library/Caches/proton-drive-mcp` (macOS) or `$XDG_CACHE_HOME/proton-drive-mcp` / `~/.cache/proton-drive-mcp` (Linux). One file, `walk-index.json`, mode `0600` in a `0700` directory, written atomically. A symlinked directory or file is refused. Not written above 200 MB.
+- **Account check:** before any saved data is served, one `list /my-files` (~2 s) confirms it belongs to the account that is logged in now; on a mismatch or failure the file is deleted and the drive is walked fresh.
+- **Freshness:** data up to `PROTON_DRIVE_INDEX_MAX_AGE_H` hours old (default 24; `0` = never use saved data) is returned immediately with `stale: true, refreshing: true` while one background walk replaces it; a repeated call then returns the fresh walk. Saved data younger than 5 minutes is served as fresh. `refresh: true` always does a blocking fresh walk. Writes made through this server drop the affected entries from memory and disk.
+- **Check or remove it:** `proton-drive-cli index status` and `proton-drive-cli index clear` (or just delete the file). In the MCPB bundle, the **Persistent search index** setting is the opt-in.
 
 ### Photos
 
@@ -403,7 +418,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 
 ### Token cost
 
-`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` 39.0 KB (46 tools), `core` 16.8 KB (18 tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
+`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` 39.2 KB (46 tools), `core` 17.0 KB (18 tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
 
 `drive_auth_status`, `drive_version`, `drive_list`, `drive_info`, `drive_list_trash`, `drive_search`, `drive_tree`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`, `drive_trash`, `drive_restore`, `drive_share_status`, `photos_list_timeline`, `photos_download`.
 
@@ -446,6 +461,9 @@ Every tool group was live-tested on 2026-09-28 against a real Proton account, **
 | `CLAUDE_DESKTOP_CONFIG` | Optional | Path of the Claude Desktop config that `doctor` and `setup-claude-desktop` read/write instead of the per-OS default. |
 | `PROTON_DRIVE_RETRY_BASE_MS` | Optional | Test hook: base backoff in ms for retrying read-only calls (default 250). |
 | `PROTON_DRIVE_WALK_TTL_MS` | Optional | How long `drive_tree`/`drive_search` reuse a cached folder walk, in ms (default 300000; 0 disables the cache). Results can be up to this old, and changes made by other clients or processes are not seen until it expires or `refresh: true`. The first walk of a large drive can take minutes. The cache is dropped for any path this server writes to. |
+| `PROTON_DRIVE_INDEX` | Optional | Set to `1` (or `true`) to keep completed folder walks in a **plaintext** on-disk index so searches are fast after a restart. Off by default. See [Persistent index](#persistent-index-opt-in). |
+| `PROTON_DRIVE_INDEX_DIR` | Optional | Directory for the index file (default: `~/Library/Caches/proton-drive-mcp` on macOS, `$XDG_CACHE_HOME` or `~/.cache/proton-drive-mcp` elsewhere). Created `0700`; the file is `0600`. |
+| `PROTON_DRIVE_INDEX_MAX_AGE_H` | Optional | Oldest saved index data that may be served, in hours (default 24; 0 = never serve saved data). Served data is marked `stale: true` and refreshed in the background. |
 | `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 46 tools) or `core` (18 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
 
 ---
