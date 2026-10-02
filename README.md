@@ -42,6 +42,18 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 
 ---
 
+## Why this, and not just the Proton Drive CLI?
+
+For syncing, backups and cron jobs, **use the official CLI directly**: it is simpler and that is what it is for. This project does not replace it; it needs it, and wraps it so an AI assistant can drive it. It is worth using when you want to work with your Drive by conversation:
+
+- **Things the CLI does not have** (it has no search, recursive listing, usage or content-reading commands, and Drive's end-to-end encryption rules out server-side search): `drive_search`, `drive_tree`, `drive_usage`, `drive_find_duplicates` (verified by sha256), `drive_sharing_audit`, `drive_read_content`, `drive_sync_plan`. They run locally on your computer, so encryption stays intact.
+- **Safe changes by an AI:** destructive or outward-facing actions need explicit confirmation, bulk move/trash is two steps (plan first, then apply), trash is reversible, and the duplicate finder never deletes anything. A bare CLI assumes you know exactly what you are doing.
+- **Rough edges smoothed over:** the CLI reports some per-item failures with exit code 0, returns lists in random order, and can fail with `database is locked` under parallel calls. The server checks per-item results, sorts and paginates lists, and retries read-only calls.
+
+What to expect: search matches names, sizes and dates, not the text of every file (you read one file at a time); the first walk of a large drive takes minutes unless you enable the opt-in [persistent index](#persistent-index-opt-in); and this is an independent project, not an official Proton product.
+
+---
+
 ## What you get
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
