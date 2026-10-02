@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.1 — 2026-10-02
+
+### Changed
+- README: new section "Why this, and not just the Proton Drive CLI?" (when to use the CLI directly, what this project adds, what to expect). Documentation only; no code changes.
+
 ## 1.5.0 — 2026-10-01
 
 ### Added
