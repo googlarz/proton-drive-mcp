@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.2 — 2026-10-05
+
+### Added
+- `drive_upload` (and `proton-drive-cli upload --skip-thumbnails`) can skip thumbnail generation, the CLI's `--skip-thumbnails` option.
+
+### Changed
+- README: the coverage statement now says exactly what is covered: all 32 scriptable commands of CLI 0.8.0 (everything except the interactive `auth login`), but not every optional flag. Deliberately not exposed: `sharing invite --include-node-name` (it would send the file name in the invitation email in clear text) and the `inherited` invite role (its meaning is unverified and status output would mislabel it).
+
 ## 1.5.1 — 2026-10-02
 
 ### Changed

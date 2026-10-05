@@ -256,6 +256,17 @@ describe("upload", () => {
     assert.ok(call.includes("merge"));
   });
 
+  it("adds --skip-thumbnails only when asked", async () => {
+    const t = makeRunner();
+    const drive = new DriveService(t.runner);
+    t.setResult({ transferredItems: 1, skippedItems: 0, failedItems: 0 });
+    await drive.upload("/local/a.jpg", "/my-files", "skip", "skip", true);
+    const withFlag = t.lastCall();
+    assert.equal(withFlag[withFlag.length - 1], "--skip-thumbnails");
+    await drive.upload("/local/a.jpg", "/my-files");
+    assert.equal(t.lastCall().includes("--skip-thumbnails"), false);
+  });
+
   it("returns zeros when result is null", async () => {
     const t = makeRunner();
     const drive = new DriveService(t.runner);

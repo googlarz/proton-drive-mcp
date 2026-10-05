@@ -167,6 +167,18 @@ describe("conditional confirmed gates", () => {
   it("drive_upload fileConflictStrategy=replace is refused without confirmed", () => refused("drive_upload", { ...up, fileConflictStrategy: "replace" }));
   it("drive_upload folderConflictStrategy=replace is refused without confirmed", () => refused("drive_upload", { ...up, folderConflictStrategy: "replace" }));
   it("drive_upload replace runs with confirmed:true", () => allowed("drive_upload", { ...up, fileConflictStrategy: "replace", confirmed: true }));
+  it("drive_upload skipThumbnails:true reaches the CLI as --skip-thumbnails; a non-boolean never reaches it", async () => {
+    await allowed("drive_upload", { ...up, skipThumbnails: true });
+    const last = s.calls().at(-1);
+    assert.ok((last.argv ?? last).includes("--skip-thumbnails"));
+    const before = s.calls().length;
+    const bad = await s.c.call("drive_upload", { ...up, skipThumbnails: "yes" });
+    assert.equal(bad.isError, true);
+    assert.equal(s.calls().length, before);
+    await allowed("drive_upload", up);
+    const plain = s.calls().at(-1);
+    assert.equal((plain.argv ?? plain).includes("--skip-thumbnails"), false);
+  });
   for (const strat of ["skip", "create-new-revision", "rename"]) {
     it(`drive_upload fileConflictStrategy=${strat} needs no confirmation`, () => allowed("drive_upload", { ...up, fileConflictStrategy: strat }));
   }
