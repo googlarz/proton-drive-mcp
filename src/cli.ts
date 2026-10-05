@@ -52,7 +52,7 @@ Commands:
          [--limit N] [--offset N] [--refresh]
                                            Find files/folders under path (default /my-files) in one walk
   mkdir <path>                             Create a new folder
-  upload <local> <remote> [--file-conflict X] [--folder-conflict X] [--confirm]
+  upload <local> <remote> [--file-conflict X] [--folder-conflict X] [--skip-thumbnails] [--confirm]
                                            Upload file/folder (files: skip/create-new-revision/rename/replace; folders: skip/merge/rename/replace;
                                            'replace' trashes the existing remote item and needs --confirm)
   download <remote> <local> [--file-conflict X] [--folder-conflict X] [--confirm]
@@ -277,7 +277,7 @@ async function run() {
 
     case "upload": {
       const rawLocal = sub;
-      if (!rawLocal) { console.error("Usage: upload <local> <remote> [--file-conflict X] [--folder-conflict X]"); process.exit(1); }
+      if (!rawLocal) { console.error("Usage: upload <local> <remote> [--file-conflict X] [--folder-conflict X] [--skip-thumbnails]"); process.exit(1); }
       let local: string;
       try { local = validateLocalPath(rawLocal, { scan: true }); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
@@ -299,7 +299,8 @@ async function run() {
       print(await drive.upload(
         local, remote,
         fileConflictRaw as FileConflictStrategy,
-        folderConflictRaw as FolderConflictStrategy
+        folderConflictRaw as FolderConflictStrategy,
+        args.includes("--skip-thumbnails")
       ));
       break;
     }

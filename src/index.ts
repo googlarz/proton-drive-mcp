@@ -290,6 +290,7 @@ const TOOLS = [
           description:
             "'skip' keeps the existing remote folder (default). 'merge' merges contents into it. 'rename' uploads under a unique name. 'replace' trashes the remote folder first — confirm with user.",
         },
+        skipThumbnails: { type: "boolean", description: "Skip thumbnails." },
       },
       required: ["localPath", "remotePath"],
       additionalProperties: false,
@@ -1321,7 +1322,8 @@ export async function main() {
             validateLocalPath(a.localPath, { scan: true }),
             validateRemotePath(a.remotePath),
             fcs as FileConflictStrategy,
-            dcs2 as FolderConflictStrategy
+            dcs2 as FolderConflictStrategy,
+            a.skipThumbnails === true
           );
           if (uploadResult.failed > 0) {
             return fail(`Upload completed with ${uploadResult.failed} failed file(s). uploaded=${uploadResult.uploaded} skipped=${uploadResult.skipped}`);

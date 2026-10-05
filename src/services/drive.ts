@@ -294,7 +294,8 @@ export class DriveService {
     localPath: string,
     remotePath: string,
     fileConflictStrategy: FileConflictStrategy = "skip",
-    folderConflictStrategy: FolderConflictStrategy = "skip"
+    folderConflictStrategy: FolderConflictStrategy = "skip",
+    skipThumbnails = false
   ): Promise<UploadResult> {
     // finally: a partly completed upload that then fails also changes the tree.
     let result: unknown;
@@ -308,6 +309,7 @@ export class DriveService {
         fileConflictStrategy,
         "--folder-conflict-strategy",
         folderConflictStrategy,
+        ...(skipThumbnails ? ["--skip-thumbnails"] : []),
       ]);
     } finally {
       invalidatePath(remotePath);
