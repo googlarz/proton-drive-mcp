@@ -74,6 +74,6 @@
   },
   "optionalDependencies": {
     "fflate": "0.8.3",
-    "unpdf": "1.8.1"
+    "unpdf": "1.9.1"
   }
 }
