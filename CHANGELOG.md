@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.5.3 — 2026-10-31
+
+### Security
+- Dependency refresh: `@modelcontextprotocol/sdk` 1.32.2 (minimum raised from 1.29 to 1.32.2), plus patched transitive packages (`zod`, `hono`, `body-parser`, `proxy-addr`, `qs`, `fast-uri`, `ip-address`, `@hono/node-server`). `npm audit` goes from 9 findings (1 critical, 3 high, 5 moderate) to 0. The advisories concerned the SDK's HTTP transports, OAuth and experimental tasks and the HTTP stack beneath them; this server only speaks stdio, so none was reachable in normal use, but the 1.5.2 `.mcpb` bundle shipped the vulnerable versions and scanners flagged them.
+- GitHub private vulnerability reporting is now enabled (SECURITY.md already pointed to it).
+
+### Changed
+- Optional PDF dependency `unpdf` 1.8.1 → 1.9.1.
+
 ## 1.5.2 — 2026-10-05
 
 ### Added
