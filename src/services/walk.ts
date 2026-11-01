@@ -322,6 +322,12 @@ function fingerprint(items: { parentUid?: unknown }[]): string | undefined {
   return ids.size === 1 && typeof only === "string" ? only : undefined;
 }
 
+/** Identifies the signed-in account's Drive (see fingerprint). Undefined when it cannot be determined. */
+export async function currentAccountKey(svc: DriveService): Promise<string | undefined> {
+  knownAccountKey ??= fingerprint((await svc.listEntries(ACCOUNT_ROOT)).map((e) => e.item));
+  return knownAccountKey;
+}
+
 function loadDisk() {
   if (disk === undefined) {
     const f = readIndex({ requireWritable: true });

@@ -19,3 +19,4 @@ This MCP server wraps the official `proton-drive` CLI, which holds a live, authe
 - Treat tool calls that delete, share, or create public links as sensitive; review them in your client.
 - File contents and names returned by tools are untrusted input to the model (prompt-injection risk).
 - Never share your CLI session data or `PROTON_DRIVE_*` environment with others.
+- To limit what a model can do, use the opt-in guard layer (`PROTON_DRIVE_MODE=readonly`, `PROTON_DRIVE_REMOTE_ROOTS`, `PROTON_DRIVE_AUDIT_LOG`, `PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE`); see the README. It restricts the MCP server only, not the companion CLI.

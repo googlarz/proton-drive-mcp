@@ -5,11 +5,13 @@
 //   FAKE_ARGV_LOG     file that receives one JSON line per invocation: {argv, pid}
 //   FAKE_MODE         json | shuffle | empty | undefined-literal | garbage | ansi-prefixed-json |
 //                     fail-stderr | fail-stderr-echo | fail-stdout-crash | hang |
-//                     big-stderr | auth-fail | ok-false-results | locked-then-json | transient-then-json | tree | download-hang
+//                     big-stderr | auth-fail | ok-false-results | locked-then-json | transient-then-json | tree | fs | download-hang
 //                     download-hang: `filesystem info` prints a small text file node; `filesystem download` writes a partial file into the
 //                     target dir, then hangs like `hang`. Everything else prints "[]".
 //   FAKE_TREE         tree mode: path to a JSON file {"<folder path>": [list items]}; `filesystem list <path>` serves that entry
 //                     (missing entry -> "Item not found" exit 1; a string entry is written to stderr, exit 1). Other commands print "[]".
+//   FAKE_INFO         fs mode: path to a JSON file {"<path>": node}; `filesystem info <path>` prints that node (missing -> "Node not found" exit 1).
+//                     FAKE_FAIL_CMD makes `filesystem <that subcommand>` (e.g. copy) fail with "boom". Everything else prints "[]".
 //   FAKE_COUNTER      locked-then-json: file holding the number of calls so far
 //   FAKE_LOCKED_TIMES locked-then-json: how many calls fail with "database is locked" (default 2)
 //   FAKE_TRANSIENT_KIND   transient-then-json: ratelimit | timeout | reset | retryafter | notfound (counter via FAKE_COUNTER)
@@ -169,6 +171,20 @@ switch (mode) {
       process.stdout.write("[]\n");
       process.exit(0);
     }
+    break;
+  }
+  case "fs": {
+    if (argv[0] === "filesystem" && argv[1] === "info") {
+      const info = JSON.parse(readFileSync(process.env.FAKE_INFO, "utf8"));
+      if (info[argv[2]] === undefined) { process.stderr.write(`Node not found: ${argv[2]}\n`); process.exit(1); }
+      process.stdout.write(JSON.stringify(info[argv[2]]) + "\n");
+    } else if (argv[0] === "filesystem" && argv[1] === process.env.FAKE_FAIL_CMD) {
+      process.stderr.write("boom\n");
+      process.exit(1);
+    } else {
+      process.stdout.write("[]\n");
+    }
+    process.exit(0);
     break;
   }
   case "ok-false-results":

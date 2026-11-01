@@ -24,6 +24,7 @@ import { buildEntry, defaultConfigPath, isDirectory, resolveDriveCli, writeEntry
 import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type Direction, type Compare } from "./services/plan.js";
 import { invalidatePath } from "./services/walk.js";
 import { indexStatus, deleteIndex } from "./services/walkIndex.js";
+import { deleteChangeSnapshots } from "./services/changes.js";
 import { resolve } from "node:path";
 import { driveSearch, driveTree } from "./services/find.js";
 import { readDriveContent } from "./services/content.js";
@@ -215,7 +216,7 @@ async function run() {
   // Local file only: no account, no CLI binary needed.
   if (cmd === "index") {
     if (sub === "status") print(indexStatus());
-    else if (sub === "clear") print(deleteIndex());
+    else if (sub === "clear") print({ ...deleteIndex(), changeSnapshotsDeleted: deleteChangeSnapshots() });
     else { console.error("Usage: index status|clear"); process.exit(1); }
     return;
   }

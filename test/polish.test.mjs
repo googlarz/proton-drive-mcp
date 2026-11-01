@@ -155,8 +155,10 @@ const EXPECTED = {
   drive_share_set_url: { destructiveHint: true, idempotentHint: false, openWorldHint: true },
   drive_read_file: { ...R, openWorldHint: false },
   drive_read_content: { ...R, openWorldHint: false },
+  drive_read_many: { ...R, openWorldHint: false },
   drive_write_file: { destructiveHint: true, openWorldHint: true },
-  drive_tree: R, drive_search: R, drive_usage: R, drive_find_duplicates: R, drive_sharing_audit: R, drive_sync_plan: R,
+  drive_tree: R, drive_search: R, drive_usage: R, drive_find_duplicates: R, drive_sharing_audit: R, drive_sync_plan: R, drive_audit_log: R,
+  drive_share_expiry_report: R, drive_recent_changes: R,
   drive_bulk_move: { destructiveHint: false },
   drive_bulk_trash: { destructiveHint: false, idempotentHint: true },
 };
@@ -175,12 +177,12 @@ describe("tool annotations, titles and _meta", () => {
     } finally { await c.close(); sb.cleanup(); }
   });
 
-  it("drive_list, drive_read_file and drive_read_content carry the large-result hint, others do not", async () => {
+  it("drive_list, drive_read_file, drive_read_content and drive_read_many carry the large-result hint, others do not", async () => {
     const sb = makeSandbox();
     const c = await startServer("json", sb);
     try {
       for (const t of await c.listTools()) {
-        if (["drive_list", "drive_read_file", "drive_read_content"].includes(t.name)) assert.deepEqual(t._meta, { "anthropic/maxResultSizeChars": 100000 });
+        if (["drive_list", "drive_read_file", "drive_read_content", "drive_read_many"].includes(t.name)) assert.deepEqual(t._meta, { "anthropic/maxResultSizeChars": 100000 });
         else assert.equal(t._meta, undefined, t.name);
       }
     } finally { await c.close(); sb.cleanup(); }

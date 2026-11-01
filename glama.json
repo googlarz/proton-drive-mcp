@@ -201,6 +201,22 @@
     {
       "name": "drive_sharing_audit",
       "description": "Audit public links, invitees and risk flags across shared items in Proton Drive."
+    },
+    {
+      "name": "drive_share_expiry_report",
+      "description": "List public share links with expiry dates and flag expired, expiring-soon and never-expiring links."
+    },
+    {
+      "name": "drive_recent_changes",
+      "description": "List files added or modified since a date, or diff against a saved snapshot to see added, removed, modified and moved files."
+    },
+    {
+      "name": "drive_read_many",
+      "description": "Read the text of up to 10 Proton Drive files in one call."
+    },
+    {
+      "name": "drive_audit_log",
+      "description": "Show the newest entries of the server's audit log and whether its hash chain is intact."
     }
   ]
 }

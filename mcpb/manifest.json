@@ -35,7 +35,11 @@
       "env": {
         "PROTON_DRIVE_BIN": "${user_config.proton_drive_bin}",
         "PROTON_DRIVE_SYNC_PATH": "${user_config.sync_path}",
-        "PROTON_DRIVE_INDEX": "${user_config.persistent_index}"
+        "PROTON_DRIVE_INDEX": "${user_config.persistent_index}",
+        "PROTON_DRIVE_MODE": "${user_config.read_only}",
+        "PROTON_DRIVE_REMOTE_ROOTS": "${user_config.remote_roots}",
+        "PROTON_DRIVE_AUDIT_LOG": "${user_config.audit_log}",
+        "PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE": "${user_config.snapshot_before_overwrite}"
       }
     }
   },
@@ -56,6 +60,32 @@
       "type": "boolean",
       "title": "Persistent search index (plaintext on disk)",
       "description": "Optional, off by default. Saves file names, paths and hashes from folder scans to a local file (owner-only permissions) so searches are fast after a restart. Your Drive is end-to-end encrypted, but this local copy is NOT encrypted. Clear it with `proton-drive-cli index clear`.",
+      "default": false,
+      "required": false
+    },
+    "read_only": {
+      "type": "boolean",
+      "title": "Read-only mode",
+      "description": "Optional, off by default. Hides and refuses every tool that changes Drive or your account (upload, move, trash, share, delete, photo albums, sign-out). Reading, searching and downloading to this computer still work.",
+      "default": false,
+      "required": false
+    },
+    "remote_roots": {
+      "type": "string",
+      "title": "Limit to Drive folders",
+      "description": "Optional. Drive folders the assistant may touch, separated by ':' (for example /my-files/Projects/X). Everything outside is refused, and tools that cannot be limited to a folder (trash, invitations, photos, sign-out) are refused too. Leave empty for no limit.",
+      "required": false
+    },
+    "audit_log": {
+      "type": "string",
+      "title": "Audit log file",
+      "description": "Optional. Absolute path of a file that records every tool call (tamper-evident, owner-only). If it cannot be written, tools that change Drive are refused. Leave empty for no log.",
+      "required": false
+    },
+    "snapshot_before_overwrite": {
+      "type": "boolean",
+      "title": "Keep a copy before overwriting",
+      "description": "Optional, off by default. Before a file is overwritten (text written to the sync folder, or an upload that replaces it), copies the current version to a .versions folder next to it. The overwrite is refused if the copy fails.",
       "default": false,
       "required": false
     }
@@ -248,6 +278,22 @@
     {
       "name": "drive_sharing_audit",
       "description": "Audit public links, invitees and risk flags across shared items in Proton Drive."
+    },
+    {
+      "name": "drive_share_expiry_report",
+      "description": "List public share links with expiry dates and flag expired, expiring-soon and never-expiring links."
+    },
+    {
+      "name": "drive_recent_changes",
+      "description": "List files added or modified since a date, or diff against a saved snapshot to see added, removed, modified and moved files."
+    },
+    {
+      "name": "drive_read_many",
+      "description": "Read the text of up to 10 Proton Drive files in one call."
+    },
+    {
+      "name": "drive_audit_log",
+      "description": "Show the newest entries of the server's audit log and whether its hash chain is intact."
     }
   ],
   "prompts": [
