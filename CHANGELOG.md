@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.7.0 — unreleased
+
+### Added
+- **Content search (opt-in, off by default)**: `PROTON_DRIVE_CONTENT_INDEX=1` enables two new MCP tools. **`drive_content_index`** (`path` required, `action`: `update` (default), `status`, `clear`; `maxFiles`, `maxFileMB`, `timeBudgetMs`) builds an incremental full-text index of the text of files under the folder you name (text/markdown/code, `.docx`, text-layer `.pdf`), two files at a time; secret-looking names are never read; changed files only are re-read; vanished files are dropped; `partial: true` with `remaining` means call again. **`drive_search_content`** (`query`, `path?`, `limit?`) returns ranked (BM25, all words must match, trailing `*` for a prefix) paths with snippets and `indexedAt`; it never re-lists Drive (`stale: true`).
+- The index is one local file, `content-index.enc`, encrypted with AES-256-GCM in authenticated 1 MB chunks (wrong key, any changed, reordered, removed or appended byte, or another account's file fails closed), in the same private directory as the walk index, capped at 500 MB (`PROTON_DRIVE_CONTENT_INDEX_MAX_MB`). The key is generated on first use and kept in the macOS Keychain or the Linux Secret Service, passed over stdin so it never appears in a process listing; without a keychain it needs `PROTON_DRIVE_CONTENT_INDEX_KEY` (64 hex characters). `PROTON_DRIVE_KEYCHAIN_SERVICE` renames the keychain entry. No new dependencies, no native modules.
+- Both tools are read tools: available in `PROTON_DRIVE_MODE=readonly`, confined by `PROTON_DRIVE_REMOTE_ROOTS` (result paths outside the roots are dropped). The audit log records a search query as its length only. `proton-drive-cli index clear` also deletes `content-index.enc`.
+
+### Notes
+- The MCP server now lists 53 tools (51 in 1.6.0); the two new tools are MCP-only (the companion CLI still mirrors 45). The `tools/list` size budget in the tests rose from 45 KB to 48 KB (full tier is now about 46.9 KB).
+- Threat model: protects against disk theft, backup leakage and other local users; not against a process running as you that can read your keychain. See the README section "Content search (opt-in)".
+- Known limits: no OCR; the folder listing behind an update can be up to 5 minutes old (walk cache); two server processes updating at once keep the last writer's file; the whole index is loaded into memory per search.
+
 ## 1.6.0 — 2026-11-01
 
 ### Added

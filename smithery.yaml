@@ -62,6 +62,8 @@ tools:
   - drive_share_expiry_report
   - drive_recent_changes
   - drive_read_many
+  - drive_content_index
+  - drive_search_content
   - drive_audit_log
 startCommand:
   type: stdio

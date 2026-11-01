@@ -53,7 +53,8 @@ function extOf(path: string): string {
   return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
-function pickFormat(path: string, mediaType: string): "text" | "docx" | "pdf" | undefined {
+/** Which extractor a file needs, from its name and media type; undefined = unsupported. */
+export function pickFormat(path: string, mediaType: string): "text" | "docx" | "pdf" | undefined {
   const ext = extOf(path);
   if (ext === "docx") return "docx";
   if (ext === "pdf") return "pdf";
@@ -152,12 +153,8 @@ async function downloadBytes(drive: DriveService, path: string, cap: number): Pr
   }
 }
 
-export async function readDriveContent(drive: DriveService, args: ReadContentArgs, deps: ReadContentDeps = {}): Promise<ReadContentResult> {
-  const maxChars = args.maxChars ?? DEFAULT_MAX_CHARS;
-  const offset = args.offset ?? 0;
-  const path = args.path;
-  if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > MAX_MAX_CHARS) throw new Error(`maxChars must be an integer from 1 to ${MAX_MAX_CHARS}`);
-  if (!Number.isInteger(offset) || offset < 0) throw new Error("offset must be a non-negative integer");
+/** Downloads and extracts the whole text of a file (capped at MAX_EXTRACT_CHARS), with the same checks as drive_read_content. */
+export async function loadDriveText(drive: DriveService, path: string, deps: ReadContentDeps = {}): Promise<{ format: string; size: number; text: string; note?: string; capped: boolean }> {
   const node = ((await drive.info(path)) ?? {}) as Record<string, any>;
   const mediaType = typeof node.mediaType === "string" ? node.mediaType : "";
   if (node.type === "folder" || node.type === "album") throw new Error(`${showValue(path)} is a folder; drive_read_content reads files (use drive_list).`);
@@ -183,12 +180,21 @@ export async function readDriveContent(drive: DriveService, args: ReadContentArg
     ({ text, note, capped } = await extractInWorker(format, buf, deps.worker ?? {}));
     if (capped) note = [note, `text capped at ${deps.worker?.maxTextChars ?? MAX_EXTRACT_CHARS} characters; the rest of the file was not read`].filter(Boolean).join("; ");
   }
-  text = text.replaceAll("\0", "");
+  return { format, size: buf.length, text: text.replaceAll("\0", ""), note, capped };
+}
+
+export async function readDriveContent(drive: DriveService, args: ReadContentArgs, deps: ReadContentDeps = {}): Promise<ReadContentResult> {
+  const maxChars = args.maxChars ?? DEFAULT_MAX_CHARS;
+  const offset = args.offset ?? 0;
+  const path = args.path;
+  if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > MAX_MAX_CHARS) throw new Error(`maxChars must be an integer from 1 to ${MAX_MAX_CHARS}`);
+  if (!Number.isInteger(offset) || offset < 0) throw new Error("offset must be a non-negative integer");
+  const { format, size, text, note, capped } = await loadDriveText(drive, path, deps);
 
   const s = sliceCodePoints(text, offset, maxChars);
   const truncated = s.end < s.total || capped;
   return {
-    path, format, size: buf.length, chars: s.total, offset, text: s.text, truncated,
+    path, format, size, chars: s.total, offset, text: s.text, truncated,
     ...(truncated ? { nextOffset: s.end } : {}),
     ...(note ? { note } : {}),
   };
