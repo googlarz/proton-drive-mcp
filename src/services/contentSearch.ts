@@ -55,6 +55,8 @@ export interface DocRec {
   tokens: number;
   /** Why no text was indexed (unsupported type, no text layer, too large ...). */
   skipped?: string;
+  /** The text was recognized by OCR (PROTON_DRIVE_OCR=1) and may contain recognition errors. */
+  ocr?: true;
   excerpt?: Buffer;
   /** Estimated bytes this document adds to the file; keeps the size cap check cheap. */
   bytes: number;
@@ -115,7 +117,7 @@ export class ContentData {
 export function serializeData(d: ContentData, emit: (s: string) => void): void {
   emit(JSON.stringify({ k: "meta", v: DATA_VERSION, created: d.created, next: d.nextId, folders: d.folders }) + "\n");
   for (const [id, r] of d.docs) {
-    emit(JSON.stringify({ k: "doc", id, p: r.path, s: r.size, m: r.mtime, g: r.sig, at: r.at, n: r.tokens, x: r.skipped, e: r.excerpt?.toString("base64"), b: r.bytes }) + "\n");
+    emit(JSON.stringify({ k: "doc", id, p: r.path, s: r.size, m: r.mtime, g: r.sig, at: r.at, n: r.tokens, x: r.skipped, o: r.ocr, e: r.excerpt?.toString("base64"), b: r.bytes }) + "\n");
   }
   for (const [t, p] of d.postings) emit(JSON.stringify({ k: "term", t, p }) + "\n");
 }
@@ -156,8 +158,8 @@ export class DataLoader {
       d.folders = o.folders;
       this.sawMeta = true;
     } else if (o?.k === "doc") {
-      if (!isInt(o.id) || typeof o.p !== "string" || typeof o.g !== "string" || !isInt(o.at) || !isInt(o.n) || !isInt(o.b) || !optStr(o.m) || !optStr(o.x) || !optStr(o.e) || (o.s !== undefined && !isInt(o.s)) || d.docs.has(o.id)) throw corrupt("bad document");
-      d.docs.set(o.id, { path: o.p, size: o.s, mtime: o.m, sig: o.g, at: o.at, tokens: o.n, skipped: o.x, excerpt: o.e === undefined ? undefined : Buffer.from(o.e, "base64"), bytes: o.b });
+      if (!isInt(o.id) || typeof o.p !== "string" || typeof o.g !== "string" || !isInt(o.at) || !isInt(o.n) || !isInt(o.b) || !optStr(o.m) || !optStr(o.x) || !optStr(o.e) || (o.o !== undefined && o.o !== true) || (o.s !== undefined && !isInt(o.s)) || d.docs.has(o.id)) throw corrupt("bad document");
+      d.docs.set(o.id, { path: o.p, size: o.s, mtime: o.m, sig: o.g, at: o.at, tokens: o.n, skipped: o.x, ...(o.o === true ? { ocr: true as const } : {}), excerpt: o.e === undefined ? undefined : Buffer.from(o.e, "base64"), bytes: o.b });
       d.bytes += o.b;
     } else if (o?.k === "term") {
       if (typeof o.t !== "string" || !Array.isArray(o.p) || o.p.length % 2 !== 0 || !o.p.every(isInt)) throw corrupt("bad term");

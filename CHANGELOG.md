@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.8.0 — unreleased
+
+### Added
+- **Opt-in local OCR** (`PROTON_DRIVE_OCR=1`, off by default): scanned PDFs and images become readable by `drive_read_content` and `drive_read_many` and searchable through the content index. A PDF whose text layer is empty or very sparse (under about 20 non-blank characters per page on average) falls back to OCR; `.png`, `.jpg`/`.jpeg`, `.tif`/`.tiff`, `.bmp`, `.webp` (and `.heic` with Vision) are read as images. Without the opt-in nothing changes. Results carry `ocr: true`, `engine`, `pagesOcrd` and a note that OCR text may contain recognition errors; `drive_read_many` items and `drive_search_content` results carry `ocr: true`.
+- Engines (`PROTON_DRIVE_OCR_ENGINE`: `auto`, `vision`, `tesseract`): the **macOS Vision framework** through a small Swift helper shipped in the package (`dist/ocr/vision-ocr.swift`, compiled on first use with `swiftc -O` into the private cache directory, binary named by a hash of its source), or **tesseract** (+ `pdftoppm` for PDFs). No new npm dependencies, nothing leaves the machine. `PROTON_DRIVE_OCR_LANGS`, `PROTON_DRIVE_OCR_MAX_PAGES` (30), `PROTON_DRIVE_OCR_MAX_BYTES` (30 MB), `PROTON_DRIVE_OCR_TIMEOUT_MS` (90 s per file).
+- Engine processes run from argument arrays (no shell) on `in.<ext>` inside a private `pdmcp-ocr-*` temp dir (swept after a crash like the other temp dirs), at low priority, with a hard timeout that kills the whole process group, a stdout cap, cancel/shutdown handling, and exactly one OCR at a time per process.
+- Content index: OCR'd documents are marked `ocr: true`. A file whose OCR slot only came after the time budget is not recorded and is retried by the next call; files recorded as unreadable while OCR was off are tried again once it is on. `proton-drive-cli doctor` reports the OCR state, engine, tesseract version and languages.
+
+### Notes
+- `npm run build` now also copies `src/ocr/` to `dist/ocr/` (the Swift source ships in the npm package and the `.mcpb` bundle through `dist/`).
+- The first read after the helper is built took about 25 s in testing (macOS prepares Vision for each new binary); later reads are fast. The first Vision read counts against the 90 s per-file limit.
+- OCR text is imperfect and handwriting is not supported; check numbers against the original. The 10 MB `PROTON_DRIVE_READ_MAX_BYTES` download cap still applies to scans; raise it (and `PROTON_DRIVE_OCR_MAX_BYTES`) for larger ones.
+- Known limits: one OCR at a time, so large scan folders index slowly over several calls; an OCR timeout is recorded as a permanent skip for that file version; pdftoppm renders at most 4000 pixels per side (larger pages are cropped, a safety bound); `.gif` is not read.
+
 ## 1.7.0 — 2026-11-01
 
 ### Added

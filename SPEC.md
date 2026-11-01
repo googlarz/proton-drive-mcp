@@ -29,6 +29,8 @@ src/index.ts              MCP server: TOOLS (schemas), tool-surface derivation (
                           schema enforcement, dispatch, lifecycle (signals, cancellation)
 src/cli.ts                Companion CLI (mirrors 45 of 53 tools; drive_read_file/drive_write_file/drive_audit_log/drive_read_many/drive_share_expiry_report/drive_recent_changes/drive_content_index/drive_search_content are MCP-only)
 src/services/content.ts   drive_read_content: private-temp download, text/docx/pdf extraction, paging
+src/services/ocr.ts       Opt-in local OCR (PROTON_DRIVE_OCR=1): engine choice, Vision helper build, tesseract/pdftoppm runs, limits
+src/ocr/vision-ocr.swift  macOS Vision + PDFKit helper, compiled on first use (copied to dist/ocr/ by the build)
 src/services/contentIndex.ts  drive_content_index / drive_search_content: update, status, clear, search
 src/services/contentSearch.ts Content index data: tokenizer, postings, BM25, snippets, line format
 src/services/contentSeal.ts   Content index file: chunked AES-256-GCM container, fail-closed reader
@@ -57,6 +59,7 @@ test/                     Unit tests (injected runner) + real-process tests (fak
 - **Analytics:** `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_share_expiry_report`, `drive_recent_changes`
 - **Photos:** `photos_list_albums`, `photos_create_album`, `photos_update_album`, `photos_delete_album`, `photos_list_album_photos`, `photos_add_to_album`, `photos_remove_from_album`, `photos_list_timeline`, `photos_download`, `photos_upload`
 - **Local sync folder (needs `PROTON_DRIVE_SYNC_PATH`):** `drive_read_file`, `drive_write_file`
+- **OCR (needs `PROTON_DRIVE_OCR=1`):** no new tools; `drive_read_content`, `drive_read_many` and the content index read scanned PDFs and images locally (Vision or tesseract). Results carry `ocr: true`.
 - **Content search (needs `PROTON_DRIVE_CONTENT_INDEX=1`):** `drive_content_index`, `drive_search_content`
   - Both are allowed in `PROTON_DRIVE_MODE=readonly` on purpose: `update` and `clear` change only the local encrypted index file (and its keychain item), never Drive. The file has no rollback detection (integrity per version, not freshness).
 - **Audit (needs `PROTON_DRIVE_AUDIT_LOG`):** `drive_audit_log`

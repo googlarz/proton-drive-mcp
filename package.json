@@ -14,7 +14,7 @@
     "proton-drive-cli": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"require('fs').cpSync('src/ocr', 'dist/ocr', {recursive: true})\"",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "cli": "npm run build && node dist/cli.js",

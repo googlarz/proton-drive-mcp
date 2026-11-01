@@ -88,6 +88,30 @@ const warnedDirs = new Set<string>();
 export class TooLargeError extends Error {}
 
 /**
+ * Creates the private index directory (0700) when missing; false when it exists but is not a real directory owned by you
+ * with no group/other access. Never chmods or takes over a directory this code did not create.
+ */
+export function ensurePrivateIndexDir(): boolean {
+  const dir = indexDir();
+  const existing = lstatOrNull(dir);
+  if (existing) {
+    if (!existing.isDirectory() || foreignOrLoose(existing)) {
+      if (!warnedDirs.has(dir)) {
+        warnedDirs.add(dir);
+        logger.warn(`Persistent walk index not saved: ${dir} must be a real directory owned by you with no group/other access (mode 0700). Use a dedicated directory.`);
+      }
+      return false;
+    }
+    return true;
+  }
+  mkdirSync(dirname(dir), { recursive: true });
+  mkdirSync(dir, { mode: 0o700 });
+  chmodSync(dir, 0o700); // umask-proof; safe because we just created it
+  const made = lstatSync(dir);
+  return made.isDirectory() && !foreignOrLoose(made);
+}
+
+/**
  * Atomic 0600 write into the private index directory: `fill` writes the content to the temp file's descriptor (it may
  * throw TooLargeError), then the file is fsynced and renamed over the target. Never throws; the result says what happened.
  */
@@ -95,23 +119,7 @@ export function writePrivateStream(fileName: string, fill: (fd: number) => void)
   const dir = indexDir();
   let tmp: string | undefined;
   try {
-    const existing = lstatOrNull(dir);
-    if (existing) {
-      // Never chmod or take over a directory this code did not create.
-      if (!existing.isDirectory() || foreignOrLoose(existing)) {
-        if (!warnedDirs.has(dir)) {
-          warnedDirs.add(dir);
-          logger.warn(`Persistent walk index not saved: ${dir} must be a real directory owned by you with no group/other access (mode 0700). Use a dedicated directory.`);
-        }
-        return "refused";
-      }
-    } else {
-      mkdirSync(dirname(dir), { recursive: true });
-      mkdirSync(dir, { mode: 0o700 });
-      chmodSync(dir, 0o700); // umask-proof; safe because we just created it
-      const made = lstatSync(dir);
-      if (!made.isDirectory() || foreignOrLoose(made)) return "refused";
-    }
+    if (!ensurePrivateIndexDir()) return "refused";
     const target = join(dir, fileName);
     const tst = lstatOrNull(target);
     if (tst && !tst.isFile()) return "refused"; // symlink or directory in the way
