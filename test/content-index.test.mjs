@@ -469,7 +469,7 @@ describe("content index key", () => {
   const ACCT = "0123456789abcdef0123456789abcdef";
 
   /** A stand-in for /usr/bin/security (macOS) or secret-tool (Linux) that keeps items in a JSON file and logs every call. */
-  function shim(kind, { failStore = false } = {}) {
+  function shim(kind, { failStore = false, findFail = null } = {}) {
     const bin = join(dir, `${kind}-shim.mjs`);
     const log = join(dir, `${kind}.log`);
     const store = join(dir, `${kind}.json`);
@@ -483,8 +483,11 @@ if (!process.stdin.isTTY) for await (const c of process.stdin) stdin += c;
 appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv, stdin }) + "\\n");
 const flag = (a, f) => a[a.indexOf(f) + 1];
 const save = () => writeFileSync(${JSON.stringify(store)}, JSON.stringify(items));
+const findFail = ${JSON.stringify(findFail)};
+const failFind = () => { if (!findFail) return; if (findFail.kill) process.kill(process.pid, "SIGKILL"); process.stderr.write(findFail.stderr ?? ""); process.exit(findFail.exit); };
 if (kind === "security") {
   if (argv[0] === "find-generic-password") {
+    failFind();
     const v = items[flag(argv, "-s") + "/" + flag(argv, "-a")];
     if (v === undefined) { process.stderr.write("security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\\n"); process.exit(44); }
     process.stdout.write(v + "\\n");
@@ -494,10 +497,15 @@ if (kind === "security") {
       if (t[0] === "add-generic-password" && ${failStore ? "false" : "true"}) { const k = flag(t, "-s") + "/" + flag(t, "-a"); if (items[k] === undefined) items[k] = flag(t, "-w"); }
     }
     save();
+  } else if (argv[0] === "delete-generic-password") {
+    const k = flag(argv, "-s") + "/" + flag(argv, "-a");
+    if (items[k] === undefined) process.exit(44);
+    delete items[k]; save();
   } else process.exit(2);
 } else {
-  if (argv[0] === "lookup") { const v = items[argv[2] + "/" + argv[4]]; if (v === undefined) process.exit(1); process.stdout.write(v); }
+  if (argv[0] === "lookup") { failFind(); const v = items[argv[2] + "/" + argv[4]]; if (v === undefined) process.exit(1); process.stdout.write(v); }
   else if (argv[0] === "store") { ${failStore ? "process.stderr.write('no dbus\\\\n'); process.exit(1);" : ""} items[argv[3] + "/" + argv[5]] = stdin; save(); }
+  else if (argv[0] === "clear") { delete items[argv[2] + "/" + argv[4]]; save(); }
   else process.exit(2);
 }
 `, { mode: 0o755 });
@@ -573,6 +581,93 @@ if (kind === "security") {
     assert.equal(plannedBackend({ platform: "darwin", env: {} }), "macos-keychain");
     assert.equal(plannedBackend({ platform: "linux", env: {} }), "secret-tool");
     assert.equal(plannedBackend({ platform: "linux", env: { PROTON_DRIVE_CONTENT_INDEX_KEY: HEX_A } }), "env");
+  });
+
+  it("Linux: exit 1 is 'not found' only with empty stderr and no kill: a D-Bus failure or a kill is an error and never generates a new key", async () => {
+    const dbus = shim("secret-tool", { findFail: { exit: 1, stderr: "secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY\n" } });
+    for (const create of [false, true]) {
+      await assert.rejects(getContentKey(ACCT, { create, platform: "linux", env: {}, secretToolBin: dbus.bin }), (e) => e instanceof ContentKeyError && /D-Bus/.test(e.message), `create ${create}`);
+    }
+    assert.ok(!dbus.calls().some((c) => c.argv[0] === "store"));
+    const killed = shim("secret-tool", { findFail: { kill: true } });
+    for (const create of [false, true]) {
+      await assert.rejects(getContentKey(ACCT, { create, platform: "linux", env: {}, secretToolBin: killed.bin }), (e) => e instanceof ContentKeyError && /killed or timed out/.test(e.message), `create ${create}`);
+    }
+    assert.ok(!killed.calls().some((c) => c.argv[0] === "store"));
+    const missing = shim("secret-tool", { findFail: { exit: 1, stderr: "" } }); // the documented "no such item"
+    assert.equal(await getContentKey(ACCT, { create: false, platform: "linux", env: {}, secretToolBin: missing.bin }), undefined);
+  });
+
+  it("macOS: only exit 44 means 'item not found'; any other failure or a kill is an error", async () => {
+    const gone = shim("security", { findFail: { exit: 44, stderr: "The specified item could not be found in the keychain.\n" } });
+    assert.equal(await getContentKey(ACCT, { create: false, platform: "darwin", env: {}, securityBin: gone.bin }), undefined);
+    for (const findFail of [{ exit: 1, stderr: "" }, { exit: 36, stderr: "User interaction is not allowed.\n" }, { exit: 1, stderr: "The specified item could not be found in the keychain.\n" }, { kill: true }]) {
+      const s = shim("security", { findFail });
+      for (const create of [false, true]) {
+        await assert.rejects(getContentKey(ACCT, { create, platform: "darwin", env: {}, securityBin: s.bin }), ContentKeyError, JSON.stringify(findFail));
+      }
+      assert.ok(!s.calls().some((c) => c.argv[0] === "-i"), "no new key stored");
+    }
+  });
+
+  it("update refuses to generate a new key when an index file exists but its key is missing", async () => {
+    delete process.env.PROTON_DRIVE_CONTENT_INDEX_KEY;
+    const s = shim("security");
+    const keys = { platform: "darwin", env: {}, securityBin: s.bin };
+    const w = world({ "/my-files/Docs/a.txt": "keychain backed words" });
+    await update(w, {}, { keys });
+    writeFileSync(join(dir, "security.json"), "{}"); // key lost
+    const before = readFileSync(contentIndexPath());
+    await assert.rejects(update(w, {}, { keys }), (e) => e instanceof ContentKeyError && /key for the content index was not found/.test(e.message));
+    assert.deepEqual(s.items(), {}); // nothing generated
+    assert.ok(readFileSync(contentIndexPath()).equals(before)); // the old file is untouched
+  });
+
+  it("clear deletes the keychain item too (macOS): argv only, a missing item is not an error", async () => {
+    delete process.env.PROTON_DRIVE_CONTENT_INDEX_KEY;
+    const s = shim("security");
+    const keys = { platform: "darwin", env: {}, securityBin: s.bin };
+    const w = world({ "/my-files/Docs/a.txt": "words" });
+    await update(w, {}, { keys });
+    assert.equal(Object.keys(s.items()).length, 1);
+    const [item] = Object.keys(s.items());
+    const r = await driveContentIndex({}, { action: "clear" }, w.deps({ keys }));
+    assert.equal(r.deleted, true);
+    assert.equal(r.keyRemoved, true);
+    assert.match(r.note, /old copies|backup/i);
+    assert.deepEqual(s.items(), {});
+    const del = s.calls().find((c) => c.argv[0] === "delete-generic-password");
+    assert.deepEqual(del.argv, ["delete-generic-password", "-s", "proton-drive-mcp-content-index", "-a", item.split("/")[1]]);
+    // item already gone while the file exists: fine, keyRemoved false
+    await update(w, {}, { keys });
+    writeFileSync(join(dir, "security.json"), "{}");
+    const r2 = await driveContentIndex({}, { action: "clear" }, w.deps({ keys }));
+    assert.equal(r2.deleted, true);
+    assert.equal(r2.keyRemoved, false);
+  });
+
+  it("clear deletes the Secret Service item (Linux) with the same attributes", async () => {
+    delete process.env.PROTON_DRIVE_CONTENT_INDEX_KEY;
+    const s = shim("secret-tool");
+    const keys = { platform: "linux", env: {}, secretToolBin: s.bin };
+    const w = world({ "/my-files/Docs/a.txt": "words" });
+    await update(w, {}, { keys });
+    const [item] = Object.keys(s.items());
+    const r = await driveContentIndex({}, { action: "clear" }, w.deps({ keys }));
+    assert.equal(r.keyRemoved, true);
+    assert.deepEqual(s.items(), {});
+    assert.deepEqual(s.calls().find((c) => c.argv[0] === "clear").argv, ["clear", "service", "proton-drive-mcp-content-index", "account", item.split("/")[1]]);
+  });
+
+  it("clear with the key from PROTON_DRIVE_CONTENT_INDEX_KEY says it cannot rotate it", async () => {
+    const s = shim("security");
+    const w = world({ "/my-files/Docs/a.txt": "words" });
+    await update(w);
+    const r = await driveContentIndex({}, { action: "clear" }, w.deps({ keys: { platform: "darwin", env: { PROTON_DRIVE_CONTENT_INDEX_KEY: HEX_A }, securityBin: s.bin } }));
+    assert.equal(r.deleted, true);
+    assert.equal(r.keyRemoved, false);
+    assert.match(r.note, /PROTON_DRIVE_CONTENT_INDEX_KEY.*cannot|cannot.*PROTON_DRIVE_CONTENT_INDEX_KEY/s);
+    assert.deepEqual(s.calls(), []);
   });
 
   it("end to end through the service with the keychain shim: index, restart-like reload, search", async () => {
@@ -671,5 +766,142 @@ describe("server: guards and audit", () => {
       assert.equal(JSON.parse(out).contentIndexDeleted, true);
       assert.ok(!existsSync(f));
     } finally { sb.cleanup(); }
+  });
+});
+
+// ---- review fixes ----------------------------------------------------------------------------------------------------
+describe("content index review fixes", () => {
+  it("credential-looking names are skipped; ordinary names are not", () => {
+    for (const n of ["production.env", "prod.env.txt", ".env", ".env.local", ".npmrc", ".netrc", ".pgpass", ".htpasswd", ".git-credentials", ".pypirc", ".dockercfg", "id_ecdsa", "id_dsa", "id_rsa", "id_ed25519.pub", "service-account.json", "api_keys.txt", "API-KEY.md", "apikey.txt", "token.txt", "tokenizer-paper.pdf", "kubeconfig.yaml", "Passwort.txt", "hasło.txt", "HASŁO.txt", "haslo.docx", "passwd", "private_key.txt", "PrivateKey.txt", "vault.kdbx", "app.keystore", "app.jks", "a.p12", "a.pfx", "cert.pem", "my.key", "pub.asc", "backup.gpg", "client_secret.json", "credentials.txt", "login.keychain-db"]) {
+      assert.equal(looksSecret("/r", `/r/sub/${n}`), true, n);
+    }
+    for (const n of ["report.txt", "environment-notes.md", "envelope.pdf", "keynote.md", "monkey.txt", "ascii.txt", "invoice.docx", "notes.vars.md"]) {
+      assert.equal(looksSecret("/r", `/r/${n}`), false, n);
+    }
+  });
+
+  it("the size estimate covers what a document really adds to the file", () => {
+    const d = new ContentData();
+    const tf = new Map();
+    for (let i = 0; i < 5000; i++) tf.set(`term${String(i).padStart(6, "x")}`, 1 + (i % 7));
+    d.addDoc({ path: "/my-files/Docs/a.txt", sig: "1|2|3", at: 1, tokens: 5000, excerpt: makeExcerpt("lorem ipsum ".repeat(500)) }, tf);
+    let actual = 0;
+    serializeData(d, (s) => { actual += Buffer.byteLength(s); });
+    assert.ok(d.bytes >= actual, `estimate ${d.bytes} < actual ${actual}`);
+    assert.ok(d.bytes < actual * 2, `estimate ${d.bytes} is more than twice the actual ${actual}`);
+  });
+
+  it("the default size cap is 200 MB and PROTON_DRIVE_CONTENT_INDEX_MAX_MB overrides it", async () => {
+    const { contentIndexMaxBytes } = await import("../dist/services/contentIndex.js");
+    assert.equal(contentIndexMaxBytes(), 200 * 1024 * 1024);
+    process.env.PROTON_DRIVE_CONTENT_INDEX_MAX_MB = "7";
+    assert.equal(contentIndexMaxBytes(), 7 * 1024 * 1024);
+  });
+
+  it("a save over the cap drops the newest documents, saves the rest and reports it instead of failing the whole update", async () => {
+    // Control characters in a path are JSON-escaped to 6 bytes each: the estimate undercounts, the real file does not fit.
+    const files = {};
+    for (let i = 0; i < 40; i++) files[`/my-files/Docs/${"\u0001".repeat(3000)}${i}.txt`] = `alpha beta word${i}`;
+    const w = world(files);
+    process.env.PROTON_DRIVE_CONTENT_INDEX_MAX_MB = "0.6";
+    const r = await update(w);
+    assert.equal(r.partial, true);
+    assert.ok(r.droppedForSize > 0 && r.droppedForSize < 40, `dropped ${r.droppedForSize}`);
+    assert.equal(r.documents, 40 - r.droppedForSize);
+    assert.equal(r.indexed, 40 - r.droppedForSize);
+    assert.match(r.note, /size cap|left out/);
+    assert.ok(statSync(contentIndexPath()).size <= 0.6 * 1024 * 1024);
+    const hits = paths(await search(w, "alpha beta", { limit: 50 }));
+    assert.equal(hits.length, 40 - r.droppedForSize);
+    assert.ok(hits.some((p) => p.endsWith("\u00010.txt")));
+    assert.ok(!hits.some((p) => p.endsWith("\u000139.txt")));
+    assert.equal((await driveContentIndex({}, { action: "status" }, w.deps())).folders[0].complete, false);
+    // with room, the next call indexes what was dropped and re-reads nothing else
+    process.env.PROTON_DRIVE_CONTENT_INDEX_MAX_MB = "5";
+    w.loads.length = 0;
+    const r2 = await update(w);
+    assert.equal(r2.indexed, r.droppedForSize);
+    assert.equal(r2.unchanged, 40 - r.droppedForSize);
+    assert.equal(r2.droppedForSize, undefined);
+  });
+
+  it("clear waits for an in-flight update, so the update cannot recreate the file afterwards", async () => {
+    const w = world({ "/my-files/Docs/a.txt": "alpha" });
+    let release;
+    const gate = new Promise((res) => { release = res; });
+    let entered;
+    const started = new Promise((res) => { entered = res; });
+    const slow = { load: async () => { entered(); await gate; return { text: "alpha" }; } };
+    const up = update(w, {}, slow);
+    await started;
+    const cl = driveContentIndex({}, { action: "clear" }, w.deps());
+    await new Promise((res) => setTimeout(res, 30));
+    release();
+    await up;
+    const r = await cl;
+    assert.equal(r.deleted, true); // it saw the file the update wrote
+    assert.ok(!existsSync(contentIndexPath()));
+  });
+
+  it("status checks the account before decrypting anything and says so", async () => {
+    const w = world({ "/my-files/Docs/a.txt": "alpha" });
+    await update(w);
+    for (const extra of [{}, { keys: { env: { PROTON_DRIVE_CONTENT_INDEX_KEY: HEX_B } } }]) { // even with a wrong key it is the account that is reported
+      const st = await driveContentIndex({}, { action: "status" }, w.deps({ accountKey: async () => "acct-2", ...extra }));
+      assert.equal(st.readable, false);
+      assert.equal(st.accountMatches, false);
+      assert.match(st.error, /index belongs to another account/);
+      assert.equal(st.folders, undefined);
+      assert.equal(st.documents, undefined);
+    }
+    const ok = await driveContentIndex({}, { action: "status" }, w.deps());
+    assert.equal(ok.accountMatches, true);
+    assert.equal(ok.folders.length, 1);
+  });
+
+  it("a file the listing gives no size, time or hash for is treated as changed and re-read every update", async () => {
+    const w = world({ "/my-files/Docs/a.txt": "alpha" });
+    const bare = { walk: walkOf([node("/my-files/Docs/a.txt", { size: undefined, mtime: undefined })]) };
+    await update(w, {}, bare);
+    const r = await update(w, {}, bare);
+    assert.equal(r.unchanged, 0);
+    assert.equal(r.indexed, 1);
+    assert.deepEqual(w.loads, ["/my-files/Docs/a.txt", "/my-files/Docs/a.txt"]);
+    assert.equal((await update(w)).documents, 1); // with a signature it settles, still one document
+  });
+
+  it("surfaces the listing age, and forces a fresh walk when a cached listing is older than 60 s", async () => {
+    const w = world({ "/my-files/Docs/a.txt": "alpha" });
+    const calls = [];
+    const walk = (age) => async (_d, root, opts) => {
+      calls.push(opts);
+      return { root, nodes: w.nodes(), complete: true, callsMade: 0, skipped: [], fromCache: !opts.refresh, ageMs: opts.refresh ? 0 : age };
+    };
+    const fresh = await update(w, {}, { walk: walk(30_000) });
+    assert.equal(calls.length, 1);
+    assert.equal(fresh.fromCache, true);
+    assert.equal(fresh.listingAgeMs, 30_000);
+    assert.equal(fresh.listingRefreshed, undefined);
+    calls.length = 0;
+    const old = await update(w, {}, { walk: walk(120_000) });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].refresh, undefined);
+    assert.equal(calls[1].refresh, true);
+    assert.equal(old.fromCache, false);
+    assert.equal(old.listingAgeMs, 0);
+    assert.equal(old.listingRefreshed, true);
+  });
+
+  it("with PROTON_DRIVE_REMOTE_ROOTS, a search without a path and the status folder list only show what is inside the roots", async () => {
+    const w = world({ "/my-files/A/x.txt": "shared term", "/my-files/B/y.txt": "shared term", "/my-files/AB/z.txt": "shared term" });
+    for (const root of ["/my-files/A", "/my-files/B", "/my-files/AB"]) await driveContentIndex({}, { path: root }, w.deps());
+    const allow = (p) => p === "/my-files/A" || p.startsWith("/my-files/A/");
+    const r = await driveSearchContent({}, { query: "shared term" }, w.deps({ allow }));
+    assert.deepEqual(paths(r), ["/my-files/A/x.txt"]);
+    assert.equal(r.totalMatches, 1);
+    const st = await driveContentIndex({}, { action: "status" }, w.deps({ allow }));
+    assert.deepEqual(st.folders.map((f) => f.path), ["/my-files/A"]);
+    assert.equal(st.documents, 1);
+    assert.equal((await driveContentIndex({}, { action: "status" }, w.deps())).folders.length, 3);
   });
 });

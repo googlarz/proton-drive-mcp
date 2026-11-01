@@ -25,7 +25,7 @@ import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type
 import { invalidatePath } from "./services/walk.js";
 import { indexStatus, deleteIndex } from "./services/walkIndex.js";
 import { deleteChangeSnapshots } from "./services/changes.js";
-import { deleteContentIndex } from "./services/contentIndex.js";
+import { clearContentIndex } from "./services/contentIndex.js";
 import { resolve } from "node:path";
 import { driveSearch, driveTree } from "./services/find.js";
 import { readDriveContent } from "./services/content.js";
@@ -217,7 +217,10 @@ async function run() {
   // Local file only: no account, no CLI binary needed.
   if (cmd === "index") {
     if (sub === "status") print(indexStatus());
-    else if (sub === "clear") print({ ...deleteIndex(), changeSnapshotsDeleted: deleteChangeSnapshots(), contentIndexDeleted: deleteContentIndex() });
+    else if (sub === "clear") {
+      const c = await clearContentIndex();
+      print({ ...deleteIndex(), changeSnapshotsDeleted: deleteChangeSnapshots(), contentIndexDeleted: c.deleted, contentKeyRemoved: c.keyRemoved, contentIndexNote: c.note });
+    }
     else { console.error("Usage: index status|clear"); process.exit(1); }
     return;
   }

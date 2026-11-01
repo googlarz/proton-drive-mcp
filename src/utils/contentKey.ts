@@ -38,13 +38,16 @@ function envKey(env: NodeJS.ProcessEnv): Buffer | undefined {
   return Buffer.from(raw.trim(), "hex");
 }
 
-interface Run { code: number | string | null; stdout: string; stderr: string }
+/** code is null when the process was killed, timed out or died on a signal: that is never an answer about the item. */
+interface Run { code: number | null; stdout: string; stderr: string }
+const exitText = (r: Run) => (r.code === null ? "killed or timed out" : `exit ${r.code}`);
 
 function run(bin: string, args: string[], stdin?: string): Promise<Run> {
   return new Promise((resolve, reject) => {
     const child = execFile(bin, args, { timeout: TIMEOUT_MS, maxBuffer: 64 * 1024, encoding: "utf8" }, (err, stdout, stderr) => {
       if (err && (err as NodeJS.ErrnoException).code === "ENOENT") return reject(err);
-      const code = err ? ((err as { code?: number | string }).code ?? 1) : 0;
+      const c = err ? (err as { code?: unknown }).code : 0;
+      const code = typeof c === "number" && !(err as { killed?: boolean } | null)?.killed ? c : null;
       resolve({ code, stdout, stderr });
     });
     child.stdin?.on("error", () => { /* the process exited before reading; its exit code says why */ });
@@ -61,15 +64,15 @@ async function macGet(bin: string, svc: string, acct: string): Promise<Buffer | 
     if (!k) throw new ContentKeyError("The keychain item for the content index does not hold a valid key. Delete it with `security delete-generic-password` and clear the index.");
     return k;
   }
-  if (r.code === 44 || /could not be found/i.test(r.stderr)) return undefined; // errSecItemNotFound
-  throw new ContentKeyError(`The macOS Keychain refused or failed to return the content index key (${r.stderr.trim().split("\n")[0] || `exit ${r.code}`}). Unlock the keychain and allow access, or set ${KEY_ENV}.`);
+  if (r.code === 44) return undefined; // errSecItemNotFound, the only documented "no such item"
+  throw new ContentKeyError(`The macOS Keychain refused or failed to return the content index key (${r.stderr.trim().split("\n")[0] || exitText(r)}). Unlock the keychain and allow access, or set ${KEY_ENV}.`);
 }
 
 async function macSet(bin: string, svc: string, acct: string, hex: string): Promise<void> {
   // `-i` takes commands from stdin, so the secret never appears in the argument list. svc/acct are restricted to a safe charset.
   const r = await run(bin, ["-i"], `add-generic-password -s ${svc} -a ${acct} -l ${svc} -w ${hex}\n`);
   // Whatever the exit code says, the caller reads the item back to be sure it was stored (and to adopt a racing process's key).
-  if (r.code !== 0) throw new ContentKeyError(`Could not store the content index key in the macOS Keychain (exit ${r.code}). Set ${KEY_ENV} instead.`);
+  if (r.code !== 0) throw new ContentKeyError(`Could not store the content index key in the macOS Keychain (${exitText(r)}). Set ${KEY_ENV} instead.`);
 }
 
 async function linuxGet(bin: string, svc: string, acct: string): Promise<Buffer | undefined> {
@@ -79,13 +82,14 @@ async function linuxGet(bin: string, svc: string, acct: string): Promise<Buffer 
     if (!k) throw new ContentKeyError("The Secret Service entry for the content index does not hold a valid key. Remove it with `secret-tool clear` and clear the index.");
     return k;
   }
-  if (r.code === 0 || r.code === 1) return undefined; // not found
-  throw new ContentKeyError(`secret-tool failed (exit ${r.code}: ${r.stderr.trim().split("\n")[0]}). Set ${KEY_ENV} instead.`);
+  // "Not found" is exit 1 with nothing on stderr. A D-Bus or keyring failure also exits 1 but says why; a kill or timeout has no exit code.
+  if (r.code === 0 || (r.code === 1 && r.stderr.trim() === "")) return undefined;
+  throw new ContentKeyError(`secret-tool failed (${exitText(r)}${r.stderr.trim() ? `: ${r.stderr.trim().split("\n")[0]}` : ""}). Set ${KEY_ENV} instead.`);
 }
 
 async function linuxSet(bin: string, svc: string, acct: string, hex: string): Promise<void> {
   const r = await run(bin, ["store", `--label=${svc}`, "service", svc, "account", acct], hex);
-  if (r.code !== 0) throw new ContentKeyError(`secret-tool could not store the content index key (exit ${r.code}: ${r.stderr.trim().split("\n")[0]}). Set ${KEY_ENV} instead.`);
+  if (r.code !== 0) throw new ContentKeyError(`secret-tool could not store the content index key (${exitText(r)}: ${r.stderr.trim().split("\n")[0]}). Set ${KEY_ENV} instead.`);
 }
 
 const noBackend = (why: string) =>
@@ -127,6 +131,37 @@ export async function getContentKey(acct: string, o: { create: boolean } & KeyDe
     return key ? { key, backend } : undefined;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") throw noBackend(`${bin} was not found`);
+    throw err;
+  }
+}
+
+/**
+ * Removes the keychain item of account `acct` (argv only: no secret is involved). A missing item is not an error. A key given by
+ * PROTON_DRIVE_CONTENT_INDEX_KEY lives outside this process and is never touched (backend "env").
+ */
+export async function deleteContentKey(acct: string, o: KeyDeps = {}): Promise<{ removed: boolean; backend?: KeyBackend }> {
+  const env = o.env ?? process.env;
+  if ((env[KEY_ENV] ?? "").trim() !== "") return { removed: false, backend: "env" };
+  const p = o.platform ?? osPlatform();
+  if (p !== "darwin" && p !== "linux") return { removed: false };
+  const svc = serviceName(env);
+  if (!/^[0-9a-f]{32}$/.test(acct)) throw new ContentKeyError("internal error: bad keychain account name");
+  const mac = p === "darwin";
+  const bin = mac ? (o.securityBin ?? "/usr/bin/security") : (o.secretToolBin ?? "secret-tool");
+  const backend: KeyBackend = mac ? "macos-keychain" : "secret-tool";
+  try {
+    if (mac) {
+      const r = await run(bin, ["delete-generic-password", "-s", svc, "-a", acct]);
+      if (r.code === 0) return { removed: true, backend };
+      if (r.code === 44) return { removed: false, backend };
+      throw new ContentKeyError(`The macOS Keychain item could not be deleted (${r.stderr.trim().split("\n")[0] || exitText(r)}). Delete it with: security delete-generic-password -s ${svc} -a ${acct}`);
+    }
+    if (!(await linuxGet(bin, svc, acct))) return { removed: false, backend };
+    const r = await run(bin, ["clear", "service", svc, "account", acct]);
+    if (r.code !== 0) throw new ContentKeyError(`secret-tool could not delete the item (${exitText(r)}: ${r.stderr.trim().split("\n")[0]}). Delete it with: secret-tool clear service ${svc} account ${acct}`);
+    return { removed: true, backend };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { removed: false, backend }; // no tool, nothing was ever stored by it
     throw err;
   }
 }

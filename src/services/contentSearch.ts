@@ -72,7 +72,10 @@ export class ContentData {
 
   addDoc(rec: Omit<DocRec, "bytes">, tf?: Map<string, number>): number {
     const id = this.nextId++;
-    const bytes = 200 + rec.path.length + (rec.skipped?.length ?? 0) + Math.ceil((rec.excerpt?.length ?? 0) * 1.4) + (tf?.size ?? 0) * 12;
+    // A term costs its JSON line ({"k":"term","t":..,"p":[..]}, about 30 bytes of framing) plus the term itself, per document (shared terms make this an overestimate).
+    let termBytes = 0;
+    if (tf) for (const t of tf.keys()) termBytes += 30 + t.length;
+    const bytes = 200 + rec.path.length + (rec.skipped?.length ?? 0) + Math.ceil((rec.excerpt?.length ?? 0) * 1.4) + termBytes;
     this.docs.set(id, { ...rec, bytes });
     this.bytes += bytes;
     if (tf) for (const [t, n] of tf) {

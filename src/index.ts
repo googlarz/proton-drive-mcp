@@ -1134,7 +1134,7 @@ const TOOLS = [
   {
     name: "drive_content_index",
     description:
-      "Opt-in (PROTON_DRIVE_CONTENT_INDEX=1) encrypted local full-text index of file CONTENT in the folder you name; the key is kept in the OS keychain. action 'update' (default) indexes text, markdown, .docx and text-layer .pdf files two at a time, skips secret-looking names (.env, *.pem, *.key, id_rsa, names with password/secret/credential) and files over PROTON_DRIVE_READ_MAX_BYTES, and only re-reads changed files; if partial:true, call again to continue. 'status' reports counts, size, folders and key backend; 'clear' deletes the index file. Changes nothing on Drive; writes one local file.",
+      "Opt-in (PROTON_DRIVE_CONTENT_INDEX=1) encrypted local full-text index of file CONTENT in the folder you name; the key is kept in the OS keychain. action 'update' (default) indexes text, markdown, .docx and text-layer .pdf files two at a time, skips secret-looking names (.env, *.pem, *.key, id_rsa, names with password/secret/credential) and files over PROTON_DRIVE_READ_MAX_BYTES, and only re-reads changed files; if partial:true, call again to continue. 'status' reports counts, size, folders and key backend; 'clear' deletes the index file and its keychain key. Changes nothing on Drive; writes one local file.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: "object",

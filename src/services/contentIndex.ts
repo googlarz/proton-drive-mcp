@@ -5,7 +5,7 @@ import { loadDriveText, pickFormat } from "./content.js";
 import { indexDir, deletePrivateFile, writePrivateStream } from "./walkIndex.js";
 import { SealedWriter, ContentIndexError, accountDigest, readSealed, readSealedAccount, SEALED_FILE_NAME } from "./contentSeal.js";
 import { ContentData, DataLoader, serializeData, termFrequencies, makeExcerpt, parseQuery, searchData, makeSnippet } from "./contentSearch.js";
-import { getContentKey, plannedBackend, ContentKeyError, type KeyDeps, type KeyBackend } from "../utils/contentKey.js";
+import { getContentKey, deleteContentKey, plannedBackend, ContentKeyError, type KeyDeps, type KeyBackend } from "../utils/contentKey.js";
 import { callContext } from "../utils/subprocess.js";
 import { join } from "node:path";
 import { lstatSync } from "node:fs";
@@ -21,7 +21,9 @@ export const MAX_QUERY_CHARS = 200;
 export const DEFAULT_SEARCH_LIMIT = 10;
 export const MAX_SEARCH_LIMIT = 50;
 const CONCURRENCY = 2; // the CLI fails with "database is locked" under heavier parallelism
-const DEFAULT_MAX_MB = 500;
+const DEFAULT_MAX_MB = 200;
+/** A cached listing older than this is not trusted for an update: the walk is repeated. */
+const MAX_LISTING_AGE_MS = 60_000;
 /** Worst-case size of one more document (64 KB excerpt, 20k terms); extraction stops this far below the cap. */
 const DOC_MARGIN_BYTES = 400_000;
 
@@ -30,7 +32,7 @@ export function contentIndexEnabled(): boolean {
   return v === "1" || v === "true";
 }
 
-/** PROTON_DRIVE_CONTENT_INDEX_MAX_MB, default 500. */
+/** PROTON_DRIVE_CONTENT_INDEX_MAX_MB, default 200. */
 export function contentIndexMaxBytes(): number {
   const n = Number(process.env["PROTON_DRIVE_CONTENT_INDEX_MAX_MB"]);
   return Math.floor((Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_MB) * 1024 * 1024);
@@ -38,7 +40,7 @@ export function contentIndexMaxBytes(): number {
 
 export const contentIndexPath = () => join(indexDir(), SEALED_FILE_NAME);
 
-/** Deletes the encrypted index file only (a symlink is removed itself). The keychain entry is kept. */
+/** Deletes the encrypted index file only (a symlink is removed itself); clearContentIndex also removes the key. */
 export const deleteContentIndex = (): boolean => deletePrivateFile(SEALED_FILE_NAME);
 
 const NEEDS_ENABLE = "Content search is off. Set PROTON_DRIVE_CONTENT_INDEX=1 in the server's environment and restart it. It keeps an encrypted local index of the text of the folders you name (see the README section 'Content search (opt-in)').";
@@ -46,10 +48,18 @@ const accountId = (fingerprint: string) => accountDigest(fingerprint).toString("
 const oneLine = (m: string) => (m.split("\n")[0] ?? m).slice(0, 300);
 
 // Files whose name suggests a credential are never read. Applied to every path segment below the indexed folder.
-const SECRET_NAME = /^\.env|\.(pem|key|p12|pfx)$|^id_(rsa|ed25519)|\.keychain|password|secret|credential/i;
+const SECRET_NAME = new RegExp([
+  String.raw`^\.env`, String.raw`\.env$`, String.raw`\.env\.`,
+  String.raw`^\.(npmrc|netrc|pgpass|htpasswd|git-credentials|pypirc|dockercfg)$`,
+  String.raw`^id_(rsa|dsa|ecdsa|ed25519)`,
+  String.raw`\.(kdbx|keystore|jks|p12|pfx|pem|key|asc|gpg)$`, String.raw`\.keychain`,
+  "passw", "hasło", "haslo", "token", "api[_-]?key", "secret", "credential", "service[_ -]?account", "kubeconfig", "private[_-]?key",
+].join("|"), "iu");
 export function looksSecret(root: string, path: string): boolean {
   return path.slice(root.length + 1).split("/").some((seg) => SECRET_NAME.test(seg));
 }
+
+const OTHER_ACCOUNT = "The content index belongs to another Proton account. Clear it (drive_content_index action \"clear\") and update again.";
 
 // Failures that will not change until the file does: recorded, so the next update does not retry them.
 const STABLE_FAILURE = /unsupported format|not text|too large|over the read cap|Proton Docs|is a folder|not a valid \.docx|refused:/i;
@@ -77,15 +87,19 @@ function loadData(key: Buffer, fingerprint: string): ContentData | undefined {
   return readSealed(key, accountDigest(fingerprint), contentIndexMaxBytes(), (c) => loader.push(c)) ? loader.finish() : undefined;
 }
 
-function saveData(d: ContentData, key: Buffer, fingerprint: string): void {
+const tooLarge = () => new ContentIndexError(`The content index would exceed ${Math.round(contentIndexMaxBytes() / 1048576)} MB (PROTON_DRIVE_CONTENT_INDEX_MAX_MB). Nothing was saved. Index fewer or smaller folders, or clear it.`);
+
+/** "too-large" when the file would pass the cap (nothing is written then); any other failure throws. */
+function saveData(d: ContentData, key: Buffer, fingerprint: string): "ok" | "too-large" {
   const max = contentIndexMaxBytes();
   const r = writePrivateStream(SEALED_FILE_NAME, (fd) => {
     const w = new SealedWriter(fd, key, accountDigest(fingerprint), max);
     serializeData(d, (s) => w.write(s));
     w.finish();
   });
-  if (r === "too-large") throw new ContentIndexError(`The content index would exceed ${Math.round(max / 1048576)} MB (PROTON_DRIVE_CONTENT_INDEX_MAX_MB). Nothing was saved. Index fewer or smaller folders, or clear it.`);
+  if (r === "too-large") return r;
   if (r !== "ok") throw new ContentIndexError(`The content index could not be saved (${r}); see the server log. The index directory must be a private directory you own.`);
+  return "ok";
 }
 
 const NO_KEY = (backend: string) => new ContentKeyError(`The key for the content index was not found in ${backend}, so the existing index cannot be read. Restore the key or clear the index (drive_content_index action "clear") and update again.`);
@@ -96,19 +110,47 @@ async function fingerprintOf(drive: DriveService, deps: ContentDeps): Promise<st
   return fp;
 }
 
-const sigOf = (n: WalkNode) => `${n.size ?? ""}|${n.mtime ?? n.uploadedAt ?? ""}|${(n.sha1 ?? "").toLowerCase()}`;
+/** undefined when the listing gives no size, time or hash: nothing to compare, so the file counts as changed. */
+const sigOf = (n: WalkNode): string | undefined =>
+  n.size === undefined && !(n.mtime ?? n.uploadedAt) && !n.sha1 ? undefined : `${n.size ?? ""}|${n.mtime ?? n.uploadedAt ?? ""}|${(n.sha1 ?? "").toLowerCase()}`;
 
 export interface ContentIndexArgs { path?: string; action?: "update" | "status" | "clear"; maxFiles?: number; maxFileMB?: number; timeBudgetMs?: number }
 
-export async function driveContentIndex(drive: DriveService, o: ContentIndexArgs, deps: ContentDeps = {}) {
-  const action = o.action ?? "update";
-  if (action === "clear") {
+/**
+ * Deletes the index file and its key, so a copy of the file kept in a backup can no longer be read. The key's account comes from the
+ * file header (readable without the key); with no file it is the signed-in account when a `drive` is given. Runs in the same queue as update.
+ */
+export function clearContentIndex(deps: ContentDeps = {}, drive?: DriveService) {
+  return exclusive(async () => {
     const path = contentIndexPath();
     let bytes = 0;
     try { bytes = lstatSync(path).size; } catch { /* absent */ }
+    let acct: string | undefined;
+    try { acct = readSealedAccount(contentIndexMaxBytes())?.toString("hex").slice(0, 32); } catch { /* unreadable header: account unknown */ }
+    if (!acct && drive) { try { acct = accountId(await fingerprintOf(drive, deps)); } catch { /* not signed in */ } }
     const deleted = deleteContentIndex();
-    return { action, deleted, bytes: deleted ? bytes : 0, path, note: "Only the index file was deleted. Its key stays in the keychain and is reused by the next update." };
-  }
+    let keyRemoved = false;
+    let note: string;
+    if (!acct) note = "The index file was deleted. Its account could not be determined, so a key in the keychain, if any, was not removed.";
+    else {
+      try {
+        const k = await deleteContentKey(acct, deps.keys);
+        keyRemoved = k.removed;
+        note = k.backend === "env"
+          ? "The index file was deleted. The key comes from PROTON_DRIVE_CONTENT_INDEX_KEY, which cannot be rotated from here: remove or change it in the server's environment yourself, otherwise old copies of the file stay readable."
+          : keyRemoved ? "The index file and its key were deleted; old copies of the file (backups) can no longer be read. The next update generates a new key."
+            : "The index file was deleted. There was no key in the keychain to remove.";
+      } catch (err) {
+        note = `The index file was deleted, but its key could not be removed: ${oneLine(err instanceof Error ? err.message : String(err))}`;
+      }
+    }
+    return { action: "clear" as const, deleted, bytes: deleted ? bytes : 0, path, keyRemoved, note };
+  });
+}
+
+export async function driveContentIndex(drive: DriveService, o: ContentIndexArgs, deps: ContentDeps = {}) {
+  const action = o.action ?? "update";
+  if (action === "clear") return clearContentIndex(deps, drive);
   if (action === "status") return contentIndexStatus(drive, deps);
   return exclusive(() => updateIndex(drive, o, deps));
 }
@@ -125,6 +167,9 @@ async function contentIndexStatus(drive: DriveService, deps: ContentDeps) {
     return { ...base, exists: true, readable: false, error: err instanceof Error ? err.message : String(err) };
   }
   if (!digest) return { ...base, exists: false as const };
+  let accountMatches: boolean | undefined;
+  try { accountMatches = accountDigest(await fingerprintOf(drive, deps)).equals(digest); } catch { /* not signed in or CLI missing: unknown */ }
+  if (accountMatches === false) return { ...base, exists: true, readable: false, bytes, accountMatches, error: "The index belongs to another account than the one signed in. Clear it (action \"clear\") and update again." };
   let keyBackend: KeyBackend | undefined;
   let data: ContentData | undefined;
   try {
@@ -132,14 +177,12 @@ async function contentIndexStatus(drive: DriveService, deps: ContentDeps) {
     if (!k) throw NO_KEY("the keychain");
     keyBackend = k.backend;
     const loader = new DataLoader();
-    // The header names the account; readSealed checks it against itself here and against the live account below.
+    // The header names the account; readSealed checks it against itself here, the live account was checked above.
     readSealed(k.key, digest, contentIndexMaxBytes(), (c) => loader.push(c));
     data = loader.finish();
   } catch (err) {
     return { ...base, exists: true, readable: false, bytes, ...(keyBackend ? { keyBackend } : {}), error: err instanceof Error ? err.message : String(err) };
   }
-  let accountMatches: boolean | undefined;
-  try { accountMatches = accountDigest(await fingerprintOf(drive, deps)).equals(digest); } catch { /* not signed in or CLI missing: unknown */ }
   const allow = deps.allow ?? (() => true);
   const docs = [...data.docs.values()].filter((d) => allow(d.path));
   const times = docs.map((d) => d.at);
@@ -172,11 +215,20 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
   const signal = callContext.getStore()?.signal;
 
   const fp = await fingerprintOf(drive, deps);
-  const k = await getContentKey(accountId(fp), { create: true, ...deps.keys });
-  if (!k) throw NO_KEY("the keychain"); // unreachable with create: true
+  // An existing file means a key was generated for it: if the keychain no longer has it, never make a new one (that would orphan the file).
+  const existing = readSealedAccount(contentIndexMaxBytes());
+  if (existing && !existing.equals(accountDigest(fp))) throw new ContentIndexError(OTHER_ACCOUNT);
+  const k = await getContentKey(accountId(fp), { create: !existing, ...deps.keys });
+  if (!k) throw NO_KEY("the keychain");
   const data = loadData(k.key, fp) ?? new ContentData();
 
-  const walk = await (deps.walk ?? walkTree)(drive, root, { noDisk: true, budgetMs: budget });
+  const walkFn = deps.walk ?? walkTree;
+  let walk = await walkFn(drive, root, { noDisk: true, budgetMs: budget });
+  let listingRefreshed = false;
+  if (walk.fromCache && walk.ageMs > MAX_LISTING_AGE_MS) {
+    walk = await walkFn(drive, root, { noDisk: true, refresh: true, budgetMs: Math.max(1, deadline - now()) });
+    listingRefreshed = true;
+  }
   const walkedFiles = walk.nodes.filter((n) => n.type === "file" && n.path.startsWith(root + "/"));
   const listingComplete = walk.complete && !walk.partial;
 
@@ -187,7 +239,8 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
   for (const n of walkedFiles) {
     if (looksSecret(root, n.path)) { secret++; const id = known.get(n.path); if (id !== undefined) stale.add(id); continue; }
     const id = known.get(n.path);
-    if (id !== undefined && data.docs.get(id)!.sig === sigOf(n)) unchanged++;
+    const sig = sigOf(n);
+    if (id !== undefined && sig !== undefined && data.docs.get(id)!.sig === sig) unchanged++;
     else todo.push(n);
   }
   let removed = 0;
@@ -200,9 +253,10 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
   const failed: { path: string; error: string }[] = [];
   let indexed = 0, skippedDocs = 0, next = 0, begun = 0, capReached = false;
   const maxBytes = contentIndexMaxBytes();
+  const firstNewId = data.nextId;
 
   const one = async (n: WalkNode): Promise<void> => {
-    const sig = sigOf(n);
+    const sig = sigOf(n) ?? "";
     const old = known.get(n.path);
     const base = { path: n.path, size: n.size, mtime: n.mtime ?? n.uploadedAt, sig, at: now() };
     const skip = (why: string) => { data.addDoc({ ...base, tokens: 0, skipped: why }); skippedDocs++; if (old !== undefined) stale.add(old); };
@@ -239,11 +293,22 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
   const remaining = todo.length - next;
   const finished = listingComplete && remaining === 0 && failed.length === 0 && !capReached;
   data.folders[root] = { updatedAt: now(), complete: finished };
-  saveData(data, k.key, fp);
+  // The estimate can undercount (odd names, unusual text): rather than lose the whole update, leave out the newest documents until it fits.
+  let droppedForSize = 0;
+  while (saveData(data, k.key, fp) === "too-large") {
+    const added = [...data.docs.keys()].filter((id) => id >= firstNewId);
+    if (added.length === 0) throw tooLarge();
+    const drop = added.slice(-Math.ceil(added.length * 0.2));
+    for (const id of drop) { if (data.docs.get(id)?.skipped) skippedDocs--; else indexed--; }
+    data.removeDocs(new Set(drop));
+    droppedForSize += drop.length;
+    data.folders[root] = { updatedAt: now(), complete: false };
+  }
 
   const notes: string[] = [];
   if (remaining > 0) notes.push(`${remaining} file(s) still to index: call drive_content_index again with the same path to continue.`);
   if (capReached) notes.push(`The index reached its size cap (PROTON_DRIVE_CONTENT_INDEX_MAX_MB, ${Math.round(maxBytes / 1048576)} MB); the rest was not indexed. Clear it or index fewer folders.`);
+  if (droppedForSize > 0) notes.push(`The index would have exceeded its size cap (${Math.round(maxBytes / 1048576)} MB), so the ${droppedForSize} newest document(s) were left out; the next call indexes them if there is room. Raise PROTON_DRIVE_CONTENT_INDEX_MAX_MB, clear the index or index fewer folders.`);
   if (walk.partial) notes.push(`The Drive listing was still running after ${budget / 1000} s; repeat the call to continue.`);
   if (!walk.complete) notes.push("The folder listing was incomplete, so files that vanished from Drive were not dropped from the index; narrow the path.");
   if (failed.length > 0) notes.push("Failed files are retried by the next call.");
@@ -252,9 +317,12 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
     path: root,
     indexed, unchanged, removed, skippedFiles: skippedDocs, skippedSecretNames: secret,
     failedCount: failed.length, failed: failed.slice(0, 20),
-    remaining, partial: remaining > 0 || capReached || !!walk.partial,
+    remaining, partial: remaining > 0 || capReached || !!walk.partial || droppedForSize > 0,
     walkComplete: walk.complete,
+    listingAgeMs: walk.ageMs, fromCache: walk.fromCache,
+    ...(listingRefreshed ? { listingRefreshed: true } : {}),
     ...(capReached ? { capReached: true } : {}),
+    ...(droppedForSize > 0 ? { droppedForSize } : {}),
     documents: data.docs.size,
     keyBackend: k.backend,
     elapsedMs: now() - started,
@@ -275,7 +343,7 @@ export async function driveSearchContent(drive: DriveService, o: SearchContentAr
   const digest = readSealedAccount(contentIndexMaxBytes());
   if (!digest) throw new Error("There is no content index yet. Index a folder first with drive_content_index (path = the folder).");
   const fp = await fingerprintOf(drive, deps);
-  if (!accountDigest(fp).equals(digest)) throw new ContentIndexError("The content index belongs to another Proton account. Clear it (drive_content_index action \"clear\") and update again.");
+  if (!accountDigest(fp).equals(digest)) throw new ContentIndexError(OTHER_ACCOUNT);
   const k = await getContentKey(accountId(fp), { create: false, ...deps.keys });
   if (!k) throw NO_KEY("the keychain");
   const data = loadData(k.key, fp);
