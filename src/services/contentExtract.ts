@@ -4,7 +4,7 @@
 export const DOCX_MAX_UNCOMPRESSED = 20 * 1024 * 1024;
 export const PDF_MAX_PAGES = 100;
 
-export interface ExtractResult { text: string; note?: string; capped: boolean }
+export interface ExtractResult { text: string; note?: string; capped: boolean; pages?: number }
 export type Loader = (name: string) => Promise<any>;
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
@@ -91,7 +91,7 @@ export async function extractPdf(bytes: Uint8Array, load: Loader, maxChars: numb
     const notes: string[] = [];
     if (!text.trim()) notes.push("no text layer (scanned?)");
     if (!capped && pdf.numPages > PDF_MAX_PAGES) notes.push(`only the first ${PDF_MAX_PAGES} of ${pdf.numPages} pages were read`);
-    return { text, capped, note: notes.join("; ") || undefined };
+    return { text, capped, note: notes.join("; ") || undefined, pages: pdf.numPages as number };
   } finally {
     await pdf.destroy?.();
   }

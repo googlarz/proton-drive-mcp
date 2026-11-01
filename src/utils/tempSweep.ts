@@ -2,10 +2,10 @@ import { readdir, lstat, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const PREFIX = /^pdmcp-(?:read|dup)-/;
+const PREFIX = /^pdmcp-(?:read|dup|ocr)-/;
 
 /**
- * Best-effort: removes pdmcp-read-* / pdmcp-dup-* temp dirs left by a killed process (SIGTERM mid-download).
+ * Best-effort: removes pdmcp-read-* / pdmcp-dup-* / pdmcp-ocr-* temp dirs left by a killed process (SIGTERM mid-download).
  * Only real directories (lstat, never followed) owned by this uid and older than maxAgeMs are touched.
  */
 export async function sweepStaleTempDirs(dir = tmpdir(), maxAgeMs = 3600_000): Promise<void> {

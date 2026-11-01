@@ -10,7 +10,7 @@ import { logger } from "../utils/logger.js";
  * file names, paths and hashes of an end-to-end-encrypted drive in PLAINTEXT, so
  * it is off by default; the file is 0600 in a 0700 directory that this code created or that was already private to the user.
  */
-export const INDEX_VERSION = 1;
+export const INDEX_VERSION = 2; // 2 adds per-folder listing times (and partial entries); version 1 files are still read
 export const MAX_ENTRIES = 8;
 export const MAX_BYTES = 200 * 1024 * 1024;
 const FILE_NAME = "walk-index.json";
@@ -19,8 +19,15 @@ export interface IndexEntry {
   key: string;
   root: string;
   opts: { maxDepth?: number; maxCalls: number; exclude: string[] };
+  /** When the entry was last written; the tree's age is the oldest value of `listed` (or this, for entries without it). */
   completedAt: number;
   nodes: WalkNode[];
+  /**
+   * Folder path -> ms its listing was read, for every listed folder. A folder node without a value was never listed (an
+   * unfinished refresh), so the entry is only a partial tree. Absent in version 1 files: those saved complete walks only,
+   * so every folder counts as listed at completedAt.
+   */
+  listed?: Record<string, number>;
 }
 export interface IndexFile { version: number; accountKey: string; savedAt: number; entries: IndexEntry[] }
 
@@ -40,6 +47,12 @@ export const indexPath = () => join(indexDir(), FILE_NAME);
 /** Max age of disk data we will serve, ms (PROTON_DRIVE_INDEX_MAX_AGE_H, default 24 h; 0 disables use). */
 export function indexMaxAgeMs(): number {
   const h = Number(process.env.PROTON_DRIVE_INDEX_MAX_AGE_H ?? 24);
+  return (Number.isFinite(h) && h >= 0 ? h : 24) * 3_600_000;
+}
+
+/** Max age of a saved folder listing an incremental refresh reuses, ms (PROTON_DRIVE_INDEX_FOLDER_MAX_AGE_H, default 24; 0 = reuse none). */
+export function folderMaxAgeMs(): number {
+  const h = Number(process.env.PROTON_DRIVE_INDEX_FOLDER_MAX_AGE_H ?? 24);
   return (Number.isFinite(h) && h >= 0 ? h : 24) * 3_600_000;
 }
 
@@ -67,6 +80,9 @@ export function readPrivateJson(fileName: string, maxBytes = MAX_BYTES): unknown
   }
 }
 
+const validListed = (l: unknown): boolean =>
+  l === undefined || (typeof l === "object" && l !== null && !Array.isArray(l) && Object.values(l).every((t) => typeof t === "number" && Number.isFinite(t)));
+
 /** Reads and validates the index; anything wrong (missing, symlink, loose mode, foreign owner, oversize, corrupt, other version) is "no index". */
 export function readIndex(o: { requireWritable?: boolean } = {}): IndexFile | undefined {
   if (o.requireWritable) {
@@ -75,10 +91,13 @@ export function readIndex(o: { requireWritable?: boolean } = {}): IndexFile | un
     try { accessSync(indexDir(), constants.W_OK); accessSync(indexPath(), constants.W_OK); } catch { return undefined; }
   }
   const j = readPrivateJson(FILE_NAME) as Partial<IndexFile> | null | undefined;
-  if (!j || j.version !== INDEX_VERSION || typeof j.accountKey !== "string" || !Array.isArray(j.entries)) return undefined;
+  if (!j || (j.version !== INDEX_VERSION && j.version !== 1) || typeof j.accountKey !== "string" || !Array.isArray(j.entries)) return undefined;
   const horizon = Date.now() + FUTURE_SKEW_MS;
-  const ok = j.entries.every((e) => e && typeof e.key === "string" && typeof e.root === "string" && Number.isFinite(e.completedAt) && e.completedAt <= horizon && Array.isArray(e.nodes) && e.opts && Array.isArray(e.opts.exclude));
-  return ok ? (j as IndexFile) : undefined;
+  const ok = j.entries.every((e) => e && typeof e.key === "string" && typeof e.root === "string" && Number.isFinite(e.completedAt) && e.completedAt <= horizon && Array.isArray(e.nodes) && e.opts && Array.isArray(e.opts.exclude) && validListed(e.listed));
+  if (!ok) return undefined;
+  // A listing time ahead of the clock (it moved back) cannot be trusted: it counts as old.
+  for (const e of j.entries) if (e.listed) for (const k of Object.keys(e.listed)) if (e.listed[k]! > horizon) e.listed[k] = 0;
+  return j as IndexFile;
 }
 
 let warnedSize = false;
@@ -88,6 +107,30 @@ const warnedDirs = new Set<string>();
 export class TooLargeError extends Error {}
 
 /**
+ * Creates the private index directory (0700) when missing; false when it exists but is not a real directory owned by you
+ * with no group/other access. Never chmods or takes over a directory this code did not create.
+ */
+export function ensurePrivateIndexDir(): boolean {
+  const dir = indexDir();
+  const existing = lstatOrNull(dir);
+  if (existing) {
+    if (!existing.isDirectory() || foreignOrLoose(existing)) {
+      if (!warnedDirs.has(dir)) {
+        warnedDirs.add(dir);
+        logger.warn(`Persistent walk index not saved: ${dir} must be a real directory owned by you with no group/other access (mode 0700). Use a dedicated directory.`);
+      }
+      return false;
+    }
+    return true;
+  }
+  mkdirSync(dirname(dir), { recursive: true });
+  mkdirSync(dir, { mode: 0o700 });
+  chmodSync(dir, 0o700); // umask-proof; safe because we just created it
+  const made = lstatSync(dir);
+  return made.isDirectory() && !foreignOrLoose(made);
+}
+
+/**
  * Atomic 0600 write into the private index directory: `fill` writes the content to the temp file's descriptor (it may
  * throw TooLargeError), then the file is fsynced and renamed over the target. Never throws; the result says what happened.
  */
@@ -95,23 +138,7 @@ export function writePrivateStream(fileName: string, fill: (fd: number) => void)
   const dir = indexDir();
   let tmp: string | undefined;
   try {
-    const existing = lstatOrNull(dir);
-    if (existing) {
-      // Never chmod or take over a directory this code did not create.
-      if (!existing.isDirectory() || foreignOrLoose(existing)) {
-        if (!warnedDirs.has(dir)) {
-          warnedDirs.add(dir);
-          logger.warn(`Persistent walk index not saved: ${dir} must be a real directory owned by you with no group/other access (mode 0700). Use a dedicated directory.`);
-        }
-        return "refused";
-      }
-    } else {
-      mkdirSync(dirname(dir), { recursive: true });
-      mkdirSync(dir, { mode: 0o700 });
-      chmodSync(dir, 0o700); // umask-proof; safe because we just created it
-      const made = lstatSync(dir);
-      if (!made.isDirectory() || foreignOrLoose(made)) return "refused";
-    }
+    if (!ensurePrivateIndexDir()) return "refused";
     const target = join(dir, fileName);
     const tst = lstatOrNull(target);
     if (tst && !tst.isFile()) return "refused"; // symlink or directory in the way

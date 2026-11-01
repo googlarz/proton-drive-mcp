@@ -39,7 +39,10 @@ const count = (calls, p) => calls.filter((c) => c === p).length;
 /** Ages the persisted entries by `ms` so they look old. */
 function ageDisk(ms) {
   const f = readIndex();
-  for (const e of f.entries) e.completedAt -= ms;
+  for (const e of f.entries) {
+    e.completedAt -= ms;
+    for (const k of Object.keys(e.listed ?? {})) e.listed[k] -= ms; // the tree's age is its oldest folder listing
+  }
   assert.equal(writeIndex(f), "ok");
 }
 /** A cold walk (persisted), then a "new process" (memory + loaded disk state dropped, file kept). */
@@ -97,13 +100,18 @@ describe("walk index: persistence", () => {
     assert.equal(existsSync(join(tmp, "idx")), false);
   });
 
-  it("invalidatePath removes matching entries from the file", async () => {
+  it("invalidatePath keeps the entry but clears the listing times the write touched; a write above the root removes it", async () => {
     const { svc } = makeSvc(small());
     await walkTree(svc, "/my-files");
     await walkTree(svc, "/my-files/a/deep", { maxDepth: 1 });
     await flushWalkIndexForTests();
     assert.equal(readIndex().entries.length, 1); // deep is served from the /my-files walk; nothing new stored
     invalidatePath("/my-files/b");
+    const e = readIndex().entries[0];
+    assert.equal(e.listed["/my-files/b"], undefined);
+    assert.equal(e.listed["/my-files"], undefined);
+    assert.ok(e.listed["/my-files/a"] !== undefined, "an unrelated folder keeps its listing time");
+    invalidatePath("/");
     assert.equal(existsSync(indexPath()) ? readIndex().entries.length : 0, 0);
   });
 });
@@ -215,7 +223,7 @@ describe("walk index: serving", () => {
     assert.equal(r.fromCache, false);
     assert.ok(!r.stale);
     assert.equal(r.nodes.length, 9);
-    assert.equal(count(calls, "/my-files"), 1);
+    assert.equal(count(calls, "/my-files"), 1); // just the listing: no account check, nothing read from the saved index
   });
 
   it("an ancestor on disk answers a subfolder, but not an excluded folder (exclude rule)", async () => {
@@ -314,7 +322,9 @@ describe("walk index: serving", () => {
     assert.equal(r.stale, true);
     invalidatePath("/my-files/b");
     await flushWalkIndexForTests();
-    assert.equal(existsSync(indexPath()) ? readIndex().entries.length : 0, 0);
+    const e = readIndex().entries[0];
+    assert.equal(e.nodes.length, 8, "the discarded walk's new.txt was not saved");
+    assert.equal(e.listed["/my-files/b"], undefined);
     const next = await walkTree(svc, "/my-files");
     assert.equal(next.fromCache, false);
   });
@@ -327,7 +337,9 @@ describe("walk index: serving", () => {
     assert.equal(found.walk.stale, true);
     assert.equal(found.walk.refreshing, true);
     await flushWalkIndexForTests();
-    await driveTree(svc, { path: "/my-files", depth: 5 }); // own key; a depth-cut walk is incomplete and never persisted
+    deleteIndex(); // with the full walk saved, a depth-limited tree would be cut from it; start over so it has its own entry
+    resetWalkCacheForTests();
+    await driveTree(svc, { path: "/my-files", depth: 5 }); // own key; this small tree is not cut at depth 5, so it is saved
     await flushWalkIndexForTests();
     resetWalkCacheForTests();
     ageDisk(3_600_000);

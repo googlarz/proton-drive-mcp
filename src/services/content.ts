@@ -9,8 +9,11 @@ import { retryOnLocked } from "../utils/lockRetry.js";
 import { showValue } from "../utils/text.js";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
+import { isSparsePdfText, ocrBuffer, ocrEnabled, ocrImageExt, ocrMaxBytes, OcrDeferredError, type OcrDeps, type OcrEngine } from "./ocr.js";
+import { PDF_MAX_PAGES } from "./contentExtract.js";
 
 export { docxXmlToText } from "./contentExtract.js";
+export { isSparsePdfText } from "./ocr.js";
 
 export const DEFAULT_MAX_CHARS = 20_000;
 export const MAX_MAX_CHARS = 100_000;
@@ -27,11 +30,14 @@ const TEXT_EXTS = new Set([
   "hpp", "cs", "go", "rs", "rb", "php", "swift", "pl", "lua", "r", "ics", "vcf",
 ]);
 const SUPPORTED = "plain text, markdown, json, csv/tsv, yaml, xml, html, log and common code files, .docx and .pdf";
+const supported = (): string => (ocrEnabled() ? `${SUPPORTED}; with OCR also scanned PDFs and images (png, jpg, tiff, bmp, webp)` : SUPPORTED);
 
 export interface ReadContentArgs { path: string; maxChars?: number; offset?: number }
 export interface ReadContentResult {
   path: string; format: string; size: number; chars: number; offset: number; text: string;
   truncated: boolean; nextOffset?: number; note?: string;
+  /** Set when the text was recognized by OCR (PROTON_DRIVE_OCR=1): it may contain recognition errors. */
+  ocr?: true; engine?: OcrEngine; pagesOcrd?: number;
 }
 export interface ReadContentDeps {
   /** Overrides for the PDF/DOCX worker (tests): limits, text cap, package specifiers, a hook receiving the Worker. */
@@ -39,6 +45,8 @@ export interface ReadContentDeps {
     maxOldGenerationSizeMb?: number; timeoutMs?: number; maxTextChars?: number;
     moduleSpecifiers?: Record<string, string>; onWorker?: (w: Worker) => void;
   };
+  /** Overrides for OCR (tests, the content index's time budget). */
+  ocr?: OcrDeps;
 }
 
 /** Download cap in bytes: PROTON_DRIVE_READ_MAX_BYTES, default 10 MB, never above 50 MB. */
@@ -54,12 +62,13 @@ function extOf(path: string): string {
 }
 
 /** Which extractor a file needs, from its name and media type; undefined = unsupported. */
-export function pickFormat(path: string, mediaType: string): "text" | "docx" | "pdf" | undefined {
+export function pickFormat(path: string, mediaType: string): "text" | "docx" | "pdf" | "image" | undefined {
   const ext = extOf(path);
   if (ext === "docx") return "docx";
   if (ext === "pdf") return "pdf";
   if (TEXT_EXTS.has(ext)) return "text";
   if (/^text\//i.test(mediaType) || /^application\/(json|xml|x-yaml|yaml)$/i.test(mediaType)) return "text";
+  if (ocrEnabled() && ocrImageExt(ext, mediaType)) return "image"; // without PROTON_DRIVE_OCR=1 images stay unsupported
   return undefined;
 }
 
@@ -78,7 +87,7 @@ export function readTimeoutMs(): number {
   return Number.isFinite(n) && n > 0 ? Math.min(Math.max(Math.floor(n), 1), MAX_READ_TIMEOUT_MS) : DEFAULT_READ_TIMEOUT_MS;
 }
 
-interface Extracted { text: string; note?: string; capped: boolean }
+interface Extracted { text: string; note?: string; capped: boolean; pages?: number }
 
 /**
  * Parses in a worker thread with a memory cap, a hard timeout and the request's abort signal, so a hostile
@@ -154,7 +163,7 @@ async function downloadBytes(drive: DriveService, path: string, cap: number): Pr
 }
 
 /** Downloads and extracts the whole text of a file (capped at MAX_EXTRACT_CHARS), with the same checks as drive_read_content. */
-export async function loadDriveText(drive: DriveService, path: string, deps: ReadContentDeps = {}): Promise<{ format: string; size: number; text: string; note?: string; capped: boolean }> {
+export async function loadDriveText(drive: DriveService, path: string, deps: ReadContentDeps = {}): Promise<{ format: string; size: number; text: string; note?: string; capped: boolean; ocr?: { engine: OcrEngine; pagesOcrd: number }; /** OCR was tried on a PDF with little text and failed: the text layer is returned without it. */ ocrError?: string }> {
   const node = ((await drive.info(path)) ?? {}) as Record<string, any>;
   const mediaType = typeof node.mediaType === "string" ? node.mediaType : "";
   if (node.type === "folder" || node.type === "album") throw new Error(`${showValue(path)} is a folder; drive_read_content reads files (use drive_list).`);
@@ -162,25 +171,62 @@ export async function loadDriveText(drive: DriveService, path: string, deps: Rea
     throw new Error(`${showValue(path)} is a Proton Docs/Sheets document; the CLI cannot download these, so its text cannot be read.`);
   }
   const format = pickFormat(path, mediaType);
-  if (!format) throw new Error(`unsupported format for ${showValue(path)}${mediaType ? ` (${showValue(mediaType, 60, 20)})` : ""}. Supported: ${SUPPORTED}.`);
-  const cap = readMaxBytes();
+  if (!format) throw new Error(`unsupported format for ${showValue(path)}${mediaType ? ` (${showValue(mediaType, 60, 20)})` : ""}. Supported: ${supported()}.`);
+  // OCR input has its own cap (PROTON_DRIVE_OCR_MAX_MB, default 30 MB), independent of the 10 MB read cap; the global 50 MB limit still applies.
+  const cap = format === "image" ? Math.min(ocrMaxBytes(), HARD_READ_MAX_BYTES) : format === "pdf" && ocrEnabled() ? Math.min(Math.max(readMaxBytes(), ocrMaxBytes()), HARD_READ_MAX_BYTES) : readMaxBytes();
   // claimedSize is uploader-controlled: a lying claim only costs download bandwidth, since the
   // post-download lstat size check (and the worker limits) still apply to the real bytes.
   const declared = node.activeRevision?.claimedSize;
   if (typeof declared === "number" && declared > cap) {
-    throw new Error(`${showValue(path)} is ${declared} bytes, over the read cap of ${cap} bytes (PROTON_DRIVE_READ_MAX_BYTES, max ${HARD_READ_MAX_BYTES}). Use drive_download.`);
+    throw new Error(`${showValue(path)} is ${declared} bytes, over the read cap of ${cap} bytes (${format === "image" ? "PROTON_DRIVE_OCR_MAX_MB" : `PROTON_DRIVE_READ_MAX_BYTES${format === "pdf" && ocrEnabled() ? ", scans PROTON_DRIVE_OCR_MAX_MB" : ""}`}, max ${HARD_READ_MAX_BYTES} bytes). Use drive_download.`);
   }
 
   const buf = await retryOnLocked(() => downloadBytes(drive, path, cap));
   let text: string;
   let note: string | undefined;
   let capped = false;
+  let ocr: { engine: OcrEngine; pagesOcrd: number } | undefined;
+  let ocrError: string | undefined;
+  const maxText = deps.worker?.maxTextChars ?? MAX_EXTRACT_CHARS;
+  const recognize = async (ext: string) => {
+    const r = await ocrBuffer(buf, ext, maxText, deps.ocr);
+    const notes = [`text recognized by OCR (${r.engine}, ${r.pagesOcrd} page${r.pagesOcrd === 1 ? "" : "s"}); it may contain recognition errors`, r.note];
+    if (r.capped) notes.push(`text capped at ${maxText} characters; the rest of the file was not read`);
+    return { text: r.text, capped: r.capped, note: notes.filter(Boolean).join("; "), ocr: { engine: r.engine, pagesOcrd: r.pagesOcrd } };
+  };
   if (format === "text") text = decodeUtf8(buf);
-  else {
-    ({ text, note, capped } = await extractInWorker(format, buf, deps.worker ?? {}));
-    if (capped) note = [note, `text capped at ${deps.worker?.maxTextChars ?? MAX_EXTRACT_CHARS} characters; the rest of the file was not read`].filter(Boolean).join("; ");
+  else if (format === "image") {
+    ({ text, capped, note, ocr } = await recognize(ocrImageExt(extOf(path), mediaType, deps.ocr)!));
+    if (!text.trim()) note = "no text found by OCR";
+  } else {
+    let pages: number | undefined;
+    // A PDF over the read cap is only here because OCR may take it (see cap): its text layer is not parsed.
+    const scanOnly = format === "pdf" && buf.length > readMaxBytes();
+    if (scanOnly) {
+      text = "";
+      capped = false;
+      note = `the PDF is over the read cap (PROTON_DRIVE_READ_MAX_BYTES, ${readMaxBytes()} bytes), so only OCR was used`;
+    } else {
+      ({ text, note, capped, pages } = await extractInWorker(format, buf, deps.worker ?? {}));
+      if (capped) note = [note, `text capped at ${maxText} characters; the rest of the file was not read`].filter(Boolean).join("; ");
+    }
+    if (format === "pdf" && ocrEnabled() && (scanOnly || isSparsePdfText(text, Math.min(pages ?? 1, PDF_MAX_PAGES)))) {
+      if (buf.length > ocrMaxBytes()) note = [note, `not read with OCR: the file is over PROTON_DRIVE_OCR_MAX_MB (${ocrMaxBytes()} bytes)`].filter(Boolean).join("; ");
+      else {
+        try {
+          const r = await recognize("pdf");
+          if (r.text.trim().length > text.trim().length) ({ text, capped, note, ocr } = scanOnly ? { ...r, note: [note, r.note].join("; ") } : r);
+          else note = [note, text.trim() ? "OCR found no more text than the text layer, which is returned" : "no text found by OCR either"].filter(Boolean).join("; ");
+        } catch (e) {
+          // The text layer (if any) is still a valid answer; a deferral or a cancellation is not a failure of this file.
+          if (e instanceof OcrDeferredError || scanOnly || callContext.getStore()?.signal?.aborted) throw e;
+          ocrError = `OCR unavailable/failed: ${(e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 200)}`;
+          note = [note, ocrError].filter(Boolean).join("; ");
+        }
+      }
+    }
   }
-  return { format, size: buf.length, text: text.replaceAll("\0", ""), note, capped };
+  return { format, size: buf.length, text: text.replaceAll("\0", ""), note, capped, ...(ocr ? { ocr } : {}), ...(ocrError ? { ocrError } : {}) };
 }
 
 export async function readDriveContent(drive: DriveService, args: ReadContentArgs, deps: ReadContentDeps = {}): Promise<ReadContentResult> {
@@ -189,7 +235,7 @@ export async function readDriveContent(drive: DriveService, args: ReadContentArg
   const path = args.path;
   if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > MAX_MAX_CHARS) throw new Error(`maxChars must be an integer from 1 to ${MAX_MAX_CHARS}`);
   if (!Number.isInteger(offset) || offset < 0) throw new Error("offset must be a non-negative integer");
-  const { format, size, text, note, capped } = await loadDriveText(drive, path, deps);
+  const { format, size, text, note, capped, ocr } = await loadDriveText(drive, path, deps);
 
   const s = sliceCodePoints(text, offset, maxChars);
   const truncated = s.end < s.total || capped;
@@ -197,5 +243,6 @@ export async function readDriveContent(drive: DriveService, args: ReadContentArg
     path, format, size, chars: s.total, offset, text: s.text, truncated,
     ...(truncated ? { nextOffset: s.end } : {}),
     ...(note ? { note } : {}),
+    ...(ocr ? { ocr: true as const, engine: ocr.engine, pagesOcrd: ocr.pagesOcrd } : {}),
   };
 }

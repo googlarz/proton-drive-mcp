@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { DriveService } from "../services/drive.js";
 import { runDriveRaw } from "./subprocess.js";
 import { cliCompatWarning, TESTED_CLI } from "./cliVersion.js";
+import { chooseEngines, ocrEnabled, ocrLanguages, resolveTool, runOcrTool } from "../services/ocr.js";
 import { defaultConfigPath, isDirectory, isExecutableFile, resolveBinary, resolveDriveCli, SERVER_KEY } from "./claudeConfig.js";
 
 export interface Check {
@@ -112,6 +113,30 @@ function configCheck(configPath: string, cliPath: string | undefined): Check {
   return { id, status: "ok", message: `Entry "${key}" in ${configPath} looks good${typeof bin === "string" ? ` (PROTON_DRIVE_BIN=${bin}${sync})` : ""}` };
 }
 
+/** OCR is opt-in: "off" is fine; enabled without a working engine is a warning (the rest of the server still works). */
+export async function ocrCheck(): Promise<Check> {
+  const id = "ocr";
+  if (!ocrEnabled()) return { id, status: "ok", message: "off (set PROTON_DRIVE_OCR=1 to read scanned PDFs and images locally)" };
+  let langs: string | undefined;
+  try { langs = ocrLanguages(); } catch (e) { return { id, status: "warn", message: "enabled, but PROTON_DRIVE_OCR_LANGS is invalid", hint: e instanceof Error ? e.message : String(e) }; }
+  const r = chooseEngines({ engine: process.env["PROTON_DRIVE_OCR_ENGINE"], platform: process.platform, which: resolveTool });
+  if ("error" in r) return { id, status: "warn", message: "enabled, but no engine was found", hint: r.error };
+  const engine = r.engines[0]!;
+  if (engine === "vision") return { id, status: "ok", message: `enabled, engine vision (macOS Vision; the helper is compiled on first use with ${resolveTool("swiftc")}), languages ${langs ?? "automatic"}` };
+  const tesseract = resolveTool("tesseract")!;
+  const probe = async (arg: string): Promise<string> => {
+    try { const o = await runOcrTool(tesseract, [arg], { deadline: Date.now() + 5000, what: "tesseract" }); return `${o.stdout}\n${o.stderr}`; } catch { return ""; }
+  };
+  const version = (await probe("--version")).split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "version unreadable";
+  const installed = (await probe("--list-langs")).split(/\r?\n/).map((l) => l.trim()).filter((l) => /^[A-Za-z_]+$/.test(l));
+  const missing = (langs ?? "eng").split("+").filter((l) => installed.length > 0 && !installed.includes(l));
+  const noPdf = resolveTool("pdftoppm") === undefined;
+  const base = `enabled, engine tesseract (${tesseract}, ${version}), languages ${langs ?? "eng"}${installed.length ? ` (installed: ${installed.join(", ")})` : ""}`;
+  if (missing.length) return { id, status: "warn", message: base, hint: `Language data missing for ${missing.join(", ")}: \`brew install tesseract-lang\` (macOS) or install the tesseract-ocr-<lang> package (Linux).` };
+  if (noPdf) return { id, status: "warn", message: base, hint: "pdftoppm was not found, so scanned PDFs cannot be read (images still work): `brew install poppler` (macOS) or `apt install poppler-utils` (Linux)." };
+  return { id, status: "ok", message: base };
+}
+
 export async function runDoctor(configPath?: string): Promise<{ ok: boolean; checks: Check[] }> {
   const checks: Check[] = [nodeCheck()];
   const cli = await cliChecks();
@@ -119,6 +144,7 @@ export async function runDoctor(configPath?: string): Promise<{ ok: boolean; che
   const sync = syncPathCheck();
   if (sync) checks.push(sync);
   checks.push(configCheck(configPath ? resolve(configPath) : defaultConfigPath(), cli.cliPath));
+  checks.push(await ocrCheck());
   return { ok: !checks.some((c) => c.status === "fail"), checks };
 }
 

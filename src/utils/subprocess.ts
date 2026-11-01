@@ -33,7 +33,13 @@ export const callContext = new AsyncLocalStorage<{ signal?: AbortSignal }>();
 
 const running = new Set<ChildProcess>();
 
-function killTree(child: ChildProcess): void {
+/** Lets another module's detached child (the OCR engine) die with the server like the CLI processes; returns the untrack function. */
+export function trackChild(child: ChildProcess): () => void {
+  running.add(child);
+  return () => { running.delete(child); };
+}
+
+export function killTree(child: ChildProcess): void {
   try {
     // Children are spawned detached (own process group) so the whole tree dies,
     // not just the direct child — SIGKILL on the child alone left grandchildren.
