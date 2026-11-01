@@ -84,12 +84,17 @@ export function readIndex(o: { requireWritable?: boolean } = {}): IndexFile | un
 let warnedSize = false;
 const warnedDirs = new Set<string>();
 
-/** Atomic 0600 write of `body` into the private index directory. Never throws; the result says what happened. */
-export function writePrivateFile(fileName: string, body: string, maxBytes = MAX_BYTES): "ok" | "too-large" | "refused" | "error" {
+/** Thrown by a writePrivateStream callback that hit its size cap; the temp file is discarded. */
+export class TooLargeError extends Error {}
+
+/**
+ * Atomic 0600 write into the private index directory: `fill` writes the content to the temp file's descriptor (it may
+ * throw TooLargeError), then the file is fsynced and renamed over the target. Never throws; the result says what happened.
+ */
+export function writePrivateStream(fileName: string, fill: (fd: number) => void): "ok" | "too-large" | "refused" | "error" {
   const dir = indexDir();
   let tmp: string | undefined;
   try {
-    if (Buffer.byteLength(body) > maxBytes) return "too-large";
     const existing = lstatOrNull(dir);
     if (existing) {
       // Never chmod or take over a directory this code did not create.
@@ -112,7 +117,7 @@ export function writePrivateFile(fileName: string, body: string, maxBytes = MAX_
     if (tst && !tst.isFile()) return "refused"; // symlink or directory in the way
     tmp = join(dir, `${fileName}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
     const fd = openSync(tmp, "wx", 0o600); // O_EXCL: never follows a pre-planted link
-    try { writeSync(fd, body); fsyncSync(fd); } finally { closeSync(fd); }
+    try { fill(fd); fsyncSync(fd); } finally { closeSync(fd); }
     chmodSync(tmp, 0o600);
     renameSync(tmp, target);
     tmp = undefined;
@@ -120,10 +125,40 @@ export function writePrivateFile(fileName: string, body: string, maxBytes = MAX_
     if (!fin.isFile() || (fin.mode & 0o077) !== 0) { try { unlinkSync(target); } catch { /* best effort */ } return "refused"; }
     return "ok";
   } catch (err) {
+    if (err instanceof TooLargeError) return "too-large";
     logger.warn("Persistent walk index write failed:", err instanceof Error ? err.message : String(err));
     return "error";
   } finally {
     if (tmp) { try { unlinkSync(tmp); } catch { /* already gone */ } }
+  }
+}
+
+/** Atomic 0600 write of `body` into the private index directory. Never throws; the result says what happened. */
+export function writePrivateFile(fileName: string, body: string, maxBytes = MAX_BYTES): "ok" | "too-large" | "refused" | "error" {
+  if (Buffer.byteLength(body) > maxBytes) return "too-large";
+  return writePrivateStream(fileName, (fd) => { writeSync(fd, body); });
+}
+
+/**
+ * Opens a file of the private index directory for reading (a symlink is never followed). undefined = it does not exist.
+ * Throws when it exists but is unsafe (not a regular file, foreign owner, group/other access, over maxBytes), so a caller
+ * that must not silently ignore it can say so. The caller closes the descriptor.
+ */
+export function openPrivateRead(fileName: string, maxBytes: number): { fd: number; size: number } | undefined {
+  const p = join(indexDir(), fileName);
+  if (!lstatOrNull(p)) return undefined;
+  const dst = lstatOrNull(indexDir());
+  if (!dst || !dst.isDirectory() || foreignOrLoose(dst)) throw new Error(`${indexDir()} must be a real directory owned by you with no group/other access (mode 0700)`);
+  let fd: number | undefined;
+  try {
+    fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const st = fstatSync(fd);
+    if (!st.isFile() || foreignOrLoose(st)) throw new Error(`${p} must be a regular file owned by you with no group/other access (mode 0600)`);
+    if (st.size > maxBytes) throw new Error(`${p} is ${st.size} bytes, over the size cap of ${maxBytes} bytes`);
+    return { fd, size: st.size };
+  } catch (err) {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
+    throw err;
   }
 }
 

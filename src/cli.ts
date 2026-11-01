@@ -25,6 +25,7 @@ import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type
 import { invalidatePath } from "./services/walk.js";
 import { indexStatus, deleteIndex } from "./services/walkIndex.js";
 import { deleteChangeSnapshots } from "./services/changes.js";
+import { clearContentIndex } from "./services/contentIndex.js";
 import { resolve } from "node:path";
 import { driveSearch, driveTree } from "./services/find.js";
 import { readDriveContent } from "./services/content.js";
@@ -98,7 +99,7 @@ Commands:
   photo upload <local>... [--conflict X]   Upload photos to your library (skip/rename)
 
   index status                             Persistent walk index (PROTON_DRIVE_INDEX=1): enabled?, path, size, age, entries
-  index clear                              Delete the saved index file (it holds plaintext names/paths of your drive)
+  index clear                              Delete the saved index file (plaintext names/paths of your drive), the change snapshots and the encrypted content index
 
   doctor [--config <path>]                 Read-only diagnostics: Node, proton-drive CLI, auth, sync path, Claude Desktop config
                                            (exit 1 if any check fails)
@@ -216,7 +217,10 @@ async function run() {
   // Local file only: no account, no CLI binary needed.
   if (cmd === "index") {
     if (sub === "status") print(indexStatus());
-    else if (sub === "clear") print({ ...deleteIndex(), changeSnapshotsDeleted: deleteChangeSnapshots() });
+    else if (sub === "clear") {
+      const c = await clearContentIndex();
+      print({ ...deleteIndex(), changeSnapshotsDeleted: deleteChangeSnapshots(), contentIndexDeleted: c.deleted, contentKeyRemoved: c.keyRemoved, contentIndexNote: c.note });
+    }
     else { console.error("Usage: index status|clear"); process.exit(1); }
     return;
   }

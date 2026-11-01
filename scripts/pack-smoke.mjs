@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const MIN_TOOLS = 51;
+const MIN_TOOLS = 53;
 const TIMEOUT_MS = 15_000;
 const tmp = mkdtempSync(join(tmpdir(), "pack-smoke-"));
 

@@ -27,8 +27,12 @@ CLI:     node dist/cli.js <command>
 ```
 src/index.ts              MCP server: TOOLS (schemas), tool-surface derivation (gates, pagination),
                           schema enforcement, dispatch, lifecycle (signals, cancellation)
-src/cli.ts                Companion CLI (mirrors 45 of 51 tools; drive_read_file/drive_write_file/drive_audit_log/drive_read_many/drive_share_expiry_report/drive_recent_changes are MCP-only)
+src/cli.ts                Companion CLI (mirrors 45 of 53 tools; drive_read_file/drive_write_file/drive_audit_log/drive_read_many/drive_share_expiry_report/drive_recent_changes/drive_content_index/drive_search_content are MCP-only)
 src/services/content.ts   drive_read_content: private-temp download, text/docx/pdf extraction, paging
+src/services/contentIndex.ts  drive_content_index / drive_search_content: update, status, clear, search
+src/services/contentSearch.ts Content index data: tokenizer, postings, BM25, snippets, line format
+src/services/contentSeal.ts   Content index file: chunked AES-256-GCM container, fail-closed reader
+src/utils/contentKey.ts       Content index key: macOS Keychain / secret-tool (stdin), PROTON_DRIVE_CONTENT_INDEX_KEY
 src/services/drive.ts     DriveService: one method per operation, CLI argv building, response parsing
 src/utils/subprocess.ts   Runs the CLI: timeouts, process-group kill, cancellation, sanitized errors
 src/utils/validation.ts   Argument validators (flag injection, traversal, types)
@@ -42,7 +46,7 @@ src/types/index.ts        Shared response types
 test/                     Unit tests (injected runner) + real-process tests (fake CLI over stdio)
 ```
 
-## Tools (51)
+## Tools (53)
 
 - **Auth / meta:** `drive_auth_status`, `drive_auth_logout`, `drive_version`
 - **Filesystem:** `drive_list`, `drive_info`, `drive_read_content`, `drive_read_many`, `drive_tree`, `drive_search`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`
@@ -53,6 +57,8 @@ test/                     Unit tests (injected runner) + real-process tests (fak
 - **Analytics:** `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_share_expiry_report`, `drive_recent_changes`
 - **Photos:** `photos_list_albums`, `photos_create_album`, `photos_update_album`, `photos_delete_album`, `photos_list_album_photos`, `photos_add_to_album`, `photos_remove_from_album`, `photos_list_timeline`, `photos_download`, `photos_upload`
 - **Local sync folder (needs `PROTON_DRIVE_SYNC_PATH`):** `drive_read_file`, `drive_write_file`
+- **Content search (needs `PROTON_DRIVE_CONTENT_INDEX=1`):** `drive_content_index`, `drive_search_content`
+  - Both are allowed in `PROTON_DRIVE_MODE=readonly` on purpose: `update` and `clear` change only the local encrypted index file (and its keychain item), never Drive. The file has no rollback detection (integrity per version, not freshness).
 - **Audit (needs `PROTON_DRIVE_AUDIT_LOG`):** `drive_audit_log`
 
 ## Design rules learned from the live CLI

@@ -215,6 +215,14 @@
       "description": "Read the text of up to 10 Proton Drive files in one call."
     },
     {
+      "name": "drive_content_index",
+      "description": "Build, inspect or clear an opt-in encrypted local full-text index of the files under a folder."
+    },
+    {
+      "name": "drive_search_content",
+      "description": "Search the text inside indexed Proton Drive files and return ranked paths with snippets."
+    },
+    {
       "name": "drive_audit_log",
       "description": "Show the newest entries of the server's audit log and whether its hash chain is intact."
     }

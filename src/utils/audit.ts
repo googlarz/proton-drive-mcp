@@ -33,7 +33,7 @@ const hashOf = (e: Omit<AuditEntry, "hash">) => sha256(e.prev + canonical(e));
 
 /**
  * What goes in the log for a call. Nothing secret or free-text: passwords and message bodies are replaced, file text is
- * reduced to its size, and arguments the tool does not declare are recorded as present but never by value.
+ * reduced to its size, search queries to their length, and arguments the tool does not declare are recorded as present but never by value.
  */
 export function redactArgs(tool: string, args: Record<string, unknown>, declared: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -41,6 +41,10 @@ export function redactArgs(tool: string, args: Record<string, unknown>, declared
     if (tool === "drive_write_file" && k === "content" && typeof v === "string") {
       out.content = "[redacted]";
       out.contentBytes = Buffer.byteLength(v);
+    } else if (tool === "drive_search_content" && k === "query" && typeof v === "string") {
+      // What the person looks for is as sensitive as the files: only its length is kept.
+      out.query = "[redacted]";
+      out.queryLength = v.length;
     } else if (k === "password" || k === "message") out[k] = "[redacted]";
     else if (!Object.hasOwn(declared, k)) out[k] = "[unknown argument]";
     else {
