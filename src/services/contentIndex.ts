@@ -274,8 +274,16 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
     for (const [id, d] of data.docs) if (d.path.startsWith(root + "/") && !live.has(d.path)) { stale.add(id); removed++; }
   }
 
-  // A missing engine or a bad language setting would fail every image the same way: say so once, before anything is downloaded.
-  if (ocrEnabled() && todo.some((n) => pickFormat(n.path, n.mediaType ?? "") === "image")) (deps.ocrReady ?? (deps.load ? undefined : () => ocrPreflight()))?.();
+  // A missing engine or a bad language setting would fail every image the same way: say so once, before anything is downloaded, and
+  // carry on without OCR (text files are still indexed; images and scans are left for a later call).
+  let ocrUnavailable: string | undefined;
+  let ocrSkipped = 0;
+  if (ocrEnabled() && todo.some((n) => ["image", "pdf"].includes(pickFormat(n.path, n.mediaType ?? "") ?? ""))) {
+    try { (deps.ocrReady ?? (deps.load ? undefined : () => ocrPreflight()))?.(); } catch (e) { ocrUnavailable = oneLine(e instanceof Error ? e.message : String(e)); }
+  }
+  if (ocrUnavailable !== undefined) {
+    for (let i = todo.length - 1; i >= 0; i--) if (pickFormat(todo[i]!.path, todo[i]!.mediaType ?? "") === "image") { todo.splice(i, 1); ocrSkipped++; }
+  }
 
   // OCR is slow: a file that gets the (single) OCR slot only after the budget ran out is not started, and not recorded.
   const load = deps.load ?? (async (d: DriveService, p: string) => {
@@ -298,6 +306,7 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
       if ((n.size ?? 0) > maxFileBytes) return skip(`larger than ${maxFileBytes / 1048576} MB`);
       const { text, ocr, ocrError } = await load(drive, n.path);
       const { tf, tokens } = termFrequencies(text);
+      if (tokens === 0 && ocrError && ocrUnavailable !== undefined) { ocrSkipped++; return; } // not recorded: tried again when OCR works
       if (tokens === 0 && ocrError) throw new Error(ocrError); // OCR could not run: not "no text", so it is retried (or recorded as a timeout)
       if (tokens === 0) return skip(ocrEnabled() && (format === "pdf" || format === "image") ? NO_TEXT_AFTER_OCR : NO_TEXT);
       data.addDoc({ ...base, tokens, excerpt: makeExcerpt(text), ...(ocr ? { ocr: true as const } : {}) }, tf);
@@ -326,7 +335,7 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
 
   data.removeDocs(stale);
   const remaining = todo.length - next + deferred;
-  const finished = listingComplete && remaining === 0 && failed.length === 0 && !capReached;
+  const finished = listingComplete && remaining === 0 && failed.length === 0 && !capReached && ocrSkipped === 0;
   data.folders[root] = { updatedAt: now(), complete: finished };
   // The estimate can undercount (odd names, unusual text): rather than lose the whole update, leave out the newest documents until it fits.
   let droppedForSize = 0;
@@ -344,6 +353,7 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
   if (remaining > 0) notes.push(`${remaining} file(s) still to index: call drive_content_index again with the same path to continue.`);
   if (capReached) notes.push(`The index reached its size cap (PROTON_DRIVE_CONTENT_INDEX_MAX_MB, ${Math.round(maxBytes / 1048576)} MB); the rest was not indexed. Clear it or index fewer folders.`);
   if (droppedForSize > 0) notes.push(`The index would have exceeded its size cap (${Math.round(maxBytes / 1048576)} MB), so the ${droppedForSize} newest document(s) were left out; the next call indexes them if there is room. Raise PROTON_DRIVE_CONTENT_INDEX_MAX_MB, clear the index or index fewer folders.`);
+  if (ocrUnavailable !== undefined) notes.push(`OCR is unavailable (${ocrUnavailable}), so ${ocrSkipped} file(s) needing OCR were skipped and will be tried again once it works; text files were indexed.`);
   if (walk.partial) notes.push(`The Drive listing was still running after ${budget / 1000} s; repeat the call to continue.`);
   if (!walk.complete) notes.push("The folder listing was incomplete, so files that vanished from Drive were not dropped from the index; narrow the path.");
   if (failed.length > 0) notes.push("Failed files are retried by the next call.");
@@ -352,10 +362,11 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
     path: root,
     indexed, unchanged, removed, skippedFiles: skippedDocs, skippedSecretNames: secret,
     failedCount: failed.length, failed: failed.slice(0, 20),
-    remaining, partial: remaining > 0 || capReached || !!walk.partial || droppedForSize > 0,
+    remaining, partial: remaining > 0 || ocrSkipped > 0 || capReached || !!walk.partial || droppedForSize > 0,
     walkComplete: walk.complete,
     listingAgeMs: walk.ageMs, fromCache: walk.fromCache,
     ...(listingRefreshed ? { listingRefreshed: true } : {}),
+    ...(ocrUnavailable !== undefined ? { ocrUnavailable } : {}),
     ...(capReached ? { capReached: true } : {}),
     ...(droppedForSize > 0 ? { droppedForSize } : {}),
     documents: data.docs.size,

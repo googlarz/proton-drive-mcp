@@ -436,6 +436,24 @@ describe("other walk users use the incremental mode", () => {
     assert.equal(count(calls, "/my-files"), 1, "no account check either");
   });
 
+  it("a noDisk caller never sees saved-index data through the memory cache of an earlier walk that was seeded from the index", async () => {
+    await seed();
+    const t = small();
+    t["/my-files/a"] = [folder("deep")]; // x.txt deleted remotely
+    const { svc, calls } = makeSvc(t);
+    invalidatePath("/my-files/b/new.txt"); // this server wrote into b: the saved index no longer answers whole, so the walk merges into it
+    const first = await walkTree(svc, "/my-files"); // e.g. drive_tree: seeds from the saved index, reuses the young listing of a
+    assert.ok(paths(first).includes("/my-files/a/x.txt"), "the ordinary caller may be served saved data");
+    calls.length = 0;
+    const r = await walkTree(svc, "/my-files", { noDisk: true, budgetMs: 0 }); // e.g. drive_sharing_audit
+    assert.ok(calls.length > 0, "listed again");
+    assert.ok(!paths(r).includes("/my-files/a/x.txt"));
+    // an explicit age still accepts the memory entry
+    calls.length = 0;
+    await walkTree(svc, "/my-files", { noDisk: true, maxListingAgeMs: HOUR });
+    assert.equal(calls.length, 0);
+  });
+
   it("the content index's 60 s window: listings read 10 s ago are reused, ones read 2 min ago are listed again", async () => {
     await seed();
     ageListed({ "/my-files": 10_000, "/my-files/a": 120_000, "/my-files/b": 10_000, "/my-files/a/deep": 10_000 });
@@ -695,6 +713,20 @@ describe("review fixes: applying listings", () => {
     assert.deepEqual(paths(r).filter((p) => p.startsWith("/my-files/a")), []);
     await flushWalkIndexForTests();
     assert.deepEqual(Object.keys(readIndex().entries[0].listed).sort(), ["/my-files", "/my-files/b"], "no resurrected listing for the dropped folder");
+  });
+
+  it("a listing that arrives late does not move an item back to its old folder", async () => {
+    await seed();
+    ageListed({ "/my-files/a": 3 * HOUR, "/my-files/b": 2 * HOUR }); // a is listed first, then b; the root stays young
+    const t = small();
+    t["/my-files/a"] = [folder("deep"), file("x.txt", 20)]; // read before the move happened
+    t["/my-files/b"] = [file("z.txt", 7), file("x.txt", 20)]; // read after it (b is quick, a is slow)
+    const { svc } = makeSlowSvc(t, { "/my-files/a": 150 });
+    const r = await slice(svc, { concurrency: 2 });
+    assert.deepEqual(paths(r).filter((p) => p.endsWith("x.txt")), ["/my-files/b/x.txt"]);
+    await flushWalkIndexForTests();
+    const saved = readIndex().entries[0];
+    assert.deepEqual(saved.nodes.filter((n) => n.path.endsWith("x.txt")).map((n) => n.path), ["/my-files/b/x.txt"]);
   });
 
   it("a listing time in the future (the clock moved back) counts as old", async () => {

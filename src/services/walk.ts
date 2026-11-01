@@ -133,6 +133,8 @@ interface CacheEntry {
   nodes: WalkNode[];
   skipped: { path: string; reason: string }[];
   complete: boolean;
+  /** Built partly from the saved index (reused listings): callers that must not use saved data skip it. */
+  seeded?: boolean;
 }
 const cache = new Map<string, CacheEntry>();
 
@@ -204,10 +206,10 @@ function pick(entries: Iterable<CacheEntry>, root: string, maxDepth: number | un
   return best && { e: best, exact: false };
 }
 
-function lookup(root: string, maxDepth: number | undefined, key: string, excludeKey: string, exclude: Set<string>): WalkResult | undefined {
+function lookup(root: string, maxDepth: number | undefined, key: string, excludeKey: string, exclude: Set<string>, noSaved = false): WalkResult | undefined {
   const now = Date.now(), ttl = ttlMs();
   for (const [k, e] of cache) if (now - e.createdAt >= ttl) cache.delete(k);
-  const hit = pick(cache.values(), root, maxDepth, key, excludeKey, exclude);
+  const hit = pick(noSaved ? [...cache.values()].filter((e) => !e.seeded) : cache.values(), root, maxDepth, key, excludeKey, exclude);
   return hit && fromCache(hit.e, root, maxDepth, exclude, hit.exact);
 }
 
@@ -333,7 +335,7 @@ async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | u
 
 function remember(p: WalkParams, w: RawWalk, createdAt = Date.now()): void {
   cache.delete(p.key);
-  cache.set(p.key, { root: p.root, key: p.key, excludeKey: p.excludeKey, maxDepth: p.maxDepth, createdAt, nodes: w.nodes, skipped: w.skipped, complete: w.complete });
+  cache.set(p.key, { root: p.root, key: p.key, excludeKey: p.excludeKey, maxDepth: p.maxDepth, createdAt, nodes: w.nodes, skipped: w.skipped, complete: w.complete, ...(w.inc && w.inc.reused > 0 ? { seeded: true } : {}) });
   while (cache.size > CACHE_ENTRIES) cache.delete(cache.keys().next().value as string);
 }
 
@@ -427,7 +429,13 @@ function dropSubtree(t: Tree, n: WalkNode): void {
 }
 
 /** Replaces one folder's children with its fresh listing. Returns the folders that are new (their contents are unknown). */
-function applyListing(t: Tree, folder: string, fresh: WalkNode[], at: number): WalkNode[] {
+function applyListing(t: Tree, folder: string, listing: WalkNode[], at: number, seq = 0, startedSeq = new Map<string, number>()): WalkNode[] {
+  // An item that a listing started later in this walk already recorded under another folder stays there: this older listing is out of date about it.
+  const fresh = listing.filter((n) => {
+    const prev = t.uids.get(n.uid);
+    return prev === undefined || prev === n.path || (startedSeq.get(parentPath(prev)) ?? 0) < seq;
+  });
+  startedSeq.set(folder, seq);
   const old = t.kids.get(folder) ?? [];
   const freshBy = new Map(fresh.map((n) => [n.uid, n]));
   const oldBy = new Map(old.map((n) => [n.uid, n]));
@@ -486,7 +494,8 @@ async function runIncremental(svc: DriveService, p: WalkParams, signal: AbortSig
   const reused = all.length - todo.length;
 
   const discovered: { path: string; uid: string }[] = []; // folders first seen in this walk go before everything else
-  let next = 0, head = 0, active = 0, refreshed = 0;
+  let next = 0, head = 0, active = 0, refreshed = 0, listingSeq = 0;
+  const startedSeq = new Map<string, number>(); // folder -> start order of the listing of this walk that last recorded it
   let stop: "time" | "calls" | undefined;
   const failed = new Map<string, string>();
   const more = () => head < discovered.length || next < todo.length;
@@ -512,11 +521,12 @@ async function runIncremental(svc: DriveService, p: WalkParams, signal: AbortSig
         if (job.path !== root && t.folders.get(job.path) !== job.uid) continue; // dropped or replaced by an earlier listing of this walk
         active++;
         live.active.add(job.path);
+        const seq = ++listingSeq; // order in which listings started (a clock can tie or step back)
         listWithRetry(job.path)
           .then((entries) => {
             if (job.path !== root && t.folders.get(job.path) !== job.uid) return; // dropped or replaced while this listing was under way
             const children = entries.filter(({ item }) => typeof item.uid === "string").map(toNode);
-            for (const f of applyListing(t, job.path, children, Date.now())) if (listable(f.path)) discovered.push({ path: f.path, uid: f.uid });
+            for (const f of applyListing(t, job.path, children, Date.now(), seq, startedSeq)) if (listable(f.path)) discovered.push({ path: f.path, uid: f.uid });
             refreshed++;
           })
           .catch((err) => {
@@ -836,7 +846,7 @@ export async function walkTree(svc: DriveService, rootPath: string, opts: WalkOp
   const useSaved = !opts.noDisk || explicitAge !== undefined;
   const check: AccountCheck = { failed: false };
   if (!opts.refresh && !opts.resumable) {
-    const hit = lookup(root, maxDepth, key, excludeKey, exclude);
+    const hit = lookup(root, maxDepth, key, excludeKey, exclude, opts.noDisk === true && explicitAge === undefined);
     if (hit && (explicitAge === undefined || hit.ageMs <= explicitAge)) return hit;
     if (!opts.noDisk) {
       const fromDisk = await diskLookup(svc, params, signal, check, explicitAge);

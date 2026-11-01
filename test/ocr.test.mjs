@@ -39,7 +39,7 @@ const ocrDirs = () => readdirSync(tmpdir()).filter((n) => n.startsWith("pdmcp-oc
  * Writes executable node scripts into a fresh dir. `tesseract` behaviour: print | fail | hang | slow. Returns { dir, which, calls() }.
  * `which` maps a command name to its shim (or undefined), like resolveTool.
  */
-function makeShims({ tesseract = "print", pdfPages = 2, pdftoppm = true, pdfinfo = null, swiftc = false, version = "tesseract 5.3.0" } = {}) {
+function makeShims({ tesseract = "print", pdfPages = 2, pdftoppm = true, pdfinfo = null, pdfinfoRaw = null, pdfinfoFail = false, swiftc = false, version = "tesseract 5.3.0" } = {}) {
   const dir = mkTmp("pdocr-shims-");
   const log = join(dir, "calls.jsonl");
   const pidFile = join(dir, "grandchild.pid");
@@ -55,10 +55,12 @@ function makeShims({ tesseract = "print", pdfPages = 2, pdftoppm = true, pdfinfo
   // "hang" is a plain sh script: it must be running (and have written its grandchild's pid) within milliseconds, also on a loaded machine.
   writeFileSync(join(dir, "tesseract"), tesseract === "hang" ? `#!/bin/sh\nsleep 60 &\necho $! > ${pidFile}\nwait\n` : tess, { mode: 0o755 });
   if (pdftoppm) {
-    const pp = head + `log({tool:'pdftoppm',argv});const li=argv.indexOf('-l');const last=Number(argv[li+1]);const prefix=argv[argv.length-1];const n=Math.min(last,${pdfPages});for(let i=1;i<=n;i++)fs.writeFileSync(prefix+'-'+String(i).padStart(2,'0')+'.png','x');`;
+    const pp = head + `log({tool:'pdftoppm',argv});const li=argv.indexOf('-l');const last=Number(argv[li+1]);const prefix=argv[argv.length-1];const fi=argv.indexOf('-f');const first=fi<0?1:Number(argv[fi+1]);const n=Math.min(last,${pdfPages});for(let i=first;i<=n;i++)fs.writeFileSync(prefix+'-'+String(i).padStart(2,'0')+'.png','x');`;
     writeFileSync(join(dir, "pdftoppm"), pp, { mode: 0o755 });
   }
-  if (pdfinfo) writeFileSync(join(dir, "pdfinfo"), head + `log({tool:'pdfinfo',argv});${JSON.stringify(pdfinfo)}.forEach((s,i)=>console.log('Page '.padEnd(8)+(i+1)+' size: '+s[0]+' x '+s[1]+' pts'));`, { mode: 0o755 });
+  if (pdfinfo) writeFileSync(join(dir, "pdfinfo"), head + `log({tool:'pdfinfo',argv});console.log('Pages:'.padEnd(16)+${JSON.stringify(pdfinfo)}.length);${JSON.stringify(pdfinfo)}.forEach((s,i)=>console.log('Page '.padEnd(8)+(i+1)+' size: '+s[0]+' x '+s[1]+' pts'));`, { mode: 0o755 });
+  if (pdfinfoRaw !== null) writeFileSync(join(dir, "pdfinfo"), head + `log({tool:'pdfinfo',argv});process.stdout.write(${JSON.stringify(pdfinfoRaw)});`, { mode: 0o755 });
+  if (pdfinfoFail) writeFileSync(join(dir, "pdfinfo"), head + `log({tool:'pdfinfo',argv});process.stderr.write('Syntax Error: broken\\n');process.exit(1);`, { mode: 0o755 });
   if (swiftc === true) writeFileSync(join(dir, "swiftc"), head + `log({tool:'swiftc',argv});process.stderr.write('error: no developer tools were found\\n');process.exit(1);`, { mode: 0o755 });
   if (swiftc === "ok") {
     // "Compiles" by writing a node script that behaves like the Vision helper.
@@ -788,6 +790,47 @@ describe("pixel limits (read from the file header before any engine runs)", () =
     assert.equal(s.calls().length, 0);
   });
 
+  /** A little-endian TIFF with one IFD per [w, h]; `next` overrides the offset each IFD points to. */
+  const multiTiff = (pages, next = (i, n) => (i + 1 < n ? 8 + 30 * (i + 1) : 0)) => {
+    const b = Buffer.alloc(8 + 30 * pages.length);
+    b.write("II"); b.writeUInt16LE(42, 2); b.writeUInt32LE(8, 4);
+    pages.forEach(([w, h], i) => {
+      const o = 8 + 30 * i;
+      b.writeUInt16LE(2, o);
+      b.writeUInt16LE(256, o + 2); b.writeUInt16LE(4, o + 4); b.writeUInt32LE(1, o + 6); b.writeUInt32LE(w, o + 10);
+      b.writeUInt16LE(257, o + 14); b.writeUInt16LE(4, o + 16); b.writeUInt32LE(1, o + 18); b.writeUInt32LE(h, o + 22);
+      b.writeUInt32LE(next(i, pages.length), o + 26);
+    });
+    return b;
+  };
+
+  it("a multi-page TIFF is checked page by page: one huge later page, or too many pixels in total, is refused before any engine runs", async () => {
+    const s = makeShims();
+    const deps = useTesseract(s);
+    process.env.PROTON_DRIVE_OCR_MAX_PIXELS = "1000000";
+    await ocrBuffer(multiTiff([[500, 500], [600, 600]]), "tiff", 1000, deps); // fine
+    await assert.rejects(ocrBuffer(multiTiff([[100, 100], [5000, 5000]]), "tiff", 1000, deps), /OCR refused: the image is 5000 x 5000 pixels.*over the limit of 1 megapixels/);
+    await assert.rejects(ocrBuffer(multiTiff(Array(5).fill([900, 900])), "tiff", 1000, deps), /OCR refused.*4\.05 megapixels in total.*over 4 times the limit/);
+    assert.equal(s.calls().filter((c) => c.tool === "tesseract").length, 1, "only the first, acceptable file reached the engine");
+    assert.deepEqual(imageDimensions(multiTiff([[10, 10]])), { width: 10, height: 10 });
+  });
+
+  it("a TIFF whose IFD chain is cyclic, longer than 64 or unparsable is refused", async () => {
+    const s = makeShims();
+    const deps = useTesseract(s);
+    const bad = {
+      cyclic: multiTiff([[10, 10], [10, 10]], () => 8),
+      "too long": multiTiff(Array(65).fill([10, 10])),
+      "pointer outside the file": multiTiff([[10, 10]], () => 100000),
+    };
+    for (const [name, b] of Object.entries(bad)) {
+      assert.equal(imageDimensions(b), undefined, name);
+      await assert.rejects(ocrBuffer(b, "tiff", 1000, deps), /OCR refused: the image size could not be determined/, name);
+    }
+    await ocrBuffer(multiTiff(Array(64).fill([10, 10])), "tiff", 1000, deps); // exactly 64 is allowed
+    assert.equal(s.calls().filter((c) => c.tool === "tesseract").length, 1);
+  });
+
   it("HEIC is left to Vision (no header parse in Node); PROTON_DRIVE_OCR_MAX_PIXELS lowers the limit; PDFs are not affected", async () => {
     const s = makeShims({ swiftc: "ok" });
     process.env.PROTON_DRIVE_OCR = "1";
@@ -825,6 +868,43 @@ describe("OCR preparation and timing", () => {
     const second = await ocrBuffer(SAMPLE_PNG, "png", 1000, { which: s.which, platform: "darwin" });
     assert.equal(second.text, "fake vision text");
     assert.equal(s.calls().filter((c) => c.tool === "vision-helper" && /warm/.test(c.argv[0])).length, 1, "the warm-up runs once per helper");
+  });
+
+  it("a cold read whose deadline passed during the build and warm-up is deferred, not run; the warmed helper serves the retry", async () => {
+    const s = slowToolchain(300, 300);
+    visionEnv();
+    const deps = { which: s.which, platform: "darwin" };
+    await assert.rejects(ocrBuffer(SAMPLE_PNG, "png", 1000, { ...deps, deadlineAt: Date.now() + 200 }), OcrDeferredError);
+    assert.equal(s.calls().filter((c) => c.tool === "vision-helper" && !/warm/.test(c.argv[0])).length, 0, "the file itself was not read");
+    assert.equal((await ocrBuffer(SAMPLE_PNG, "png", 1000, { ...deps, deadlineAt: Date.now() + 60_000 })).text, "fake vision text");
+    assert.equal(s.calls().filter((c) => c.tool === "swiftc").length, 1);
+    assert.equal(s.calls().filter((c) => c.tool === "vision-helper" && /warm/.test(c.argv[0])).length, 1);
+  });
+
+  it("a failed warm-up is not remembered as done: the next read warms up again", async () => {
+    const s = makeShims({ swiftc: "ok" });
+    const marker = join(s.dir, "warm-failed-once");
+    const helper = `#!${process.execPath}\nconst fs=require('fs');const argv=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(join(s.dir, "calls.jsonl"))},JSON.stringify({tool:'vision-helper',argv})+'\\n');if(/warm/.test(argv[0])&&!fs.existsSync(${JSON.stringify(marker)})){fs.writeFileSync(${JSON.stringify(marker)},'1');process.stderr.write('boom\\n');process.exit(1);}process.stdout.write(JSON.stringify({engine:'vision',totalPages:1,pages:[{page:1,text:'fake vision text'}]}));`;
+    writeFileSync(join(s.dir, "swiftc"), `#!${process.execPath}\nconst fs=require('fs');const argv=process.argv.slice(2);fs.writeFileSync(argv[argv.indexOf('-o')+1],${JSON.stringify(helper)},{mode:0o755});`, { mode: 0o755 });
+    visionEnv();
+    const deps = { which: s.which, platform: "darwin" };
+    assert.equal((await ocrBuffer(SAMPLE_PNG, "png", 1000, deps)).text, "fake vision text");
+    assert.equal((await ocrBuffer(SAMPLE_PNG, "png", 1000, deps)).text, "fake vision text");
+    assert.equal(s.calls().filter((c) => /warm/.test(c.argv?.[0] ?? "")).length, 2, "the failed warm-up was retried once, then recorded");
+    await ocrBuffer(SAMPLE_PNG, "png", 1000, deps);
+    assert.equal(s.calls().filter((c) => /warm/.test(c.argv?.[0] ?? "")).length, 2);
+  });
+
+  it("each use touches the helper binary, so one in use is never older than the prune age", async () => {
+    const s = makeShims({ swiftc: "ok" });
+    visionEnv();
+    const deps = { which: s.which, platform: "darwin" };
+    await ocrBuffer(SAMPLE_PNG, "png", 1000, deps);
+    const bin = join(process.env.PROTON_DRIVE_INDEX_DIR, readdirSync(process.env.PROTON_DRIVE_INDEX_DIR).find((n) => /^vision-ocr-[0-9a-f]{16}$/.test(n)));
+    const old = new Date(Date.now() - 5 * 3_600_000);
+    utimesSync(bin, old, old);
+    await ocrBuffer(SAMPLE_PNG, "png", 1000, deps);
+    assert.ok(Date.now() - statSync(bin).mtimeMs < 60_000, "touched by the second read");
   });
 
   it("warmUpOcr builds and warms the helper on a generated blank image, never throws, and does nothing when OCR is off or the engine is tesseract", async () => {
@@ -867,27 +947,47 @@ describe("OCR preparation and timing", () => {
 });
 
 describe("pdftoppm page size limit", () => {
-  const ppArgv = (s) => s.calls().find((c) => c.tool === "pdftoppm").argv;
+  const ppCalls = (s) => s.calls().filter((c) => c.tool === "pdftoppm").map((c) => c.argv);
+  const scaleOf = (a) => a[a.indexOf("-scale-to") + 1];
+  const run = (s) => ocrBuffer(Buffer.from("%PDF-1.4"), "pdf", 1000, useTesseract(s));
+  const pages = (list) => "Pages:          " + list.length + "\n" + list.map((p, i) => `Page ${String(i + 1).padStart(4)} size: ${p[0]} x ${p[1]} pts`).join("\n") + "\n";
 
   it("without pdfinfo every page is scaled (not cropped) to at most 4000 px on the long side", async () => {
     const s = makeShims();
-    await ocrBuffer(Buffer.from("%PDF-1.4"), "pdf", 1000, useTesseract(s));
-    const a = ppArgv(s);
+    await run(s);
+    const [a] = ppCalls(s);
     assert.deepEqual(a.slice(0, 7), ["-r", "200", "-png", "-f", "1", "-l", "30"]);
-    assert.equal(a[a.indexOf("-scale-to") + 1], "4000");
+    assert.equal(scaleOf(a), "4000");
     assert.ok(!a.includes("-W") && !a.includes("-H"), "no cropping");
   });
 
-  it("with pdfinfo: ordinary pages keep 200 dpi; a huge page lowers the dpi so the largest page fits in 4000 px", async () => {
-    const small = makeShims({ pdfinfo: [[612, 792], [595, 842]] });
-    await ocrBuffer(Buffer.from("%PDF-1.4"), "pdf", 1000, useTesseract(small));
-    assert.deepEqual(ppArgv(small).slice(0, 2), ["-r", "200"]);
-    assert.ok(!ppArgv(small).includes("-scale-to") && !ppArgv(small).includes("-W"));
-    assert.deepEqual(small.calls().find((c) => c.tool === "pdfinfo").argv.slice(0, 4), ["-f", "1", "-l", "30"]);
-    const huge = makeShims({ pdfinfo: [[612, 792], [14400, 14400]] });
-    await ocrBuffer(Buffer.from("%PDF-1.4"), "pdf", 1000, useTesseract(huge));
-    assert.deepEqual(ppArgv(huge).slice(0, 2), ["-r", "20"], "4000 px * 72 / 14400 pt = 20 dpi");
-    assert.ok(!ppArgv(huge).includes("-W") && !ppArgv(huge).includes("-H"));
+  it("with pdfinfo every page gets its own scale-to (200 dpi, at most 4000 px): a huge page does not shrink the others", async () => {
+    const s = makeShims({ pdfinfo: [[612, 792], [14400, 14400], [595, 842]], pdfPages: 3 });
+    await run(s);
+    assert.deepEqual(s.calls().find((c) => c.tool === "pdfinfo").argv.slice(0, 4), ["-f", "1", "-l", "30"]);
+    const a = ppCalls(s);
+    assert.equal(a.length, 3);
+    assert.deepEqual(a.map(scaleOf), ["2200", "4000", "2339"], "792 pt * 200 / 72 = 2200; the huge page is capped; 842 pt = 2339");
+    assert.deepEqual(a.map((x) => [x[x.indexOf("-f") + 1], x[x.indexOf("-l") + 1]]), [["1", "1"], ["2", "2"], ["3", "3"]]);
+    assert.ok(a.every((x) => !x.includes("-W") && !x.includes("-H")));
+  });
+
+  it("a pdfinfo failure, exponent notation, an unparsable size line or a page-count mismatch still ends in a hard scale-to", async () => {
+    const cases = {
+      "failure": makeShims({ pdfinfoFail: true }),
+      "exponent": makeShims({ pdfinfoRaw: "Pages:          1\nPage    1 size: 1e+06 x 1e+06 pts\n" }),
+      "unparsable line": makeShims({ pdfinfoRaw: "Pages:          2\nPage    1 size: 612 x 792 pts\nPage    2 size: weird\n" }),
+      "fewer sizes than pages": makeShims({ pdfinfoRaw: pages([[612, 792]]).replace("Pages:          1", "Pages:          3") }),
+      "no Pages line": makeShims({ pdfinfoRaw: "Page    1 size: 612 x 792 pts\n" }),
+      "garbage": makeShims({ pdfinfoRaw: "nothing useful\n" }),
+    };
+    for (const [name, s] of Object.entries(cases)) {
+      await run(s);
+      const a = ppCalls(s);
+      assert.equal(a.length, 1, name);
+      assert.equal(scaleOf(a[0]), "4000", name);
+      assert.deepEqual(a[0].slice(a[0].indexOf("-f"), a[0].indexOf("-f") + 4), ["-f", "1", "-l", "30"], name);
+    }
   });
 });
 
@@ -979,16 +1079,29 @@ describe("content index: OCR retries and preflight", () => {
     assert.equal(loads, 3);
   });
 
-  it("a missing engine or a bad language setting fails the update at once with one error, before any file is downloaded", async () => {
-    let loads = 0;
-    const load = async () => { loads++; return { text: "x words" }; };
-    const noEngine = deps(["/my-files/Docs/a.png", "/my-files/Docs/b.png", "/my-files/Docs/c.txt"], load, { ocrReady: () => ocrPreflight({ which: () => undefined, platform: "linux" }) });
+  it("a missing engine or a bad language setting skips images (and PDFs needing OCR) with one note and still indexes text files", async () => {
+    const loaded = [];
+    const load = async (_d, p) => {
+      loaded.push(p);
+      if (p.endsWith("scan.pdf")) return { text: "", ocrError: "OCR unavailable/failed: no engine" };
+      return { text: "plain words here" };
+    };
+    const paths = ["/my-files/Docs/a.png", "/my-files/Docs/b.png", "/my-files/Docs/c.txt", "/my-files/Docs/scan.pdf", "/my-files/Docs/text.pdf"];
+    const noEngine = deps(paths, load, { ocrReady: () => ocrPreflight({ which: () => undefined, platform: "linux" }) });
     delete process.env.PROTON_DRIVE_OCR_ENGINE;
-    await assert.rejects(update(noEngine), /no OCR engine was found/);
-    assert.equal(loads, 0);
+    const r = await update(noEngine);
+    assert.match(r.ocrUnavailable, /no OCR engine was found/);
+    assert.equal(r.indexed, 2, "the text file and the PDF with a text layer");
+    assert.equal(r.skippedFiles, 0, "nothing is recorded as skipped: the files are tried again once OCR works");
+    assert.deepEqual(loaded.filter((p) => p.endsWith(".png")), [], "no image was downloaded");
+    assert.equal(r.failedCount, 0);
+    assert.match(r.note, /3 file\(s\) needing OCR were skipped/);
+    assert.equal((r.note.match(/OCR is unavailable/g) ?? []).length, 1, "one note");
+    assert.equal(r.partial, true, "the skipped files are still to index once OCR works");
     // text-only folders are unaffected
     const textOnly = deps(["/my-files/Docs/c.txt"], load, { ocrReady: () => { throw new Error("must not be called"); } });
-    assert.equal((await update(textOnly)).indexed, 1);
+    const t = await update(textOnly);
+    assert.equal(t.ocrUnavailable, undefined);
   });
 
   it("OCR failing on a PDF with no text layer is a failure to retry, not a 'no text after OCR' skip", async () => {
@@ -1074,9 +1187,9 @@ describe("REAL Vision engine (macOS)", { skip: visionSkip }, () => {
 
   it("second call reuses the compiled binary (same file, not rebuilt)", async () => {
     const [bin] = readdirSync(cache).filter((n) => n.startsWith("vision-ocr-"));
-    const before = statSync(join(cache, bin)).mtimeMs;
+    const before = statSync(join(cache, bin)).ino; // the mtime is touched on every use, so the inode shows "not rebuilt"
     await ocrBuffer(SAMPLE_PNG, "png", 100_000);
-    assert.equal(statSync(join(cache, bin)).mtimeMs, before);
+    assert.equal(statSync(join(cache, bin)).ino, before);
     assert.deepEqual(readdirSync(cache).filter((n) => n.startsWith("vision-ocr-")), [bin]);
   });
 

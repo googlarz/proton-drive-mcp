@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { accessSync, constants, lstatSync, readFileSync, readdirSync } from "node:fs";
-import { chmod, mkdtemp, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, rename, rm, unlink, utimes, writeFile } from "node:fs/promises";
 import { setPriority, tmpdir } from "node:os";
 import { deflateSync } from "node:zlib";
 import { delimiter, isAbsolute, join } from "node:path";
@@ -138,7 +138,8 @@ export function isSparsePdfText(text: string, pages: number): boolean {
 
 // ---- image size, from the header only -----------------------------------------------------------------------------------
 
-type Dims = { width: number; height: number };
+/** totalPixels: only for a multi-page image (TIFF), the sum over all pages; width x height is then the largest page. */
+type Dims = { width: number; height: number; totalPixels?: number };
 
 function jpegDims(b: Buffer): Dims | undefined {
   let i = 2;
@@ -156,22 +157,35 @@ function jpegDims(b: Buffer): Dims | undefined {
   return undefined;
 }
 
+const MAX_TIFF_IFDS = 64;
+/** Every page (IFD) of a classic TIFF is read, because tesseract OCRs them all. Returns the largest page and the total; undefined for a chain that is longer than 64, cyclic or unparsable. */
 function tiffDims(b: Buffer): Dims | undefined {
   const le = b[0] === 0x49 && b[1] === 0x49;
   if (!le && !(b[0] === 0x4d && b[1] === 0x4d)) return undefined;
   const u16 = (o: number) => (le ? b.readUInt16LE(o) : b.readUInt16BE(o));
   const u32 = (o: number) => (le ? b.readUInt32LE(o) : b.readUInt32BE(o));
   if (u16(2) !== 42) return undefined; // classic TIFF only
-  const ifd = u32(4);
-  const count = Math.min(u16(ifd), 256);
-  let width: number | undefined, height: number | undefined;
-  for (let i = 0; i < count; i++) {
-    const e = ifd + 2 + 12 * i;
-    const tag = u16(e), type = u16(e + 2);
-    const v = type === 3 ? u16(e + 8) : type === 4 ? u32(e + 8) : undefined;
-    if (tag === 256) width = v; else if (tag === 257) height = v;
+  const seen = new Set<number>();
+  let ifd = u32(4);
+  let largest: Dims | undefined, total = 0;
+  while (ifd !== 0) {
+    if (seen.size >= MAX_TIFF_IFDS || seen.has(ifd)) return undefined;
+    seen.add(ifd);
+    const count = u16(ifd);
+    if (count > 1024) return undefined;
+    let width: number | undefined, height: number | undefined;
+    for (let i = 0; i < count; i++) {
+      const e = ifd + 2 + 12 * i;
+      const tag = u16(e), type = u16(e + 2);
+      const v = type === 3 ? u16(e + 8) : type === 4 ? u32(e + 8) : undefined;
+      if (tag === 256) width = v; else if (tag === 257) height = v;
+    }
+    if (!width || !height) return undefined; // a page with no readable size
+    total += width * height;
+    if (!largest || width * height > largest.width * largest.height) largest = { width, height };
+    ifd = u32(ifd + 2 + 12 * count);
   }
-  return width !== undefined && height !== undefined ? { width, height } : undefined;
+  return largest && (seen.size > 1 ? { ...largest, totalPixels: total } : largest);
 }
 
 function webpDims(b: Buffer): Dims | undefined {
@@ -222,6 +236,7 @@ function checkPixels(buf: Buffer, ext: string): void {
   }
   const limit = ocrMaxPixels();
   if (d.width * d.height > limit) throw new Error(`OCR refused: the image is ${d.width} x ${d.height} pixels (${megapixels(d.width * d.height)} megapixels), over the limit of ${megapixels(limit)} megapixels (PROTON_DRIVE_OCR_MAX_PIXELS)`);
+  if (d.totalPixels !== undefined && d.totalPixels > 4 * limit) throw new Error(`OCR refused: the image's pages add up to ${megapixels(d.totalPixels)} megapixels in total, over 4 times the limit of ${megapixels(limit)} megapixels (PROTON_DRIVE_OCR_MAX_PIXELS)`);
 }
 
 // ---- running an engine --------------------------------------------------------------------------------------------------
@@ -346,15 +361,18 @@ function blankPng(): Buffer {
   return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
 }
 
-async function warmHelper(bin: string): Promise<void> {
+/** True when the warm-up ran to the end; a failed or cancelled one is not "prepared" and is tried again by a later read. */
+async function warmHelper(bin: string): Promise<boolean> {
   const dir = await mkdtemp(join(tmpdir(), "pdmcp-ocr-"));
   registerTempDir(dir);
   try {
     const input = join(dir, "warm.png");
     await writeFile(input, blankPng(), { mode: 0o600, flag: "wx" });
     await runOcrTool(bin, [input, "1", "", String(ocrMaxPixels())], { deadline: Date.now() + WARMUP_TIMEOUT_MS, what: "The Vision OCR helper" });
+    return true;
   } catch (e) {
     logger.debug("Vision OCR helper warm-up failed:", e instanceof Error ? oneLine(e.message) : String(e)); // the real read reports its own error
+    return false;
   } finally {
     await rm(dir, { recursive: true, force: true });
     unregisterTempDir(dir);
@@ -364,16 +382,18 @@ async function warmHelper(bin: string): Promise<void> {
 /** The compiled helper, after its one-time warm-up (concurrent callers share it). */
 async function readyVisionBinary(swiftc: string): Promise<string> {
   const bin = await visionBinary(swiftc);
+  // The mtime marks "last used": pruning is age-based, so a binary in use must never look old to another process.
+  await utimes(bin, new Date(), new Date()).catch(() => undefined);
   if (prepared.has(bin)) return bin;
   let job = preparing.get(bin);
   if (!job) {
-    job = warmHelper(bin).then(() => { prepared.add(bin); return bin; }).finally(() => preparing.delete(bin));
+    job = warmHelper(bin).then((ok) => { if (ok) prepared.add(bin); return bin; }).finally(() => preparing.delete(bin));
     preparing.set(bin, job);
   }
   return job;
 }
 
-interface Job { input: string; ext: string; dir: string; /** Set by the engine once it is ready to read: the file's timeout starts then. */ deadline: number; maxChars: number; maxPages: number; langs: string | undefined; which: (cmd: string) => string | undefined }
+interface Job { input: string; ext: string; dir: string; /** Set by the engine once it is ready to read: the file's timeout starts then. */ deadline: number; maxChars: number; maxPages: number; /** The content-index budget: an OCR run is not started after it. */ deadlineAt: number | undefined; langs: string | undefined; which: (cmd: string) => string | undefined }
 
 const joinPages = (pages: string[], maxChars: number): { text: string; capped: boolean } => {
   const text = pages.map((p) => p.trim()).filter(Boolean).join("\n\n");
@@ -384,6 +404,7 @@ async function runVision(j: Job): Promise<OcrResult> {
   const swiftc = j.which("swiftc");
   if (!swiftc) throw new VisionUnavailableError("swiftc was not found (install the Xcode command line tools: `xcode-select --install`)");
   const bin = await readyVisionBinary(swiftc);
+  if (j.deadlineAt !== undefined && Date.now() >= j.deadlineAt) throw new OcrDeferredError(); // the build and warm-up can take minutes
   j.deadline = Date.now() + ocrTimeoutMs();
   const { stdout } = await runOcrTool(bin, [j.input, String(j.maxPages), (j.langs ?? "").split("+").join(","), String(ocrMaxPixels())], { deadline: j.deadline, what: "The Vision OCR helper" });
   let out: { pages?: unknown; totalPages?: unknown };
@@ -396,23 +417,37 @@ async function runVision(j: Job): Promise<OcrResult> {
 }
 
 /**
- * pdftoppm arguments that keep a page within MAX_RENDER_SIDE pixels by scaling it, never by cropping. With pdfinfo the dpi is lowered just
- * enough for the largest page; without it every page is scaled to that long side.
+ * How pdftoppm is run: always with -scale-to, which fixes the long side of each rendered page, so a page can never be rendered larger than
+ * MAX_RENDER_SIDE pixels (it is scaled, never cropped). With a complete, readable pdfinfo answer every page is rendered on its own at 200 dpi
+ * (capped at that side), so one huge page does not degrade the others. Anything else (no pdfinfo, a failure, an unparsable or incomplete
+ * answer) renders the whole range at the cap.
  */
-async function pageSizeArgs(j: Job): Promise<{ r: [string]; scaleTo: string[] }> {
+async function renderPlan(j: Job): Promise<{ first: number; last: number; scaleTo: number }[]> {
+  const whole = [{ first: 1, last: j.maxPages, scaleTo: MAX_RENDER_SIDE }];
   const pdfinfo = j.which("pdfinfo");
-  if (pdfinfo) {
-    try {
-      const { stdout } = await runOcrTool(pdfinfo, ["-f", "1", "-l", String(j.maxPages), j.input], { deadline: j.deadline, what: "pdfinfo" });
-      let side = 0;
-      for (const m of stdout.matchAll(/^Page\s+\d+\s+size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/gm)) side = Math.max(side, Number(m[1]), Number(m[2]));
-      if (side > 0 && Number.isFinite(side)) return { r: [String(Math.max(1, Math.min(PDF_DPI, Math.floor((MAX_RENDER_SIDE * 72) / side))))], scaleTo: [] };
-    } catch (e) {
-      if (e instanceof Error && e.message === "cancelled") throw e;
-      // pdfinfo could not read it: fall back to scaling every page
+  if (!pdfinfo) return whole;
+  try {
+    const { stdout } = await runOcrTool(pdfinfo, ["-f", "1", "-l", String(j.maxPages), j.input], { deadline: j.deadline, what: "pdfinfo" });
+    const total = Number(/^Pages:\s+(\d+)\s*$/m.exec(stdout)?.[1]);
+    if (!Number.isInteger(total) || total < 1) return whole;
+    const expected = Math.min(total, j.maxPages);
+    const sides = new Map<number, number>();
+    for (const m of stdout.matchAll(/^Page\s+(\d+)\s+size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/gm)) {
+      const side = Math.max(Number(m[2]), Number(m[3]));
+      if (!(side > 0) || !Number.isFinite(side)) return whole;
+      sides.set(Number(m[1]), side);
     }
+    const plan: { first: number; last: number; scaleTo: number }[] = [];
+    for (let page = 1; page <= expected; page++) {
+      const side = sides.get(page);
+      if (side === undefined) return whole; // a missing or unreadable size line: do not guess
+      plan.push({ first: page, last: page, scaleTo: Math.max(1, Math.min(MAX_RENDER_SIDE, Math.ceil((side * PDF_DPI) / 72))) });
+    }
+    return plan;
+  } catch (e) {
+    if (e instanceof Error && e.message === "cancelled") throw e;
+    return whole; // pdfinfo could not read it
   }
-  return { r: [String(PDF_DPI)], scaleTo: ["-scale-to", String(MAX_RENDER_SIDE)] };
 }
 
 async function runTesseract(j: Job): Promise<OcrResult> {
@@ -426,8 +461,9 @@ async function runTesseract(j: Job): Promise<OcrResult> {
   if (j.ext === "pdf") {
     const pdftoppm = j.which("pdftoppm");
     if (!pdftoppm) throw new Error("pdftoppm was not found, so a PDF cannot be rasterized for tesseract. Install poppler: `brew install poppler` (macOS) or `apt install poppler-utils` (Linux).");
-    const size = await pageSizeArgs(j);
-    await runOcrTool(pdftoppm, ["-r", ...size.r, "-png", "-f", "1", "-l", String(j.maxPages), ...size.scaleTo, j.input, join(j.dir, "pg")], { deadline: j.deadline, what: "pdftoppm" });
+    for (const { first, last, scaleTo } of await renderPlan(j)) {
+      await runOcrTool(pdftoppm, ["-r", String(PDF_DPI), "-png", "-f", String(first), "-l", String(last), "-scale-to", String(scaleTo), j.input, join(j.dir, "pg")], { deadline: j.deadline, what: "pdftoppm" });
+    }
     images = (await readdir(j.dir)).filter((n) => /^pg-\d+\.png$/.test(n)).sort((a, b) => parseInt(a.slice(3), 10) - parseInt(b.slice(3), 10)).map((n) => join(j.dir, n));
     limited = images.length >= j.maxPages;
   }
@@ -463,7 +499,7 @@ export async function ocrBuffer(buf: Buffer, ext: string, maxChars: number, deps
       const input = join(dir, `in.${ext}`);
       if (!isAbsolute(input)) throw new Error("OCR: the temp directory is not absolute");
       await writeFile(input, buf, { mode: 0o600, flag: "wx" });
-      const job: Job = { input, ext, dir, deadline: 0, maxChars, maxPages: ocrMaxPages(), langs, which: deps.which ?? resolveTool };
+      const job: Job = { input, ext, dir, deadline: 0, maxChars, maxPages: ocrMaxPages(), deadlineAt: deps.deadlineAt, langs, which: deps.which ?? resolveTool };
       for (let i = 0; i < r.engines.length; i++) {
         try {
           return await (r.engines[i] === "vision" ? runVision(job) : runTesseract(job));
