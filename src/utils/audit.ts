@@ -56,7 +56,7 @@ function realResolve(p: string): string {
   const rest: string[] = [];
   for (let cur = resolve(p); ; cur = dirname(cur)) {
     try {
-      return join(realpathSync(cur), ...rest);
+      return join(realpathSync.native(cur), ...rest);
     } catch (err) {
       const parent = dirname(cur);
       if ((err as NodeJS.ErrnoException).code !== "ENOENT" || parent === cur) return resolve(p);

@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.6.0 — unreleased
+## 1.6.0 — 2026-11-01
 
 ### Added
 - **Guard layer** (all opt-in, off by default; they apply to the MCP server only, so the companion `proton-drive-cli` bypasses them):
@@ -16,6 +16,7 @@
 - `drive_share_set_url` now refuses, before changing anything, to replace a link whose password and/or expiration the call omits (set-url replaces all link settings), naming what would be lost. Pass them again, or pass the new `resetSettings: true` to drop them on purpose. It also refuses when the existing settings cannot be read. Previously this only produced a warning after the fact.
 
 ### Notes
+- Known limits: audit entries are written after the change; the audit-log lock can fork the chain only if a crashed holder and contention coincide; a contended append blocks the server for up to ~4 s; the local `.versions` copy has no size cap. The `drive_share_set_url` link check was confirmed against the live CLI (`urlAccess.customPassword`, `expirationTime`).
 - The MCP server now lists 51 tools (47 in 1.5.3). The three new tools are MCP-only; the companion CLI still mirrors 45.
 
 ## 1.5.3 — 2026-10-31
