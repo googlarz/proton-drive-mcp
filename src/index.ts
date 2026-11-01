@@ -40,6 +40,7 @@ import { cliCompatWarning } from "./utils/cliVersion.js";
 import { driveSearch, driveTree } from "./services/find.js";
 import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type Direction, type Compare } from "./services/plan.js";
 import { invalidatePath, abortBackgroundRefreshes } from "./services/walk.js";
+import { ocrEnabled, warmUpOcr } from "./services/ocr.js";
 import { getSyncRoot, readSyncFile, writeSyncFile, syncFileExists } from "./utils/syncfs.js";
 import type { AlbumPhoto } from "./types/index.js";
 import { readDriveContent } from "./services/content.js";
@@ -2100,6 +2101,8 @@ export async function main() {
   await server.connect(transport);
   logger.info(`proton-drive-mcp v${VERSION} running`);
   void sweepStaleTempDirs(); // after connect so it can never delay initialize; best-effort, never throws
+  // With OCR on and the Vision engine, build and warm the helper in the background so the first scan does not pay for it (reads no user data; never throws).
+  if (ocrEnabled()) setTimeout(() => void warmUpOcr(), 3000).unref();
 
   // Probe the CLI after connecting so a slow `version` can never delay
   // `initialize` (hosts time out at ~5s). A missing CLI still leaves the server

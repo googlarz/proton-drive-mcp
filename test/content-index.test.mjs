@@ -870,7 +870,7 @@ describe("content index review fixes", () => {
     assert.equal((await update(w)).documents, 1); // with a signature it settles, still one document
   });
 
-  it("surfaces the listing age, and forces a fresh walk when a cached listing is older than 60 s", async () => {
+  it("surfaces the listing age, and forces a fresh walk when a cached listing is older than 1 h (PROTON_DRIVE_CONTENT_INDEX_LISTING_MAX_AGE_MIN)", async () => {
     const w = world({ "/my-files/Docs/a.txt": "alpha" });
     const calls = [];
     const walk = (age) => async (_d, root, opts) => {
@@ -883,15 +883,26 @@ describe("content index review fixes", () => {
     assert.equal(fresh.listingAgeMs, 30_000);
     assert.equal(fresh.listingRefreshed, undefined);
     calls.length = 0;
-    const old = await update(w, {}, { walk: walk(120_000) });
+    const old = await update(w, {}, { walk: walk(2 * 3_600_000) });
     assert.equal(calls.length, 2);
     assert.equal(calls[0].refresh, undefined);
     assert.equal(calls[0].noDisk, true);
-    assert.equal(calls[0].maxListingAgeMs, 60_000, "the walk itself is asked for listings no older than 60 s (incremental when the index is on)");
+    assert.equal(calls[0].maxListingAgeMs, 3_600_000, "the walk itself is asked for listings no older than 1 h (incremental when the index is on)");
     assert.equal(calls[1].refresh, true, "a walk that ignores the age gets the full re-walk fallback");
     assert.equal(old.fromCache, false);
     assert.equal(old.listingAgeMs, 0);
     assert.equal(old.listingRefreshed, true);
+    // a 45 minute old cached listing is fine by default, too old with a 30 minute window
+    calls.length = 0;
+    await update(w, {}, { walk: walk(45 * 60_000) });
+    assert.equal(calls.length, 1);
+    process.env.PROTON_DRIVE_CONTENT_INDEX_LISTING_MAX_AGE_MIN = "30";
+    try {
+      calls.length = 0;
+      await update(w, {}, { walk: walk(45 * 60_000) });
+      assert.equal(calls[0].maxListingAgeMs, 30 * 60_000);
+      assert.equal(calls.length, 2);
+    } finally { delete process.env.PROTON_DRIVE_CONTENT_INDEX_LISTING_MAX_AGE_MIN; }
   });
 
   it("with PROTON_DRIVE_REMOTE_ROOTS, a search without a path and the status folder list only show what is inside the roots", async () => {

@@ -57,6 +57,7 @@ export async function driveRefreshIndex(drive: DriveService, o: RefreshIndexArgs
     callsMade: walk.callsMade,
     saved,
     elapsedMs: Date.now() - started,
+    ...(walk.budgetOverrunMs ? { budgetOverrunMs: walk.budgetOverrunMs } : {}),
     ...(failures.length ? { failedCount: failures.length, failed: failures.slice(0, 10) } : {}),
     ...(walk.changes ? { changes: walk.changes } : {}),
     note: notes.join(" ") || undefined,

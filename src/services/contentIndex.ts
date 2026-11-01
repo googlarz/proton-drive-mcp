@@ -2,7 +2,7 @@ import type { DriveService } from "./drive.js";
 import { walkTree, currentAccountKey, type WalkNode } from "./walk.js";
 import type { WalkFn } from "./analytics.js";
 import { loadDriveText, pickFormat } from "./content.js";
-import { ocrEnabled, OcrDeferredError } from "./ocr.js";
+import { ocrEnabled, ocrPreflight, ocrTimeoutMs, OcrDeferredError } from "./ocr.js";
 import { indexDir, deletePrivateFile, writePrivateStream } from "./walkIndex.js";
 import { SealedWriter, ContentIndexError, accountDigest, readSealed, readSealedAccount, SEALED_FILE_NAME } from "./contentSeal.js";
 import { ContentData, DataLoader, type DocRec, serializeData, termFrequencies, makeExcerpt, parseQuery, searchData, makeSnippet } from "./contentSearch.js";
@@ -23,8 +23,15 @@ export const DEFAULT_SEARCH_LIMIT = 10;
 export const MAX_SEARCH_LIMIT = 50;
 const CONCURRENCY = 2; // the CLI fails with "database is locked" under heavier parallelism
 const DEFAULT_MAX_MB = 200;
-/** A cached listing older than this is not trusted for an update: the walk is repeated. */
-const MAX_LISTING_AGE_MS = 60_000;
+/**
+ * A saved folder listing older than this is not trusted for an update: that folder is listed again. One hour by default, so a large
+ * folder that needs several updates, minutes apart, converges instead of being listed from scratch each time
+ * (PROTON_DRIVE_CONTENT_INDEX_LISTING_MAX_AGE_MIN overrides it, in minutes; 0 = always list again).
+ */
+const listingMaxAgeMs = (): number => {
+  const m = Number(process.env["PROTON_DRIVE_CONTENT_INDEX_LISTING_MAX_AGE_MIN"] ?? 60);
+  return (Number.isFinite(m) && m >= 0 ? m : 60) * 60_000;
+};
 /** Worst-case size of one more document (64 KB excerpt, 20k terms); extraction stops this far below the cap. */
 const DOC_MARGIN_BYTES = 400_000;
 
@@ -71,6 +78,9 @@ const NO_TEXT_AFTER_OCR = "no text, also after OCR";
 /** Files recorded as unreadable while OCR was off get one more try once it is on (the listing signature alone would say "unchanged"). */
 const readableWithOcrNow = (d: DocRec, n: WalkNode): boolean => {
   if (!ocrEnabled() || d.skipped === undefined) return false;
+  // A file that timed out is tried again once the time limit has changed (the skip text carries the limit it hit).
+  const hit = /OCR timed out after ([\d.]+) s/.exec(d.skipped);
+  if (hit) return Number(hit[1]) !== ocrTimeoutMs() / 1000;
   const f = pickFormat(n.path, n.mediaType ?? "");
   return (d.skipped === UNSUPPORTED && f === "image") || (d.skipped === NO_TEXT && f === "pdf");
 };
@@ -78,7 +88,9 @@ const readableWithOcrNow = (d: DocRec, n: WalkNode): boolean => {
 export interface ContentDeps {
   walk?: WalkFn;
   accountKey?: (drive: DriveService) => Promise<string | undefined>;
-  load?: (drive: DriveService, path: string) => Promise<{ text: string; ocr?: boolean }>;
+  load?: (drive: DriveService, path: string) => Promise<{ text: string; ocr?: boolean; ocrError?: string }>;
+  /** Throws when OCR cannot work at all (no engine, invalid language setting); default: the real check, unless `load` is replaced. */
+  ocrReady?: () => void;
   now?: () => number;
   keys?: KeyDeps;
   /** Result paths outside this are dropped (PROTON_DRIVE_REMOTE_ROOTS). */
@@ -234,10 +246,11 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
   const data = loadData(k.key, fp) ?? new ContentData();
 
   const walkFn = deps.walk ?? walkTree;
-  // maxListingAgeMs: with the opt-in index only folders listed over 60 s ago are listed again (see walkTree); the check below covers a walk that ignores it.
-  let walk = await walkFn(drive, root, { noDisk: true, budgetMs: budget, maxListingAgeMs: MAX_LISTING_AGE_MS });
+  // maxListingAgeMs: with the opt-in index only folders listed longer ago than this are listed again (see walkTree); the check below covers a walk that ignores it.
+  const maxListingAge = listingMaxAgeMs();
+  let walk = await walkFn(drive, root, { noDisk: true, budgetMs: budget, maxListingAgeMs: maxListingAge });
   let listingRefreshed = false;
-  if (walk.fromCache && walk.ageMs > MAX_LISTING_AGE_MS) {
+  if (walk.fromCache && walk.ageMs > maxListingAge) {
     walk = await walkFn(drive, root, { noDisk: true, refresh: true, budgetMs: Math.max(1, deadline - now()) });
     listingRefreshed = true;
   }
@@ -261,10 +274,13 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
     for (const [id, d] of data.docs) if (d.path.startsWith(root + "/") && !live.has(d.path)) { stale.add(id); removed++; }
   }
 
+  // A missing engine or a bad language setting would fail every image the same way: say so once, before anything is downloaded.
+  if (ocrEnabled() && todo.some((n) => pickFormat(n.path, n.mediaType ?? "") === "image")) (deps.ocrReady ?? (deps.load ? undefined : () => ocrPreflight()))?.();
+
   // OCR is slow: a file that gets the (single) OCR slot only after the budget ran out is not started, and not recorded.
   const load = deps.load ?? (async (d: DriveService, p: string) => {
     const r = await loadDriveText(d, p, { ocr: { deadlineAt: deadline } });
-    return { text: r.text, ocr: r.ocr !== undefined };
+    return { text: r.text, ocr: r.ocr !== undefined, ocrError: r.ocrError };
   });
   const failed: { path: string; error: string }[] = [];
   let indexed = 0, skippedDocs = 0, deferred = 0, next = 0, begun = 0, capReached = false;
@@ -280,8 +296,9 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
       const format = pickFormat(n.path, n.mediaType ?? "");
       if (!format) return skip(UNSUPPORTED);
       if ((n.size ?? 0) > maxFileBytes) return skip(`larger than ${maxFileBytes / 1048576} MB`);
-      const { text, ocr } = await load(drive, n.path);
+      const { text, ocr, ocrError } = await load(drive, n.path);
       const { tf, tokens } = termFrequencies(text);
+      if (tokens === 0 && ocrError) throw new Error(ocrError); // OCR could not run: not "no text", so it is retried (or recorded as a timeout)
       if (tokens === 0) return skip(ocrEnabled() && (format === "pdf" || format === "image") ? NO_TEXT_AFTER_OCR : NO_TEXT);
       data.addDoc({ ...base, tokens, excerpt: makeExcerpt(text), ...(ocr ? { ocr: true as const } : {}) }, tf);
       indexed++;

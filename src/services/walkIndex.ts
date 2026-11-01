@@ -94,7 +94,10 @@ export function readIndex(o: { requireWritable?: boolean } = {}): IndexFile | un
   if (!j || (j.version !== INDEX_VERSION && j.version !== 1) || typeof j.accountKey !== "string" || !Array.isArray(j.entries)) return undefined;
   const horizon = Date.now() + FUTURE_SKEW_MS;
   const ok = j.entries.every((e) => e && typeof e.key === "string" && typeof e.root === "string" && Number.isFinite(e.completedAt) && e.completedAt <= horizon && Array.isArray(e.nodes) && e.opts && Array.isArray(e.opts.exclude) && validListed(e.listed));
-  return ok ? (j as IndexFile) : undefined;
+  if (!ok) return undefined;
+  // A listing time ahead of the clock (it moved back) cannot be trusted: it counts as old.
+  for (const e of j.entries) if (e.listed) for (const k of Object.keys(e.listed)) if (e.listed[k]! > horizon) e.listed[k] = 0;
+  return j as IndexFile;
 }
 
 let warnedSize = false;

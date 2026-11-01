@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DriveService } from "../dist/services/drive.js";
-import { walkTree, resetWalkCacheForTests, flushWalkIndexForTests } from "../dist/services/walk.js";
+import { walkTree, resetWalkCacheForTests, flushWalkIndexForTests, invalidatePath } from "../dist/services/walk.js";
 import { driveTree } from "../dist/services/find.js";
 import { driveRefreshIndex } from "../dist/services/refreshIndex.js";
 import { readIndex, writeIndex, indexPath, indexDir, INDEX_VERSION } from "../dist/services/walkIndex.js";
@@ -423,17 +423,17 @@ describe("serving depth-limited requests from the saved index", () => {
 });
 
 describe("other walk users use the incremental mode", () => {
-  it("a noDisk caller reuses listings that are younger than the memory TTL and lists the rest", async () => {
+  it("a noDisk caller without maxListingAgeMs never reads the saved index: a remote deletion is visible", async () => {
     await seed();
-    ageListed({ "/my-files/a": 10 * 60_000 }); // a is 10 min old, everything else just read
-    const { svc, calls } = makeSvc(small());
+    const t = small();
+    t["/my-files/b"] = []; // z.txt deleted remotely; the saved listing of b is only seconds old
+    const { svc, calls } = makeSvc(t);
     const r = await walkTree(svc, "/my-files", { noDisk: true, budgetMs: 0 });
     assert.equal(r.complete, true);
-    assert.equal(r.foldersRefreshed, 1);
-    assert.equal(r.foldersReused, 3);
-    assert.equal(count(calls, "/my-files/a"), 1);
-    assert.equal(count(calls, "/my-files/b"), 0);
-    assert.ok(r.ageMs < 60_000);
+    assert.equal(r.foldersRefreshed, undefined, "a plain full walk, not an incremental one");
+    assert.ok(!paths(r).includes("/my-files/b/z.txt"));
+    assert.equal(count(calls, "/my-files/b"), 1);
+    assert.equal(count(calls, "/my-files"), 1, "no account check either");
   });
 
   it("the content index's 60 s window: listings read 10 s ago are reused, ones read 2 min ago are listed again", async () => {
@@ -481,7 +481,7 @@ describe("drive_refresh_index", () => {
 
   it("reports progress and an ETA, and converges", async () => {
     const t = { "/my-files": Array.from({ length: 6 }, (_, i) => folder(`f${i + 1}`)) };
-    for (let i = 1; i <= 6; i++) t[`/my-files/f${i}`] = [file("x")];
+    for (let i = 1; i <= 6; i++) t[`/my-files/f${i}`] = [file(`x${i}`)]; // uids are unique on the real drive
     const { svc } = makeSvc(t, { delay: 80 });
     const a = await driveRefreshIndex(svc, { timeBudgetMs: 1000 }, { walk: (s, p, o) => walkTree(s, p, { ...o, budgetMs: 300, concurrency: 1 }) });
     assert.equal(a.complete, false);
@@ -558,5 +558,182 @@ describe("drive_refresh_index in the server", () => {
       assert.equal(ok.isError, false, ok.text);
       assert.equal(JSON.parse(ok.text).complete, true);
     });
+  });
+});
+
+// ---- review fixes (1.8.0) ----------------------------------------------------------------------------------------------
+/** Like makeSvc, with a per-path delay in ms (default 0). */
+function makeSlowSvc(tree, delays = {}) {
+  const calls = [];
+  const runner = async (args) => {
+    const path = args[2];
+    calls.push(path);
+    if (delays[path]) await sleep(delays[path]);
+    const v = tree[path];
+    if (v === undefined) throw new Error(`Node not found: ${path}`);
+    return typeof v === "function" ? v() : v;
+  };
+  return { svc: new DriveService(runner), calls };
+}
+
+describe("review fixes: saved-tree safety", () => {
+  it("an account check that cannot be completed (unknown) neither restarts nor replaces the saved progress", async () => {
+    await seed();
+    ageListed(2 * HOUR);
+    const t = small();
+    let first = true;
+    t["/my-files"] = () => { if (first) { first = false; throw new Error("rate limited"); } return small()["/my-files"]; };
+    const { svc } = makeSvc(t);
+    await assert.rejects(slice(svc), /could not verify the account, try again/);
+    await flushWalkIndexForTests();
+    const e = readIndex().entries[0];
+    assert.equal(e.nodes.length, 8, "the saved tree survived");
+    assert.equal(Object.keys(e.listed).length, 4);
+    resetWalkCacheForTests();
+    const r = await slice(makeSvc(small()).svc); // the next call verifies and continues
+    assert.equal(r.complete, true);
+    assert.equal(r.nodes.length, 8);
+  });
+
+  it("a real account mismatch still starts from scratch", async () => {
+    await seed();
+    ageListed(2 * HOUR);
+    const t = small();
+    t["/my-files"] = [{ ...folder("a", "x-a"), parentUid: "other-drive" }, { ...folder("b", "x-b"), parentUid: "other-drive" }];
+    t["/my-files/a"] = [];
+    t["/my-files/b"] = [];
+    const r = await slice(makeSvc(t).svc);
+    assert.deepEqual(paths(r).sort(), ["/my-files/a", "/my-files/b"]);
+  });
+
+  it("a server write clears only the written node and its parent's listing time, keeping the rest of the saved tree", async () => {
+    await seed();
+    invalidatePath("/my-files/a/x.txt");
+    let e = readIndex().entries[0];
+    assert.ok(!e.nodes.some((n) => n.path === "/my-files/a/x.txt"), "the written node is dropped");
+    assert.ok(e.nodes.some((n) => n.path === "/my-files/a/deep/y.txt") && e.nodes.some((n) => n.path === "/my-files/b/z.txt"));
+    assert.deepEqual(Object.keys(e.listed).sort(), ["/my-files", "/my-files/a/deep", "/my-files/b"], "only a (the parent) lost its listing time");
+    // a written folder: its own and its descendants' listings are read again, the parent's too, nothing else
+    await seed();
+    invalidatePath("/my-files/a");
+    e = readIndex().entries[0];
+    assert.deepEqual(Object.keys(e.listed), ["/my-files/b"]);
+    assert.equal(e.nodes.length, 8, "the folder's cached contents stay as the baseline of the next diff");
+  });
+
+  it("a write at the walk root, and a write above it, are handled (everything re-listed / entry dropped)", async () => {
+    await seed();
+    invalidatePath("/my-files");
+    assert.deepEqual(readIndex().entries[0].listed, {});
+    assert.equal(readIndex().entries[0].nodes.length, 8);
+    await seed();
+    invalidatePath("/");
+    assert.equal(readIndex(), undefined, "an ancestor of the root removes the entry (and the empty file)");
+  });
+
+  it("a write unrelated to the saved root leaves the file untouched", async () => {
+    await seed();
+    invalidatePath("/trash");
+    assert.equal(readIndex().entries[0].nodes.length, 8);
+    assert.equal(Object.keys(readIndex().entries[0].listed).length, 4);
+  });
+
+  it("works on the loaded copy too: after a write the in-memory index no longer serves the written path", async () => {
+    await seed();
+    const t = small();
+    const { svc, calls } = makeSvc(t);
+    await walkTree(svc, "/my-files"); // served from the saved index, which is now loaded in memory
+    t["/my-files/b"] = [];
+    invalidatePath("/my-files/b/z.txt");
+    calls.length = 0;
+    const r = await walkTree(svc, "/my-files");
+    assert.ok(!paths(r).includes("/my-files/b/z.txt"));
+    assert.deepEqual(calls, ["/my-files/b"], "only the parent of the written node is listed again");
+  });
+
+  it("changes:true after an in-session write reports only the real delta, not the whole subtree", async () => {
+    await seed();
+    const t = small();
+    t["/my-files/a"] = [folder("deep"), file("x.txt", 20), file("new.txt", 3)]; // the write: an upload into a
+    const { svc, calls } = makeSvc(t);
+    await walkTree(svc, "/my-files"); // loads the saved index in this process
+    invalidatePath("/my-files/a/new.txt");
+    calls.length = 0;
+    const out = await driveRefreshIndex(svc, { changes: true, timeBudgetMs: 5000, maxAgeHours: 1 });
+    assert.deepEqual([out.changes.added, out.changes.removed, out.changes.modified], [1, 0, 0]);
+    assert.deepEqual(out.changes.samples.map((s) => `${s.kind}:${s.path}`), ["added:/my-files/a/new.txt"]);
+    assert.equal(out.foldersRefreshed, 1, "only the parent folder is listed again");
+    assert.equal(calls.filter((c) => c !== "/my-files").length, 1);
+    assert.equal(out.entries, 9);
+  });
+});
+
+describe("review fixes: applying listings", () => {
+  it("an item moved to another folder appears only at its new path while the old parent's listing is reused", async () => {
+    await seed();
+    ageListed({ "/my-files": 2 * HOUR, "/my-files/b": 2 * HOUR }); // a is young: its saved listing still has x.txt and deep
+    const t = small();
+    t["/my-files/a"] = [folder("deep"), file("x.txt", 20)];
+    t["/my-files/b"] = [file("z.txt", 7), file("x.txt", 20, { uid: "f-x.txt" }), folder("deep", "d-deep")];
+    t["/my-files/b/deep"] = [file("y.txt", 10)];
+    const r = await slice(makeSvc(t).svc);
+    assert.equal(r.complete, true);
+    assert.deepEqual(paths(r).filter((p) => p.endsWith("x.txt")), ["/my-files/b/x.txt"]);
+    assert.deepEqual(paths(r).filter((p) => p.includes("deep")), ["/my-files/b/deep", "/my-files/b/deep/y.txt"]);
+    await flushWalkIndexForTests();
+    const saved = readIndex().entries[0];
+    assert.deepEqual(Object.keys(saved.listed).sort(), ["/my-files", "/my-files/a", "/my-files/b", "/my-files/b/deep"]);
+  });
+
+  it("a listing result for a folder that was dropped meanwhile is not applied", async () => {
+    await seed();
+    ageListed({ "/my-files/a/deep": 3 * HOUR, "/my-files": 2 * HOUR });
+    const t = small();
+    t["/my-files"] = [folder("b"), folder(".git"), file("root.txt")]; // a is gone
+    const { svc } = makeSlowSvc(t, { "/my-files/a/deep": 150, "/my-files": 10 });
+    const r = await slice(svc, { concurrency: 2 });
+    assert.deepEqual(paths(r).filter((p) => p.startsWith("/my-files/a")), []);
+    await flushWalkIndexForTests();
+    assert.deepEqual(Object.keys(readIndex().entries[0].listed).sort(), ["/my-files", "/my-files/b"], "no resurrected listing for the dropped folder");
+  });
+
+  it("a listing time in the future (the clock moved back) counts as old", async () => {
+    await seed();
+    const f = readIndex();
+    f.entries[0].listed["/my-files/b"] = Date.now() + 10 * HOUR;
+    assert.equal(writeIndex(f), "ok");
+    assert.equal(readIndex().entries[0].listed["/my-files/b"], 0, "read back as old");
+    const { svc, calls } = makeSvc(small());
+    const r = await slice(svc);
+    assert.equal(r.foldersRefreshed, 1);
+    assert.equal(count(calls, "/my-files/b"), 1);
+  });
+});
+
+describe("review fixes: time budget", () => {
+  const wide = () => {
+    const t = { "/my-files": Array.from({ length: 10 }, (_, i) => folder(`f${i}`)) };
+    for (let i = 0; i < 10; i++) t[`/my-files/f${i}`] = [file("a")];
+    return t;
+  };
+
+  it("stops issuing new listings after ~70% of the budget", async () => {
+    const delays = { "/my-files": 400 };
+    for (let i = 0; i < 10; i++) delays[`/my-files/f${i}`] = 400;
+    const { svc, calls } = makeSlowSvc(wide(), delays);
+    const t0 = Date.now();
+    const r = await slice(svc, { budgetMs: 1000, concurrency: 1 });
+    // root 0-400, f0 400-800; at 800 ms (>= 700) nothing new starts. Without the soft stop f1 would start and end at 1200.
+    assert.equal(calls.length, 2);
+    assert.ok(Date.now() - t0 < 1000, "finished inside the budget");
+    assert.equal(r.partial, true);
+    assert.equal(r.budgetOverrunMs, undefined);
+  });
+
+  it("reports budgetOverrunMs when an already started listing runs past the budget (also through drive_refresh_index)", async () => {
+    const { svc } = makeSlowSvc(wide(), { "/my-files": 1500 });
+    const out = await driveRefreshIndex(svc, { timeBudgetMs: 1000 });
+    assert.ok(out.budgetOverrunMs >= 400 && out.budgetOverrunMs < 1500, `overrun ${out.budgetOverrunMs}`);
+    assert.equal(out.complete, false);
   });
 });

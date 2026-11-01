@@ -9,7 +9,8 @@ import { retryOnLocked } from "../utils/lockRetry.js";
 import { showValue } from "../utils/text.js";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
-import { isSparsePdfText, ocrBuffer, ocrEnabled, ocrImageExt, ocrMaxBytes, type OcrDeps, type OcrEngine } from "./ocr.js";
+import { isSparsePdfText, ocrBuffer, ocrEnabled, ocrImageExt, ocrMaxBytes, OcrDeferredError, type OcrDeps, type OcrEngine } from "./ocr.js";
+import { PDF_MAX_PAGES } from "./contentExtract.js";
 
 export { docxXmlToText } from "./contentExtract.js";
 export { isSparsePdfText } from "./ocr.js";
@@ -162,7 +163,7 @@ async function downloadBytes(drive: DriveService, path: string, cap: number): Pr
 }
 
 /** Downloads and extracts the whole text of a file (capped at MAX_EXTRACT_CHARS), with the same checks as drive_read_content. */
-export async function loadDriveText(drive: DriveService, path: string, deps: ReadContentDeps = {}): Promise<{ format: string; size: number; text: string; note?: string; capped: boolean; ocr?: { engine: OcrEngine; pagesOcrd: number } }> {
+export async function loadDriveText(drive: DriveService, path: string, deps: ReadContentDeps = {}): Promise<{ format: string; size: number; text: string; note?: string; capped: boolean; ocr?: { engine: OcrEngine; pagesOcrd: number }; /** OCR was tried on a PDF with little text and failed: the text layer is returned without it. */ ocrError?: string }> {
   const node = ((await drive.info(path)) ?? {}) as Record<string, any>;
   const mediaType = typeof node.mediaType === "string" ? node.mediaType : "";
   if (node.type === "folder" || node.type === "album") throw new Error(`${showValue(path)} is a folder; drive_read_content reads files (use drive_list).`);
@@ -171,12 +172,13 @@ export async function loadDriveText(drive: DriveService, path: string, deps: Rea
   }
   const format = pickFormat(path, mediaType);
   if (!format) throw new Error(`unsupported format for ${showValue(path)}${mediaType ? ` (${showValue(mediaType, 60, 20)})` : ""}. Supported: ${supported()}.`);
-  const cap = format === "image" ? Math.min(readMaxBytes(), ocrMaxBytes()) : readMaxBytes();
+  // OCR input has its own cap (PROTON_DRIVE_OCR_MAX_MB, default 30 MB), independent of the 10 MB read cap; the global 50 MB limit still applies.
+  const cap = format === "image" ? Math.min(ocrMaxBytes(), HARD_READ_MAX_BYTES) : format === "pdf" && ocrEnabled() ? Math.min(Math.max(readMaxBytes(), ocrMaxBytes()), HARD_READ_MAX_BYTES) : readMaxBytes();
   // claimedSize is uploader-controlled: a lying claim only costs download bandwidth, since the
   // post-download lstat size check (and the worker limits) still apply to the real bytes.
   const declared = node.activeRevision?.claimedSize;
   if (typeof declared === "number" && declared > cap) {
-    throw new Error(`${showValue(path)} is ${declared} bytes, over the read cap of ${cap} bytes (PROTON_DRIVE_READ_MAX_BYTES, max ${HARD_READ_MAX_BYTES}${format === "image" ? "; images also PROTON_DRIVE_OCR_MAX_BYTES" : ""}). Use drive_download.`);
+    throw new Error(`${showValue(path)} is ${declared} bytes, over the read cap of ${cap} bytes (${format === "image" ? "PROTON_DRIVE_OCR_MAX_MB" : `PROTON_DRIVE_READ_MAX_BYTES${format === "pdf" && ocrEnabled() ? ", scans PROTON_DRIVE_OCR_MAX_MB" : ""}`}, max ${HARD_READ_MAX_BYTES} bytes). Use drive_download.`);
   }
 
   const buf = await retryOnLocked(() => downloadBytes(drive, path, cap));
@@ -184,6 +186,7 @@ export async function loadDriveText(drive: DriveService, path: string, deps: Rea
   let note: string | undefined;
   let capped = false;
   let ocr: { engine: OcrEngine; pagesOcrd: number } | undefined;
+  let ocrError: string | undefined;
   const maxText = deps.worker?.maxTextChars ?? MAX_EXTRACT_CHARS;
   const recognize = async (ext: string) => {
     const r = await ocrBuffer(buf, ext, maxText, deps.ocr);
@@ -197,18 +200,33 @@ export async function loadDriveText(drive: DriveService, path: string, deps: Rea
     if (!text.trim()) note = "no text found by OCR";
   } else {
     let pages: number | undefined;
-    ({ text, note, capped, pages } = await extractInWorker(format, buf, deps.worker ?? {}));
-    if (capped) note = [note, `text capped at ${maxText} characters; the rest of the file was not read`].filter(Boolean).join("; ");
-    if (format === "pdf" && ocrEnabled() && isSparsePdfText(text, pages ?? 1)) {
-      if (buf.length > ocrMaxBytes()) note = [note, `not read with OCR: the file is over PROTON_DRIVE_OCR_MAX_BYTES (${ocrMaxBytes()} bytes)`].filter(Boolean).join("; ");
+    // A PDF over the read cap is only here because OCR may take it (see cap): its text layer is not parsed.
+    const scanOnly = format === "pdf" && buf.length > readMaxBytes();
+    if (scanOnly) {
+      text = "";
+      capped = false;
+      note = `the PDF is over the read cap (PROTON_DRIVE_READ_MAX_BYTES, ${readMaxBytes()} bytes), so only OCR was used`;
+    } else {
+      ({ text, note, capped, pages } = await extractInWorker(format, buf, deps.worker ?? {}));
+      if (capped) note = [note, `text capped at ${maxText} characters; the rest of the file was not read`].filter(Boolean).join("; ");
+    }
+    if (format === "pdf" && ocrEnabled() && (scanOnly || isSparsePdfText(text, Math.min(pages ?? 1, PDF_MAX_PAGES)))) {
+      if (buf.length > ocrMaxBytes()) note = [note, `not read with OCR: the file is over PROTON_DRIVE_OCR_MAX_MB (${ocrMaxBytes()} bytes)`].filter(Boolean).join("; ");
       else {
-        const r = await recognize("pdf");
-        if (r.text.trim()) ({ text, capped, note, ocr } = r);
-        else note = [note, "no text found by OCR either"].filter(Boolean).join("; ");
+        try {
+          const r = await recognize("pdf");
+          if (r.text.trim().length > text.trim().length) ({ text, capped, note, ocr } = scanOnly ? { ...r, note: [note, r.note].join("; ") } : r);
+          else note = [note, text.trim() ? "OCR found no more text than the text layer, which is returned" : "no text found by OCR either"].filter(Boolean).join("; ");
+        } catch (e) {
+          // The text layer (if any) is still a valid answer; a deferral or a cancellation is not a failure of this file.
+          if (e instanceof OcrDeferredError || scanOnly || callContext.getStore()?.signal?.aborted) throw e;
+          ocrError = `OCR unavailable/failed: ${(e instanceof Error ? e.message : String(e)).split("\n")[0]!.slice(0, 200)}`;
+          note = [note, ocrError].filter(Boolean).join("; ");
+        }
       }
     }
   }
-  return { format, size: buf.length, text: text.replaceAll("\0", ""), note, capped, ...(ocr ? { ocr } : {}) };
+  return { format, size: buf.length, text: text.replaceAll("\0", ""), note, capped, ...(ocr ? { ocr } : {}), ...(ocrError ? { ocrError } : {}) };
 }
 
 export async function readDriveContent(drive: DriveService, args: ReadContentArgs, deps: ReadContentDeps = {}): Promise<ReadContentResult> {

@@ -11,4 +11,8 @@ export const logger = {
   error: (...args: unknown[]) => {
     process.stderr.write(`[ERROR] ${args.join(" ")}\n`);
   },
+  /** Only with PROTON_DRIVE_DEBUG=1. */
+  debug: (...args: unknown[]) => {
+    if (process.env["PROTON_DRIVE_DEBUG"] === "1") process.stderr.write(`[DEBUG] ${args.join(" ")}\n`);
+  },
 };

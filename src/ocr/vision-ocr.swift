@@ -1,7 +1,7 @@
 // Local OCR helper for proton-drive-mcp (macOS only). Compiled on first use with `swiftc -O` into the
 // private cache directory; see src/services/ocr.ts. Nothing here touches the network.
 //
-// usage: vision-ocr <absolute path to an image or PDF> <max pages> [languages, comma separated]
+// usage: vision-ocr <absolute path to an image or PDF> <max pages> [languages, comma separated] [max image pixels]
 // stdout: {"engine":"vision","totalPages":N,"pages":[{"page":1,"text":"..."}]}
 // A failure prints one line to stderr (never recognized text) and exits non-zero.
 import Foundation
@@ -12,7 +12,7 @@ import ImageIO
 
 let PDF_DPI = 200.0
 let MAX_SIDE_PIXELS = 9000.0
-let MAX_IMAGE_PIXELS = 120_000_000.0
+let DEFAULT_MAX_IMAGE_PIXELS = 100_000_000.0
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
@@ -22,6 +22,12 @@ func fail(_ message: String) -> Never {
 let args = CommandLine.arguments
 guard args.count >= 3, let maxPages = Int(args[2]), maxPages >= 1 else { fail("usage: vision-ocr <path> <max pages> [languages]") }
 let path = args[1]
+// The pixel limit comes from the caller (PROTON_DRIVE_OCR_MAX_PIXELS); a value that is not a positive number is refused, not ignored.
+var maxImagePixels = DEFAULT_MAX_IMAGE_PIXELS
+if args.count > 4 {
+    guard let v = Double(args[4]), v.isFinite, v > 0 else { fail("invalid pixel limit") }
+    maxImagePixels = v
+}
 let requested = args.count > 3 ? args[3].split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } : []
 
 // Languages are matched by primary subtag against what Vision supports, so an unsupported language is dropped, never an error.
@@ -84,10 +90,17 @@ if url.pathExtension.lowercased() == "pdf" {
     guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
           CGImageSourceGetCount(source) > 0 else { fail("could not read the image") }
     let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
-    let w = (props?[kCGImagePropertyPixelWidth] as? Double) ?? 0
-    let h = (props?[kCGImagePropertyPixelHeight] as? Double) ?? 0
-    if w * h > MAX_IMAGE_PIXELS { fail("the image is too large to read safely") }
+    // Fail closed: a missing, zero or non-numeric width or height is a refusal, never "small enough". The header can be a NSNumber, Int or Double.
+    func dimension(_ value: Any?) -> Double? {
+        if let n = value as? NSNumber { let d = n.doubleValue; return d.isFinite && d > 0 ? d : nil }
+        if let i = value as? Int { return i > 0 ? Double(i) : nil }
+        if let d = value as? Double { return d.isFinite && d > 0 ? d : nil }
+        return nil
+    }
+    guard let w = dimension(props?[kCGImagePropertyPixelWidth]), let h = dimension(props?[kCGImagePropertyPixelHeight]) else { fail("the image size could not be determined") }
+    if w * h > maxImagePixels { fail("the image is too large to read safely") }
     guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { fail("could not decode the image") }
+    if Double(image.width) * Double(image.height) > maxImagePixels { fail("the image is too large to read safely") }
     let raw = (props?[kCGImagePropertyOrientation] as? UInt32) ?? 1
     let orientation = CGImagePropertyOrientation(rawValue: raw) ?? .up
     pages.append(["page": 1, "text": recognize(image, orientation: orientation)])

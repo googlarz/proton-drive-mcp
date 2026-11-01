@@ -82,6 +82,8 @@ export interface WalkResult {
   foldersRemaining?: number;
   /** Incremental walks only: age of the oldest folder listing the result is built from (also `ageMs`). */
   oldestListingAgeMs?: number;
+  /** Incremental walks only: ms the call ran past its time budget because listings already under way are awaited (absent when none). */
+  budgetOverrunMs?: number;
   /** Incremental walks with trackChanges only. */
   changes?: WalkChanges;
 }
@@ -118,6 +120,7 @@ const defaultBudgetMs = () => {
   return Number.isFinite(v) && v >= 0 ? v : DEFAULT_BUDGET_MS;
 };
 const RETRY_PAUSE_MS = 300;
+const SOFT_BUDGET_SHARE = 0.7;
 const CACHE_ENTRIES = 16;
 
 /** Nodes are shared with the cache: treat them as read-only. */
@@ -218,7 +221,7 @@ interface WalkParams {
   key: string;
   excludeKey: string;
   /** Set for an incremental walk: it merges fresh listings into the saved tree `entry` (none = start from the root) instead of walking from scratch. */
-  inc?: { entry?: IndexEntry; maxAgeMs: number; deadlineAt?: number; track: boolean };
+  inc?: { entry?: IndexEntry; maxAgeMs: number; /** No new listing starts after this (70% of the budget). */ deadlineAt?: number; /** The budget's end, for budgetOverrunMs. */ budgetAt?: number; track: boolean };
 }
 /** Walk state a time-budget snapshot can read while the walk runs. */
 interface LiveWalk { nodes: WalkNode[]; skipped: { path: string; reason: string }[]; queue: { path: string; depth: number }[]; active: Set<string>; callsMade: number; listed: Map<string, number> }
@@ -347,6 +350,8 @@ interface IncStats {
   /** Why the walk stopped with listings left to do. */
   stop?: "time" | "calls";
   oldestListedAt?: number;
+  /** Ms past the time budget at the end of the call (0 = within it). */
+  overrunMs: number;
   changes?: WalkChanges;
 }
 
@@ -356,18 +361,21 @@ interface Tree {
   kids: Map<string, WalkNode[]>;
   /** Folder path -> uid, for every folder node below the root. */
   folders: Map<string, string>;
+  /** Node uid -> its path in this tree, to catch an item that moved to another folder. */
+  uids: Map<string, string>;
   listed: Map<string, number>;
   changes?: WalkChanges;
 }
 
 function treeFromEntry(root: string, exclude: Set<string>, entry: IndexEntry | undefined, track: boolean): Tree {
-  const t: Tree = { root, kids: new Map(), folders: new Map(), listed: new Map(), ...(track ? { changes: { added: 0, removed: 0, modified: 0, samples: [] } } : {}) };
+  const t: Tree = { root, kids: new Map(), folders: new Map(), uids: new Map(), listed: new Map(), ...(track ? { changes: { added: 0, removed: 0, modified: 0, samples: [] } } : {}) };
   if (!entry) return t;
   for (const n of entry.nodes) {
     const parent = parentPath(n.path);
     const list = t.kids.get(parent);
     if (list) list.push(n); else t.kids.set(parent, [n]);
     if (n.type === "folder") t.folders.set(n.path, n.uid);
+    t.uids.set(n.uid, n.path);
   }
   if (entry.listed) {
     for (const [path, at] of Object.entries(entry.listed)) if (path === root || t.folders.has(path)) t.listed.set(path, at);
@@ -407,7 +415,11 @@ function dropSubtree(t: Tree, n: WalkNode): void {
   const stack = [n.path];
   while (stack.length) {
     const path = stack.pop()!;
-    for (const c of t.kids.get(path) ?? []) { noteChange(t, "removed", c.path, false); if (c.type === "folder") stack.push(c.path); }
+    for (const c of t.kids.get(path) ?? []) {
+      noteChange(t, "removed", c.path, false);
+      if (t.uids.get(c.uid) === c.path) t.uids.delete(c.uid);
+      if (c.type === "folder") stack.push(c.path);
+    }
     t.kids.delete(path);
     t.listed.delete(path);
     t.folders.delete(path);
@@ -425,6 +437,22 @@ function applyListing(t: Tree, folder: string, fresh: WalkNode[], at: number): W
     if (same(o, freshBy.get(o.uid))) continue;
     noteChange(t, "removed", o.path);
     dropSubtree(t, o);
+    if (t.uids.get(o.uid) === o.path) t.uids.delete(o.uid);
+  }
+  // An item that now appears under this folder but is still cached under another one moved here: forget the old location
+  // (the old parent's listing may be reused, so nothing else would remove it).
+  for (const n of fresh) {
+    const prev = t.uids.get(n.uid);
+    if (prev === undefined || prev === n.path) continue;
+    const from = parentPath(prev);
+    const siblings = t.kids.get(from);
+    const gone = siblings?.find((x) => x.uid === n.uid && x.path === prev);
+    if (gone) {
+      t.kids.set(from, siblings!.filter((x) => x !== gone));
+      noteChange(t, "removed", prev);
+      dropSubtree(t, gone);
+    }
+    t.uids.delete(n.uid);
   }
   const added: WalkNode[] = [];
   for (const n of fresh) {
@@ -434,6 +462,7 @@ function applyListing(t: Tree, folder: string, fresh: WalkNode[], at: number): W
     if (n.type === "folder") { t.folders.set(n.path, n.uid); added.push(n); }
   }
   t.kids.set(folder, fresh);
+  for (const n of fresh) t.uids.set(n.uid, n.path);
   t.listed.set(folder, at);
   return added;
 }
@@ -449,7 +478,7 @@ async function runIncremental(svc: DriveService, p: WalkParams, signal: AbortSig
   const t = treeFromEntry(root, exclude, inc.entry, inc.track);
   const cutoff = Date.now() - inc.maxAgeMs;
   const listable = (path: string) => path === root || !exclude.has(baseName(path));
-  const stale = (path: string) => { const at = t.listed.get(path); return at === undefined || at < cutoff; };
+  const stale = (path: string) => { const at = t.listed.get(path); return at === undefined || at < cutoff || at > Date.now(); }; // a time in the future: the clock moved back
   const all = [root, ...t.folders.keys()].filter(listable);
   const todo = all.filter(stale)
     .map((path) => ({ path, uid: path === root ? "" : t.folders.get(path)!, at: t.listed.get(path) ?? 0, depth: depthOf(path) }))
@@ -485,6 +514,7 @@ async function runIncremental(svc: DriveService, p: WalkParams, signal: AbortSig
         live.active.add(job.path);
         listWithRetry(job.path)
           .then((entries) => {
+            if (job.path !== root && t.folders.get(job.path) !== job.uid) return; // dropped or replaced while this listing was under way
             const children = entries.filter(({ item }) => typeof item.uid === "string").map(toNode);
             for (const f of applyListing(t, job.path, children, Date.now())) if (listable(f.path)) discovered.push({ path: f.path, uid: f.uid });
             refreshed++;
@@ -510,9 +540,10 @@ async function runIncremental(svc: DriveService, p: WalkParams, signal: AbortSig
   }
   skipped.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const complete = skipped.length === 0;
+  const overrunMs = inc.budgetAt === undefined ? 0 : Math.max(0, Date.now() - inc.budgetAt);
   return {
     nodes: flatten(t), skipped, callsMade: live.callsMade, complete, listed: t.listed,
-    inc: { refreshed, reused, remaining: skipped.length, failed: failed.size, ...(complete ? {} : { stop }), oldestListedAt: oldest, changes: t.changes },
+    inc: { refreshed, reused, remaining: skipped.length, failed: failed.size, ...(complete ? {} : { stop }), oldestListedAt: oldest, overrunMs, changes: t.changes },
   };
 }
 
@@ -525,6 +556,7 @@ function incResult(root: string, w: RawWalk): WalkResult {
     ...(s.reused > 0 || !w.complete ? { stale: true } : {}),
     ...(s.stop ? { partial: true, continuing: true } : {}),
     foldersRefreshed: s.refreshed, foldersReused: s.reused, foldersRemaining: s.remaining, oldestListingAgeMs: ageMs,
+    ...(s.overrunMs > 0 ? { budgetOverrunMs: s.overrunMs } : {}),
     ...(s.changes ? { changes: s.changes } : {}),
   };
 }
@@ -602,7 +634,7 @@ function raceAbort<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T
  * not remembered. The check is shared by concurrent callers on its own signal, so one
  * caller's abort cannot fail the others, and it is repeated after 10 minutes.
  */
-async function verifyDisk(svc: DriveService, signal: AbortSignal | undefined): Promise<boolean> {
+async function verifyDisk(svc: DriveService, signal: AbortSignal | undefined): Promise<Verdict> {
   if (diskVerified && Date.now() - diskVerified.at > VERIFY_TTL_MS) diskVerified = undefined;
   if (!diskVerified) {
     const ctl = new AbortController();
@@ -622,7 +654,7 @@ async function verifyDisk(svc: DriveService, signal: AbortSignal | undefined): P
     diskVerified = rec;
     void promise.then((v) => { if (v === "unknown" && diskVerified === rec) diskVerified = undefined; });
   }
-  return (await raceAbort(diskVerified.promise, signal)) === "match";
+  return raceAbort(diskVerified.promise, signal);
 }
 
 /** Age of a saved tree = its oldest folder listing (entries without per-folder times were saved complete at completedAt). */
@@ -669,11 +701,16 @@ const sameScope = (e: IndexEntry, p: WalkParams) => e.root === p.root && e.opts.
 const incPossible = (p: WalkParams) => indexEnabled() && indexMaxAgeMs() > 0 && p.maxDepth === undefined && isUnder(p.root, ACCOUNT_ROOT);
 
 /** The saved tree for exactly this scope (any age, complete or partial), once the index is proven to belong to the signed-in account. */
-async function incSeed(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined, check: AccountCheck): Promise<IndexEntry | undefined> {
+async function incSeed(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined, check: AccountCheck, resumable: boolean): Promise<IndexEntry | undefined> {
   const find = () => loadDisk()?.entries.find((e) => sameScope(e, p));
-  if (check.failed || !find()) return undefined;
-  if (!(await verifyDisk(svc, signal))) { check.failed = true; return undefined; }
-  return find();
+  if (!find()) return undefined;
+  const verdict = check.failed ? "unknown" : await verifyDisk(svc, signal);
+  if (verdict === "match") return find();
+  // Only a real mismatch (the file was discarded) starts from scratch. When the check just could not be made (rate limit, network) a
+  // resumable call must not run on an empty seed: saving it would replace the saved progress.
+  check.failed = true;
+  if (verdict === "unknown" && resumable) throw new Error("could not verify the account, try again");
+  return undefined;
 }
 
 let lastPersistOk = false;
@@ -761,7 +798,7 @@ async function diskLookup(svc: DriveService, p: WalkParams, signal: AbortSignal 
   if (!indexEnabled() || indexMaxAgeMs() <= 0) return undefined;
   const find = () => pick(diskCandidates(), p.root, p.maxDepth, p.key, p.excludeKey, p.exclude);
   if (!find()) return undefined;
-  if (!(await verifyDisk(svc, signal))) { check.failed = true; return undefined; }
+  if ((await verifyDisk(svc, signal)) !== "match") { check.failed = true; return undefined; }
   const hit = find(); // the file may have been invalidated or discarded while we checked the account
   if (!hit) return undefined;
   const res = fromCache(hit.e, p.root, p.maxDepth, p.exclude, hit.exact);
@@ -792,9 +829,11 @@ export async function walkTree(svc: DriveService, rootPath: string, opts: WalkOp
   const excludeKey = excludeList.join("\0");
   const key = [root, maxDepth ?? "", maxCalls, excludeKey].join("\0");
   const params: WalkParams = { root, maxDepth, maxCalls, concurrency, excludeList, exclude, key, excludeKey };
-  // Oldest listing the caller accepts. Callers that cannot use saved data (noDisk) get what the memory cache would give.
+  // Oldest listing the caller accepts. Callers that cannot use saved data (noDisk) read the saved index only when they name an age.
+  const startedAt = Date.now();
   const explicitAge = opts.maxListingAgeMs !== undefined && Number.isFinite(opts.maxListingAgeMs) && opts.maxListingAgeMs >= 0 ? opts.maxListingAgeMs : undefined;
-  const listingAgeMs = explicitAge ?? (opts.noDisk ? ttlMs() : Math.min(folderMaxAgeMs(), indexMaxAgeMs()));
+  const listingAgeMs = explicitAge ?? Math.min(folderMaxAgeMs(), indexMaxAgeMs());
+  const useSaved = !opts.noDisk || explicitAge !== undefined;
   const check: AccountCheck = { failed: false };
   if (!opts.refresh && !opts.resumable) {
     const hit = lookup(root, maxDepth, key, excludeKey, exclude);
@@ -807,8 +846,9 @@ export async function walkTree(svc: DriveService, rootPath: string, opts: WalkOp
 
   const budgetMs = opts.budgetMs !== undefined && Number.isFinite(opts.budgetMs) && opts.budgetMs >= 0 ? opts.budgetMs : defaultBudgetMs();
   if (!opts.refresh && listingAgeMs > 0 && incPossible(params)) {
-    const entry = await incSeed(svc, params, signal, check);
-    if (entry || opts.resumable) params.inc = { entry, maxAgeMs: listingAgeMs, track: opts.trackChanges === true, deadlineAt: budgetMs > 0 ? Date.now() + budgetMs : undefined };
+    const entry = useSaved ? await incSeed(svc, params, signal, check, opts.resumable === true) : undefined;
+    // New listings stop at 70% of the budget: listings already under way are awaited, so the call still ends near the budget.
+    if (entry || opts.resumable) params.inc = { entry, maxAgeMs: listingAgeMs, track: opts.trackChanges === true, deadlineAt: budgetMs > 0 ? startedAt + budgetMs * SOFT_BUDGET_SHARE : undefined, budgetAt: budgetMs > 0 ? startedAt + budgetMs : undefined };
   }
   const rec = joinOrStartWalk(svc, params);
   // An incremental walk stops itself at its deadline (and saves its progress), so nobody takes a snapshot of it.
@@ -896,7 +936,31 @@ function snapshot(rec: WalkRec & { fg: NonNullable<WalkRec["fg"]> }, budgetMs: n
   };
 }
 
-/** Drop cached walks that contain `path` (call after the server itself writes there). */
+/** Listing times of an entry; a version 1 entry saved complete walks only, so every folder a walk of its scope lists counts as read at completedAt. */
+function listedOf(e: IndexEntry): Record<string, number> {
+  if (e.listed) return { ...e.listed };
+  const out: Record<string, number> = { [e.root]: e.completedAt };
+  const ex = new Set(e.opts.exclude), rootDepth = depthOf(e.root), md = e.opts.maxDepth;
+  for (const n of e.nodes) if (n.type === "folder" && !ex.has(baseName(n.path)) && !(md !== undefined && depthOf(n.path) - rootDepth >= md)) out[n.path] = e.completedAt;
+  return out;
+}
+
+/**
+ * The saved entry after the server wrote at `p`: undefined = drop it, the same object = untouched. The written node is forgotten when
+ * it is a file, the listing times of its parent and (a folder) of everything below it are cleared so the next slice lists them
+ * again, and everything else stays: the kept nodes are the baseline that the re-listing diffs against.
+ */
+function invalidateEntry(e: IndexEntry, p: string): IndexEntry | undefined {
+  if (isUnder(e.root, p)) return e.root === p ? { ...e, listed: {} } : undefined; // p is the root (all of it is read again) or above it (the root itself may be gone)
+  if (!isUnder(p, e.root)) return e;
+  const listed = listedOf(e);
+  delete listed[parentPath(p)];
+  for (const k of Object.keys(listed)) if (isUnder(k, p)) delete listed[k];
+  const written = e.nodes.find((n) => n.path === p);
+  return { ...e, listed, nodes: written?.type === "file" ? e.nodes.filter((n) => n !== written) : e.nodes };
+}
+
+/** Called after the server itself writes at `path`: cached walks that contain it go, the saved index loses only what the write touched. */
 export function invalidatePath(path: string): void {
   const p = normalizeRoot(path);
   const related = (root: string) => isUnder(root, p) || isUnder(p, root);
@@ -908,17 +972,18 @@ export function invalidatePath(path: string): void {
     // A foreground walk someone still waits for finishes for them (as before) but is not cached.
     if (!r.fg || r.fg.waiters === 0) r.controller.abort(new Error("walk superseded"));
   }
+  const apply = (entries: IndexEntry[]) => entries.map((e) => invalidateEntry(e, p)).filter((e): e is IndexEntry => e !== undefined);
   // Memory first: nothing related may be served from the loaded state, whatever happens to the file.
   if (disk) {
-    const keepMem = disk.entries.filter((e) => !related(e.root));
+    const keepMem = apply(disk.entries);
     disk = keepMem.length ? { accountKey: disk.accountKey, entries: keepMem } : null;
   }
   if (!indexEnabled()) return;
   try {
     const f = readIndex(); // re-read: another process may have saved since we loaded
     if (!f) return;
-    const keep = f.entries.filter((e) => !related(e.root));
-    if (keep.length === f.entries.length) return;
+    const keep = apply(f.entries);
+    if (keep.length === f.entries.length && keep.every((e, i) => e === f.entries[i])) return;
     // If the rewrite does not succeed, remove the file so no deleted/moved item can outlive this call.
     if (keep.length === 0 || writeIndex({ ...f, savedAt: Date.now(), entries: keep }) !== "ok") deleteIndex();
   } catch {

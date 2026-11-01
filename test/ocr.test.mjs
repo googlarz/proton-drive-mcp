@@ -4,11 +4,11 @@ import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, realpathSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, realpathSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chooseEngines, ocrBuffer, ocrImageExt, ocrLanguages, isSparsePdfText, runOcrTool, resolveTool, OcrDeferredError, NO_ENGINE } from "../dist/services/ocr.js";
+import { chooseEngines, ocrBuffer, ocrImageExt, ocrLanguages, isSparsePdfText, runOcrTool, resolveTool, OcrDeferredError, NO_ENGINE, imageDimensions, ocrPreflight, warmUpOcr } from "../dist/services/ocr.js";
 import { loadDriveText, readDriveContent, pickFormat } from "../dist/services/content.js";
 import { driveReadMany } from "../dist/services/readMany.js";
 import { driveContentIndex, driveSearchContent } from "../dist/services/contentIndex.js";
@@ -22,7 +22,7 @@ const SAMPLE_PNG = readFileSync(join(HERE, "fixtures", "ocr-sample.png"));
 const SCAN_PDF = readFileSync(join(HERE, "fixtures", "ocr-scan-3pages.pdf"));
 const needUnpdf = await skipUnlessOptional("unpdf");
 
-const ENV_KEYS = ["PROTON_DRIVE_OCR", "PROTON_DRIVE_OCR_ENGINE", "PROTON_DRIVE_OCR_LANGS", "PROTON_DRIVE_OCR_MAX_PAGES", "PROTON_DRIVE_OCR_MAX_BYTES", "PROTON_DRIVE_OCR_TIMEOUT_MS",
+const ENV_KEYS = ["PROTON_DRIVE_OCR", "PROTON_DRIVE_OCR_ENGINE", "PROTON_DRIVE_OCR_LANGS", "PROTON_DRIVE_OCR_MAX_PAGES", "PROTON_DRIVE_OCR_MAX_MB", "PROTON_DRIVE_OCR_MAX_PIXELS", "PROTON_DRIVE_OCR_TIMEOUT_MS", "PROTON_DRIVE_READ_MAX_BYTES",
   "PROTON_DRIVE_INDEX_DIR", "PROTON_DRIVE_CONTENT_INDEX", "PROTON_DRIVE_CONTENT_INDEX_KEY", "PATH"];
 let savedEnv;
 let tmps;
@@ -39,7 +39,7 @@ const ocrDirs = () => readdirSync(tmpdir()).filter((n) => n.startsWith("pdmcp-oc
  * Writes executable node scripts into a fresh dir. `tesseract` behaviour: print | fail | hang | slow. Returns { dir, which, calls() }.
  * `which` maps a command name to its shim (or undefined), like resolveTool.
  */
-function makeShims({ tesseract = "print", pdfPages = 2, pdftoppm = true, swiftc = false, version = "tesseract 5.3.0" } = {}) {
+function makeShims({ tesseract = "print", pdfPages = 2, pdftoppm = true, pdfinfo = null, swiftc = false, version = "tesseract 5.3.0" } = {}) {
   const dir = mkTmp("pdocr-shims-");
   const log = join(dir, "calls.jsonl");
   const pidFile = join(dir, "grandchild.pid");
@@ -58,6 +58,7 @@ function makeShims({ tesseract = "print", pdfPages = 2, pdftoppm = true, swiftc 
     const pp = head + `log({tool:'pdftoppm',argv});const li=argv.indexOf('-l');const last=Number(argv[li+1]);const prefix=argv[argv.length-1];const n=Math.min(last,${pdfPages});for(let i=1;i<=n;i++)fs.writeFileSync(prefix+'-'+String(i).padStart(2,'0')+'.png','x');`;
     writeFileSync(join(dir, "pdftoppm"), pp, { mode: 0o755 });
   }
+  if (pdfinfo) writeFileSync(join(dir, "pdfinfo"), head + `log({tool:'pdfinfo',argv});${JSON.stringify(pdfinfo)}.forEach((s,i)=>console.log('Page '.padEnd(8)+(i+1)+' size: '+s[0]+' x '+s[1]+' pts'));`, { mode: 0o755 });
   if (swiftc === true) writeFileSync(join(dir, "swiftc"), head + `log({tool:'swiftc',argv});process.stderr.write('error: no developer tools were found\\n');process.exit(1);`, { mode: 0o755 });
   if (swiftc === "ok") {
     // "Compiles" by writing a node script that behaves like the Vision helper.
@@ -324,20 +325,24 @@ describe("tesseract path (shims): argv, limits, cleanup", () => {
 
     it("compiles once into a hash-named 0700 binary, runs it with [input, maxPages, langs], prunes older helpers, reuses it", async () => {
       const { s, cache, deps } = setup();
-      writeFileSync(join(cache, "vision-ocr-deadbeefdeadbeef"), "stale", { mode: 0o700 });
+      const aged = (name, hours, body = "stale") => { const f = join(cache, name); writeFileSync(f, body, { mode: 0o700 }); const t = new Date(Date.now() - hours * 3_600_000); utimesSync(f, t, t); };
+      aged("vision-ocr-deadbeefdeadbeef", 2); // an old helper of another version: pruned
+      aged("vision-ocr-1111111111111111", 0.1); // a recent one (another process may be using it): kept
+      aged("vision-ocr-2222222222222222.4242.abcd.tmp", 2); // somebody else's unfinished build: never touched
       process.env.PROTON_DRIVE_OCR_LANGS = "eng+pol";
       const r = await ocrBuffer(SAMPLE_PNG, "png", 1000, deps);
       assert.equal(r.text, "fake vision text");
       assert.equal(r.engine, "vision");
       const name = `vision-ocr-${sha(swiftFile)}`;
-      assert.deepEqual(readdirSync(cache), [name], "stale helper pruned, no .tmp left");
+      assert.deepEqual(readdirSync(cache).sort(), [name, "vision-ocr-1111111111111111", "vision-ocr-2222222222222222.4242.abcd.tmp"].sort(), "only the old helper of another version is pruned; recent ones and other builds' .tmp files stay");
       assert.equal(statSync(join(cache, name)).mode & 0o777, 0o700);
-      const [sc, run] = s.calls();
+      const [sc] = s.calls();
+      const run = s.calls().find((c) => c.tool === "vision-helper" && /in\.png$/.test(c.argv[0]));
       assert.equal(sc.tool, "swiftc");
       assert.deepEqual(sc.argv.slice(0, 3).map((a, i) => (i === 1 ? a.replace(/.*\/dist\//, "dist/") : a)), ["-O", "dist/ocr/vision-ocr.swift", "-o"]);
       assert.equal(run.tool, "vision-helper");
       assert.match(run.argv[0], /\/in\.png$/);
-      assert.deepEqual(run.argv.slice(1), ["30", "eng,pol"]);
+      assert.deepEqual(run.argv.slice(1), ["30", "eng,pol", "100000000"], "max pages, languages, max pixels");
       await ocrBuffer(SAMPLE_PNG, "png", 1000, deps);
       assert.equal(compiles(s), 1, "second call does not recompile");
     });
@@ -346,7 +351,7 @@ describe("tesseract path (shims): argv, limits, cleanup", () => {
       const { s, deps } = setup();
       await Promise.all([ocrBuffer(SAMPLE_PNG, "png", 1000, deps), ocrBuffer(SAMPLE_PNG, "png", 1000, deps), ocrBuffer(SAMPLE_PNG, "png", 1000, deps)]);
       assert.equal(compiles(s), 1);
-      assert.equal(s.calls().filter((c) => c.tool === "vision-helper").length, 3);
+      assert.equal(s.calls().filter((c) => c.tool === "vision-helper" && /in\.png$/.test(c.argv[0])).length, 3);
     });
 
     it("a helper that others can write to is not trusted: it is rebuilt", async () => {
@@ -488,12 +493,12 @@ describe("drive_read_content / drive_read_many with OCR", () => {
     assert.equal(r.note, "no text found by OCR");
   });
 
-  it("OCR on: an image over PROTON_DRIVE_OCR_MAX_BYTES is refused before download", async () => {
+  it("OCR on: an image over PROTON_DRIVE_OCR_MAX_MB is refused before download", async () => {
     const s = makeShims();
     const deps = { ocr: useTesseract(s) };
-    process.env.PROTON_DRIVE_OCR_MAX_BYTES = "1000";
+    process.env.PROTON_DRIVE_OCR_MAX_MB = "0.001"; // 1048 bytes
     const d = fakeDrive({ node: fileNode({ mediaType: "image/png", activeRevision: { claimedSize: 5000 } }), bytes: SAMPLE_PNG, name: "a.png" });
-    await assert.rejects(readDriveContent(d, { path: "/my-files/a.png" }, deps), /5000 bytes.*over the read cap of 1000 bytes.*PROTON_DRIVE_OCR_MAX_BYTES/);
+    await assert.rejects(readDriveContent(d, { path: "/my-files/a.png" }, deps), /5000 bytes.*over the read cap of 1048 bytes.*PROTON_DRIVE_OCR_MAX_MB/);
     assert.equal(d.calls.download, 0);
     assert.equal(s.calls().length, 0);
   });
@@ -542,13 +547,13 @@ describe("drive_read_content / drive_read_many with OCR", () => {
       assert.match(r.note, /no text layer.*no text found by OCR either/);
     });
 
-    it("a scanned PDF over PROTON_DRIVE_OCR_MAX_BYTES is returned as before, with a note, and not OCR'd", async () => {
+    it("a scanned PDF over PROTON_DRIVE_OCR_MAX_MB is returned as before, with a note, and not OCR'd", async () => {
       const s = makeShims();
       const deps = { ocr: useTesseract(s) };
-      process.env.PROTON_DRIVE_OCR_MAX_BYTES = "100";
+      process.env.PROTON_DRIVE_OCR_MAX_MB = "0.0001"; // 104 bytes
       const r = await readDriveContent(fakeDrive({ node: pdfNode(), bytes: makePdf(null), name: "a.pdf" }), { path: "/my-files/a.pdf" }, deps);
       assert.equal(r.text, "");
-      assert.match(r.note, /not read with OCR.*PROTON_DRIVE_OCR_MAX_BYTES/);
+      assert.match(r.note, /not read with OCR.*PROTON_DRIVE_OCR_MAX_MB/);
       assert.equal(s.calls().length, 0);
     });
 
@@ -725,6 +730,277 @@ describe("content index with OCR", () => {
 });
 
 // ================================================================================================================================
+// ---- review fixes (1.8.0) --------------------------------------------------------------------------------------------------------
+const u32 = (n, le = false) => { const b = Buffer.alloc(4); if (le) b.writeUInt32LE(n); else b.writeUInt32BE(n); return b; };
+const u16 = (n, le = false) => { const b = Buffer.alloc(2); if (le) b.writeUInt16LE(n); else b.writeUInt16BE(n); return b; };
+/** Header-only files: a few dozen bytes that DECLARE a size; no pixel data. */
+const headers = {
+  png: (w, h) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), u32(13), Buffer.from("IHDR"), u32(w), u32(h), Buffer.from([8, 2, 0, 0, 0]), u32(0)]),
+  jpg: (w, h) => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), u16(16), Buffer.alloc(14), Buffer.from([0xff, 0xc0]), u16(17), Buffer.from([8]), u16(h), u16(w), Buffer.from([3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1])]),
+  gif: (w, h) => Buffer.concat([Buffer.from("GIF89a"), u16(w, true), u16(h, true), Buffer.alloc(3)]),
+  bmp: (w, h) => { const b = Buffer.alloc(54); b.write("BM"); b.writeUInt32LE(40, 14); b.writeInt32LE(w, 18); b.writeInt32LE(-h, 22); return b; },
+  tiff: (w, h) => { const b = Buffer.alloc(8 + 2 + 24 + 4); b.write("II"); b.writeUInt16LE(42, 2); b.writeUInt32LE(8, 4); b.writeUInt16LE(2, 8); b.writeUInt16LE(256, 10); b.writeUInt16LE(4, 12); b.writeUInt32LE(1, 14); b.writeUInt32LE(w, 18); b.writeUInt16LE(257, 22); b.writeUInt16LE(3, 24); b.writeUInt32LE(1, 26); b.writeUInt16LE(h, 30); return b; },
+  webpX: (w, h) => { const b = Buffer.alloc(30); b.write("RIFF"); b.writeUInt32LE(22, 4); b.write("WEBPVP8X", 8); b.writeUInt32LE(10, 16); b.writeUIntLE(w - 1, 24, 3); b.writeUIntLE(h - 1, 27, 3); return b; },
+  webpL: (w, h) => { const b = Buffer.alloc(30); b.write("RIFF"); b.write("WEBPVP8L", 8); b[20] = 0x2f; b.writeUInt32LE(((w - 1) | ((h - 1) << 14)) >>> 0, 21); return b; },
+  webpLossy: (w, h) => { const b = Buffer.alloc(30); b.write("RIFF"); b.write("WEBPVP8 ", 8); b.set([0x9d, 0x01, 0x2a], 23); b.writeUInt16LE(w, 26); b.writeUInt16LE(h, 28); return b; },
+};
+
+describe("pixel limits (read from the file header before any engine runs)", () => {
+  it("reads the declared size from PNG, JPEG, GIF, BMP, TIFF and the three WebP flavours", () => {
+    for (const [fmt, make] of Object.entries(headers)) assert.deepEqual(imageDimensions(make(1234, 567)), { width: 1234, height: 567 }, fmt);
+    assert.ok(imageDimensions(SAMPLE_PNG).width > 0 && imageDimensions(SAMPLE_PNG).height > 0, "a real PNG parses");
+  });
+
+  it("unknown, truncated or HEIC input has no size: undefined (HEIC is checked by Vision itself)", () => {
+    assert.equal(imageDimensions(Buffer.from("not an image at all")), undefined);
+    assert.equal(imageDimensions(headers.png(10, 10).subarray(0, 20)), undefined);
+    assert.equal(imageDimensions(headers.jpg(10, 10).subarray(0, 12)), undefined);
+    assert.equal(imageDimensions(Buffer.concat([u32(24), Buffer.from("ftypheic"), Buffer.alloc(16)])), undefined);
+  });
+
+  it("tesseract path: a tiny file declaring a huge size is refused before anything runs", async () => {
+    const s = makeShims();
+    const deps = useTesseract(s);
+    for (const [fmt, make] of Object.entries(headers)) {
+      const side = fmt === "webpL" || fmt === "webpLossy" ? 16000 : 60000; // those two cannot declare more than 16383
+      const ext = fmt.startsWith("webp") ? "webp" : fmt === "gif" ? "png" : fmt; // the file's content, not its name, decides
+      await assert.rejects(ocrBuffer(make(side, side), ext, 1000, deps), new RegExp(`OCR refused: the image is ${side} x ${side} pixels \\(${side * side / 1e6} megapixels\\), over the limit of 100 megapixels \\(PROTON_DRIVE_OCR_MAX_PIXELS\\)`), fmt);
+    }
+    assert.equal(s.calls().length, 0);
+    assert.equal(ocrDirs().length, 0);
+  });
+
+  it("vision path: the same file is refused without even building the helper", async () => {
+    const s = makeShims({ swiftc: "ok" });
+    process.env.PROTON_DRIVE_OCR = "1";
+    process.env.PROTON_DRIVE_OCR_ENGINE = "vision";
+    process.env.PROTON_DRIVE_INDEX_DIR = mkTmp("pdocr-cache-");
+    await assert.rejects(ocrBuffer(headers.png(60000, 60000), "png", 1000, { which: s.which, platform: "darwin" }), /OCR refused.*megapixels/);
+    assert.equal(s.calls().length, 0);
+  });
+
+  it("an image whose size cannot be determined is refused (formats we parse fail closed)", async () => {
+    const s = makeShims();
+    const deps = useTesseract(s);
+    await assert.rejects(ocrBuffer(Buffer.from("not an image at all"), "png", 1000, deps), /OCR refused: the image size could not be determined/);
+    await assert.rejects(ocrBuffer(headers.png(10, 10).subarray(0, 20), "png", 1000, deps), /OCR refused: the image size could not be determined/);
+    await assert.rejects(ocrBuffer(headers.png(0, 5), "png", 1000, deps), /OCR refused: the image size could not be determined/);
+    assert.equal(s.calls().length, 0);
+  });
+
+  it("HEIC is left to Vision (no header parse in Node); PROTON_DRIVE_OCR_MAX_PIXELS lowers the limit; PDFs are not affected", async () => {
+    const s = makeShims({ swiftc: "ok" });
+    process.env.PROTON_DRIVE_OCR = "1";
+    process.env.PROTON_DRIVE_OCR_ENGINE = "vision";
+    process.env.PROTON_DRIVE_INDEX_DIR = mkTmp("pdocr-cache-");
+    const deps = { which: s.which, platform: "darwin" };
+    const heic = Buffer.concat([u32(24), Buffer.from("ftypheic"), Buffer.alloc(16)]);
+    assert.equal((await ocrBuffer(heic, "heic", 1000, deps)).text, "fake vision text");
+    process.env.PROTON_DRIVE_OCR_MAX_PIXELS = "1000";
+    await assert.rejects(ocrBuffer(SAMPLE_PNG, "png", 1000, deps), /over the limit of 0\.001 megapixels/);
+    await ocrBuffer(Buffer.from("%PDF-1.4"), "pdf", 1000, deps);
+  });
+});
+
+describe("OCR preparation and timing", () => {
+  const visionEnv = () => {
+    process.env.PROTON_DRIVE_OCR = "1";
+    process.env.PROTON_DRIVE_OCR_ENGINE = "vision";
+    process.env.PROTON_DRIVE_INDEX_DIR = mkTmp("pdocr-cache-");
+  };
+  /** A swiftc shim that takes `compileMs` and writes a helper that takes `warmMs` for the blank warm-up image and answers at once otherwise. */
+  const slowToolchain = (compileMs, warmMs) => {
+    const s = makeShims({ swiftc: "ok" });
+    const helper = `#!${process.execPath}\nconst fs=require('fs');const argv=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(join(s.dir, "calls.jsonl"))},JSON.stringify({tool:'vision-helper',argv})+'\\n');const out=()=>process.stdout.write(JSON.stringify({engine:'vision',totalPages:1,pages:[{page:1,text:'fake vision text'}]}));if(/warm/.test(argv[0]))setTimeout(out,${warmMs});else out();`;
+    writeFileSync(join(s.dir, "swiftc"), `#!${process.execPath}\nconst fs=require('fs');const argv=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(join(s.dir, "calls.jsonl"))},JSON.stringify({tool:'swiftc',argv})+'\\n');setTimeout(()=>fs.writeFileSync(argv[argv.indexOf('-o')+1],${JSON.stringify(helper)},{mode:0o755}),${compileMs});`, { mode: 0o755 });
+    return s;
+  };
+
+  it("the per-file timeout starts after the Vision helper is built and warmed up: a slow first run does not time the job out", async () => {
+    const s = slowToolchain(700, 1200);
+    visionEnv();
+    process.env.PROTON_DRIVE_OCR_TIMEOUT_MS = "1000";
+    const r = await ocrBuffer(SAMPLE_PNG, "png", 1000, { which: s.which, platform: "darwin" });
+    assert.equal(r.text, "fake vision text", "compile 0.7 s + first run 1.2 s are outside the 1 s limit");
+    const second = await ocrBuffer(SAMPLE_PNG, "png", 1000, { which: s.which, platform: "darwin" });
+    assert.equal(second.text, "fake vision text");
+    assert.equal(s.calls().filter((c) => c.tool === "vision-helper" && /warm/.test(c.argv[0])).length, 1, "the warm-up runs once per helper");
+  });
+
+  it("warmUpOcr builds and warms the helper on a generated blank image, never throws, and does nothing when OCR is off or the engine is tesseract", async () => {
+    const s = makeShims({ swiftc: "ok" });
+    visionEnv();
+    delete process.env.PROTON_DRIVE_OCR;
+    await warmUpOcr({ which: s.which, platform: "darwin" });
+    assert.equal(s.calls().length, 0, "OCR off");
+    process.env.PROTON_DRIVE_OCR = "1";
+    await warmUpOcr({ which: s.which, platform: "darwin" });
+    const calls = s.calls();
+    assert.deepEqual(calls.map((c) => c.tool), ["swiftc", "vision-helper"]);
+    assert.match(calls[1].argv[0], /\/warm\.png$/);
+    const t0 = s.calls().length;
+    assert.equal((await ocrBuffer(SAMPLE_PNG, "png", 1000, { which: s.which, platform: "darwin" })).text, "fake vision text");
+    assert.equal(s.calls().filter((c) => c.tool === "swiftc").length, 1, "the real read reuses the warmed helper");
+    assert.equal(s.calls().length, t0 + 1, "one more helper run: the file itself");
+    // failures are swallowed
+    const bad = makeShims({ swiftc: true });
+    process.env.PROTON_DRIVE_INDEX_DIR = mkTmp("pdocr-cache-");
+    await warmUpOcr({ which: bad.which, platform: "darwin" });
+    // tesseract: nothing to prepare
+    const t = makeShims();
+    process.env.PROTON_DRIVE_OCR_ENGINE = "tesseract";
+    await warmUpOcr({ which: t.which, platform: "linux" });
+    assert.equal(t.calls().length, 0);
+    assert.deepEqual(ocrDirs(), []);
+  });
+
+  it("ocrPreflight: a missing engine and an invalid language setting are one clear error each", () => {
+    process.env.PROTON_DRIVE_OCR = "1";
+    delete process.env.PROTON_DRIVE_OCR_ENGINE;
+    assert.throws(() => ocrPreflight({ which: () => undefined, platform: "linux" }), /OCR is enabled.*no OCR engine was found/);
+    const s = makeShims();
+    process.env.PROTON_DRIVE_OCR_ENGINE = "tesseract";
+    ocrPreflight({ which: s.which, platform: "linux" });
+    process.env.PROTON_DRIVE_OCR_LANGS = "eng;rm";
+    assert.throws(() => ocrPreflight({ which: s.which, platform: "linux" }), /PROTON_DRIVE_OCR_LANGS must be language codes/);
+  });
+});
+
+describe("pdftoppm page size limit", () => {
+  const ppArgv = (s) => s.calls().find((c) => c.tool === "pdftoppm").argv;
+
+  it("without pdfinfo every page is scaled (not cropped) to at most 4000 px on the long side", async () => {
+    const s = makeShims();
+    await ocrBuffer(Buffer.from("%PDF-1.4"), "pdf", 1000, useTesseract(s));
+    const a = ppArgv(s);
+    assert.deepEqual(a.slice(0, 7), ["-r", "200", "-png", "-f", "1", "-l", "30"]);
+    assert.equal(a[a.indexOf("-scale-to") + 1], "4000");
+    assert.ok(!a.includes("-W") && !a.includes("-H"), "no cropping");
+  });
+
+  it("with pdfinfo: ordinary pages keep 200 dpi; a huge page lowers the dpi so the largest page fits in 4000 px", async () => {
+    const small = makeShims({ pdfinfo: [[612, 792], [595, 842]] });
+    await ocrBuffer(Buffer.from("%PDF-1.4"), "pdf", 1000, useTesseract(small));
+    assert.deepEqual(ppArgv(small).slice(0, 2), ["-r", "200"]);
+    assert.ok(!ppArgv(small).includes("-scale-to") && !ppArgv(small).includes("-W"));
+    assert.deepEqual(small.calls().find((c) => c.tool === "pdfinfo").argv.slice(0, 4), ["-f", "1", "-l", "30"]);
+    const huge = makeShims({ pdfinfo: [[612, 792], [14400, 14400]] });
+    await ocrBuffer(Buffer.from("%PDF-1.4"), "pdf", 1000, useTesseract(huge));
+    assert.deepEqual(ppArgv(huge).slice(0, 2), ["-r", "20"], "4000 px * 72 / 14400 pt = 20 dpi");
+    assert.ok(!ppArgv(huge).includes("-W") && !ppArgv(huge).includes("-H"));
+  });
+});
+
+describe("OCR size cap and thin PDFs in drive_read_content", needUnpdf, () => {
+  it("an image up to PROTON_DRIVE_OCR_MAX_MB (default 30 MB) is read although the normal read cap is 10 MB; over it is refused before download", async () => {
+    const s = makeShims();
+    const deps = { ocr: useTesseract(s) };
+    const ok = fakeDrive({ node: fileNode({ mediaType: "image/png", activeRevision: { claimedSize: 20 * 1048576 } }), bytes: SAMPLE_PNG, name: "a.png" });
+    assert.equal((await readDriveContent(ok, { path: "/my-files/a.png" }, deps)).ocr, true);
+    const big = fakeDrive({ node: fileNode({ mediaType: "image/png", activeRevision: { claimedSize: 31 * 1048576 } }), bytes: SAMPLE_PNG, name: "a.png" });
+    await assert.rejects(readDriveContent(big, { path: "/my-files/a.png" }, deps), /over the read cap of 31457280 bytes.*PROTON_DRIVE_OCR_MAX_MB/);
+    assert.equal(big.calls.download, 0);
+  });
+
+  it("a scanned PDF over the 10 MB read cap but within the OCR cap goes straight to OCR (no text-layer parse)", async () => {
+    const s = makeShims();
+    const deps = { ocr: useTesseract(s) };
+    process.env.PROTON_DRIVE_READ_MAX_BYTES = "100";
+    const bytes = makePdf(null);
+    assert.ok(bytes.length > 100);
+    const r = await readDriveContent(fakeDrive({ node: fileNode({ mediaType: "application/pdf", activeRevision: { claimedSize: bytes.length } }), bytes, name: "a.pdf" }), { path: "/my-files/a.pdf" }, deps);
+    assert.equal(r.ocr, true);
+    assert.match(r.note, /PROTON_DRIVE_READ_MAX_BYTES/);
+    process.env.PROTON_DRIVE_OCR = "0"; // OCR off: the normal read cap applies to the PDF again
+    await assert.rejects(readDriveContent(fakeDrive({ node: fileNode({ mediaType: "application/pdf", activeRevision: { claimedSize: bytes.length } }), bytes, name: "a.pdf" }), { path: "/my-files/a.pdf" }, deps), /over the read cap of 100 bytes/);
+  });
+
+  it("OCR failing on a thin PDF does not fail the read: the text layer is kept with a note", async () => {
+    const s = makeShims({ tesseract: "fail" });
+    const r = await readDriveContent(fakeDrive({ node: pdfNode(), bytes: makePdf("p."), name: "a.pdf" }), { path: "/my-files/a.pdf" }, { ocr: useTesseract(s) });
+    assert.match(r.text, /^p\./);
+    assert.equal(r.ocr, undefined);
+    assert.match(r.note, /OCR unavailable\/failed: tesseract failed: boom/);
+    delete process.env.PROTON_DRIVE_OCR_ENGINE;
+    const missing = await readDriveContent(fakeDrive({ node: pdfNode(), bytes: makePdf("p."), name: "a.pdf" }), { path: "/my-files/a.pdf" }, { ocr: { which: () => undefined, platform: "linux" } });
+    assert.match(missing.text, /^p\./);
+    assert.match(missing.note, /OCR unavailable\/failed: OCR is enabled.*no OCR engine/);
+  });
+
+  it("the longer of text layer and OCR text wins", async () => {
+    const short = makeShims();
+    writeFileSync(join(short.dir, "tesseract"), `#!${process.execPath}\nprocess.stdout.write('a');`, { mode: 0o755 });
+    const r = await readDriveContent(fakeDrive({ node: pdfNode(), bytes: makePdf("xy"), name: "a.pdf" }), { path: "/my-files/a.pdf" }, { ocr: useTesseract(short) });
+    assert.match(r.text, /^xy/);
+    assert.equal(r.ocr, undefined);
+    assert.match(r.note, /OCR found no more text than the text layer/);
+    const long = await readDriveContent(fakeDrive({ node: pdfNode(), bytes: makePdf("xy"), name: "a.pdf" }), { path: "/my-files/a.pdf" }, { ocr: useTesseract(makeShims()) });
+    assert.equal(long.ocr, true);
+    assert.match(long.text, /text of pg-01\.png/);
+  });
+
+  it("the sparse test counts at most 100 pages (the worker reads no more): 150 pages with ~23 characters each are not sparse", async () => {
+    const s = makeShims();
+    const bytes = makePdf("abcdefghijklmnopqrstu", 150);
+    const r = await readDriveContent(fakeDrive({ node: pdfNode(), bytes, name: "a.pdf" }), { path: "/my-files/a.pdf" }, { ocr: useTesseract(s) });
+    assert.equal(r.ocr, undefined);
+    assert.equal(s.calls().length, 0, "no OCR");
+  });
+});
+
+describe("content index: OCR retries and preflight", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "pdci-ocr2-"));
+    process.env.PROTON_DRIVE_INDEX_DIR = dir;
+    process.env.PROTON_DRIVE_CONTENT_INDEX = "1";
+    process.env.PROTON_DRIVE_CONTENT_INDEX_KEY = "cd".repeat(32);
+    process.env.PROTON_DRIVE_OCR = "1";
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  const node = (path) => ({ path, uid: path, type: "file", size: 10, mtime: "2026-01-01T00:00:00Z", mediaType: path.endsWith(".png") ? "image/png" : path.endsWith(".pdf") ? "application/pdf" : "text/plain" });
+  const deps = (paths, load, extra = {}) => ({
+    walk: async (_d, root) => ({ root, nodes: paths.map(node), complete: true, callsMade: 1, skipped: [], fromCache: false, ageMs: 0 }),
+    accountKey: async () => "acct-2", load, ...extra,
+  });
+  const update = (d) => driveContentIndex({}, { path: "/my-files/Docs" }, d);
+
+  it("a file that timed out is retried when PROTON_DRIVE_OCR_TIMEOUT_MS changes, and not before", async () => {
+    let loads = 0;
+    const d = deps(["/my-files/Docs/big.png"], async () => { loads++; if (loads < 3) throw new Error(`OCR timed out after ${Number(process.env.PROTON_DRIVE_OCR_TIMEOUT_MS ?? 90000) / 1000} s`); return { text: "finally words", ocr: true }; });
+    assert.equal((await update(d)).skippedFiles, 1);
+    assert.equal((await update(d)).unchanged, 1);
+    assert.equal(loads, 1, "same timeout: not retried");
+    process.env.PROTON_DRIVE_OCR_TIMEOUT_MS = "180000";
+    assert.equal((await update(d)).skippedFiles, 1);
+    assert.equal(loads, 2, "a longer limit: one more try");
+    process.env.PROTON_DRIVE_OCR_TIMEOUT_MS = "300000";
+    assert.equal((await update(d)).indexed, 1);
+    assert.equal(loads, 3);
+  });
+
+  it("a missing engine or a bad language setting fails the update at once with one error, before any file is downloaded", async () => {
+    let loads = 0;
+    const load = async () => { loads++; return { text: "x words" }; };
+    const noEngine = deps(["/my-files/Docs/a.png", "/my-files/Docs/b.png", "/my-files/Docs/c.txt"], load, { ocrReady: () => ocrPreflight({ which: () => undefined, platform: "linux" }) });
+    delete process.env.PROTON_DRIVE_OCR_ENGINE;
+    await assert.rejects(update(noEngine), /no OCR engine was found/);
+    assert.equal(loads, 0);
+    // text-only folders are unaffected
+    const textOnly = deps(["/my-files/Docs/c.txt"], load, { ocrReady: () => { throw new Error("must not be called"); } });
+    assert.equal((await update(textOnly)).indexed, 1);
+  });
+
+  it("OCR failing on a PDF with no text layer is a failure to retry, not a 'no text after OCR' skip", async () => {
+    const d = deps(["/my-files/Docs/scan.pdf"], async () => ({ text: "", ocrError: "OCR unavailable/failed: boom" }));
+    const r = await update(d);
+    assert.equal(r.failedCount, 1);
+    assert.equal(r.skippedFiles, 0);
+    assert.match(r.failed[0].error, /OCR unavailable\/failed: boom/);
+  });
+});
+
+// ================================================================================================================================
 describe("doctor", () => {
   it("OCR off is a normal state", async () => {
     delete process.env.PROTON_DRIVE_OCR;
@@ -827,7 +1103,7 @@ describe("REAL Vision engine (macOS)", { skip: visionSkip }, () => {
   });
 
   it("a corrupt image is an error, not a hang, and leaves no temp dir", async () => {
-    await assert.rejects(ocrBuffer(Buffer.from("not an image at all"), "png", 1000), /Vision OCR helper failed: could not read the image/);
+    await assert.rejects(ocrBuffer(Buffer.from("not an image at all"), "png", 1000), /OCR refused: the image size could not be determined/);
   });
 
   it("end to end: readDriveContent on a PNG and a scanned PDF through the real engine", async () => {
@@ -847,5 +1123,19 @@ describe("REAL Vision engine (macOS)", { skip: visionSkip }, () => {
   it("an exhausted time budget fails fast with a timeout error", async () => {
     process.env.PROTON_DRIVE_OCR_TIMEOUT_MS = "1";
     await assert.rejects(ocrBuffer(SAMPLE_PNG, "png", 1000), /OCR timed out/);
+  });
+
+  it("the helper itself refuses an image over the pixel limit it is given, and a file without readable dimensions (fail closed)", async () => {
+    const bin = `vision-ocr-${createHash("sha256").update(readFileSync(join(HERE, "..", "dist", "ocr", "vision-ocr.swift"))).digest("hex").slice(0, 16)}`;
+    assert.ok(existsSync(join(cache, bin)), "built by an earlier test of this group");
+    const run = (file, px) => { try { execFileSync(join(cache, bin), [file, "1", "", px], { stdio: ["ignore", "pipe", "pipe"] }); return null; } catch (e) { return String(e.stderr); } };
+    const dir = mkTmp();
+    const png = join(dir, "a.png");
+    writeFileSync(png, SAMPLE_PNG);
+    assert.match(run(png, "1000"), /too large to read safely/);
+    assert.equal(run(png, "100000000"), null, "within the limit it reads");
+    const odd = join(dir, "b.png"); // not an image: no dimensions
+    writeFileSync(odd, "not an image");
+    assert.match(run(odd, "100000000"), /could not read the image/);
   });
 });
