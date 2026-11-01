@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.7.0 — unreleased
+## 1.7.0 — 2026-11-01
 
 ### Added
 - **Content search (opt-in, off by default)**: `PROTON_DRIVE_CONTENT_INDEX=1` enables two new MCP tools. **`drive_content_index`** (`path` required, `action`: `update` (default), `status`, `clear`; `maxFiles`, `maxFileMB`, `timeBudgetMs`) builds an incremental full-text index of the text of files under the folder you name (text/markdown/code, `.docx`, text-layer `.pdf`), two files at a time; secret-looking names are never read; changed files only are re-read; vanished files are dropped; `partial: true` with `remaining` means call again. **`drive_search_content`** (`query`, `path?`, `limit?`) returns ranked (BM25, all words must match, trailing `*` for a prefix) paths with snippets and `indexedAt`; it never re-lists Drive (`stale: true`).
