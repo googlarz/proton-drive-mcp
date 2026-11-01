@@ -234,7 +234,8 @@ async function updateIndex(drive: DriveService, o: ContentIndexArgs, deps: Conte
   const data = loadData(k.key, fp) ?? new ContentData();
 
   const walkFn = deps.walk ?? walkTree;
-  let walk = await walkFn(drive, root, { noDisk: true, budgetMs: budget });
+  // maxListingAgeMs: with the opt-in index only folders listed over 60 s ago are listed again (see walkTree); the check below covers a walk that ignores it.
+  let walk = await walkFn(drive, root, { noDisk: true, budgetMs: budget, maxListingAgeMs: MAX_LISTING_AGE_MS });
   let listingRefreshed = false;
   if (walk.fromCache && walk.ageMs > MAX_LISTING_AGE_MS) {
     walk = await walkFn(drive, root, { noDisk: true, refresh: true, budgetMs: Math.max(1, deadline - now()) });

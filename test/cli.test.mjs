@@ -200,7 +200,7 @@ describe("no arguments", () => {
     try {
       const res = await c.initialize({ timeout: 5000 });
       assert.equal(res.result.serverInfo.name, "proton-drive-mcp");
-      assert.equal((await c.listTools()).length, 53);
+      assert.equal((await c.listTools()).length, 54);
     } finally { await c.close(); }
   });
 });

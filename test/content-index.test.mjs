@@ -886,7 +886,9 @@ describe("content index review fixes", () => {
     const old = await update(w, {}, { walk: walk(120_000) });
     assert.equal(calls.length, 2);
     assert.equal(calls[0].refresh, undefined);
-    assert.equal(calls[1].refresh, true);
+    assert.equal(calls[0].noDisk, true);
+    assert.equal(calls[0].maxListingAgeMs, 60_000, "the walk itself is asked for listings no older than 60 s (incremental when the index is on)");
+    assert.equal(calls[1].refresh, true, "a walk that ignores the age gets the full re-walk fallback");
     assert.equal(old.fromCache, false);
     assert.equal(old.listingAgeMs, 0);
     assert.equal(old.listingRefreshed, true);

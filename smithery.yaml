@@ -64,6 +64,7 @@ tools:
   - drive_read_many
   - drive_content_index
   - drive_search_content
+  - drive_refresh_index
   - drive_audit_log
 startCommand:
   type: stdio

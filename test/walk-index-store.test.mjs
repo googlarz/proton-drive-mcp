@@ -107,7 +107,7 @@ describe("walk index store", () => {
 
   it("ignores a corrupt file, an unknown version, and a malformed shape, then overwrites", () => {
     mkdirSync(indexDir(), { mode: 0o700, recursive: true });
-    for (const body of ["{not json", JSON.stringify({ ...file([]), version: 2 }), JSON.stringify({ version: 1, entries: "x" }), "null"]) {
+    for (const body of ["{not json", JSON.stringify({ ...file([]), version: 3 }), JSON.stringify({ version: 1, entries: "x" }), "null"]) {
       writeFileSync(indexPath(), body, { mode: 0o600 });
       assert.equal(readIndex(), undefined);
     }

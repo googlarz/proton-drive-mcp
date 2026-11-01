@@ -3,7 +3,7 @@ import { DriveNotAuthenticatedError } from "../utils/errors.js";
 import { callContext } from "../utils/subprocess.js";
 import { logger } from "../utils/logger.js";
 import { Semaphore } from "../utils/semaphore.js";
-import { indexEnabled, indexMaxAgeMs, readIndex, writeIndex, deleteIndex, INDEX_VERSION, MAX_ENTRIES, type IndexEntry, type IndexFile } from "./walkIndex.js";
+import { indexEnabled, indexMaxAgeMs, folderMaxAgeMs, readIndex, writeIndex, deleteIndex, INDEX_VERSION, MAX_ENTRIES, type IndexEntry, type IndexFile } from "./walkIndex.js";
 
 /** One node of a walked Drive tree. Sizes are the real (claimed) sizes, not encrypted storage sizes. */
 export interface WalkNode {
@@ -41,8 +41,21 @@ export interface WalkOptions {
    * the nodes collected so far are returned with `partial: true` while the same walk finishes in the background.
    */
   budgetMs?: number;
+  /**
+   * Oldest folder listing (ms) the result may be built from. With PROTON_DRIVE_INDEX=1 and a saved tree for the root, listings
+   * younger than this are reused and only older or unknown folders are listed again, oldest first (an incremental walk).
+   * Default: the memory cache TTL for `noDisk` callers, otherwise PROTON_DRIVE_INDEX_FOLDER_MAX_AGE_H.
+   */
+  maxListingAgeMs?: number;
+  /** Walk incrementally even without a saved tree, never answer from memory or the index, and always save progress (drive_refresh_index). */
+  resumable?: boolean;
+  /** Incremental walks: count what the re-listed folders gained, lost or changed (WalkResult.changes). */
+  trackChanges?: boolean;
   signal?: AbortSignal;
 }
+
+/** What re-listed folders gained, lost or changed compared with their previous listing. */
+export interface WalkChanges { added: number; removed: number; modified: number; samples: { kind: "added" | "removed" | "modified"; path: string }[] }
 
 export interface WalkResult {
   root: string;
@@ -63,6 +76,14 @@ export interface WalkResult {
   continuing?: boolean;
   /** The budget that expired (set with `partial`). */
   budgetMs?: number;
+  /** Incremental walks only: folder listings read in this call, reused from the saved index, and still older than the allowed age or never read. */
+  foldersRefreshed?: number;
+  foldersReused?: number;
+  foldersRemaining?: number;
+  /** Incremental walks only: age of the oldest folder listing the result is built from (also `ageMs`). */
+  oldestListingAgeMs?: number;
+  /** Incremental walks with trackChanges only. */
+  changes?: WalkChanges;
 }
 
 /** Output fields for results served from the persistent index while a refresh runs (empty otherwise). */
@@ -70,8 +91,16 @@ export const staleFields = (w: Pick<WalkResult, "stale" | "refreshing">) =>
   w.stale ? { stale: true, ...(w.refreshing ? { refreshing: true } : {}) } : {};
 
 /** Output fields for a result cut short by the time budget (empty otherwise). */
-export const partialFields = (w: Pick<WalkResult, "partial" | "budgetMs">) =>
-  w.partial ? { partial: true, continuing: true, note: `Partial: the drive walk was still running after ${(w.budgetMs ?? 0) / 1000} s; repeat the call in a minute for the full result.` } : {};
+export const partialFields = (w: Pick<WalkResult, "partial" | "budgetMs" | "foldersRefreshed" | "foldersReused" | "foldersRemaining" | "oldestListingAgeMs">): { partial?: true; continuing?: true; foldersRefreshed?: number; foldersReused?: number; foldersRemaining?: number; oldestListingAgeMs?: number; note?: string } =>
+  w.partial
+    ? {
+      partial: true, continuing: true,
+      ...(w.foldersRemaining === undefined ? {} : { foldersRefreshed: w.foldersRefreshed, foldersReused: w.foldersReused, foldersRemaining: w.foldersRemaining, oldestListingAgeMs: w.oldestListingAgeMs }),
+      note: w.foldersRemaining === undefined
+        ? `Partial: the drive walk was still running after ${(w.budgetMs ?? 0) / 1000} s; repeat the call in a minute for the full result.`
+        : `Partial: the saved index is being refreshed in slices; ${w.foldersRemaining} folder listing(s) are still older than the allowed age or unread, so some entries may be out of date. Repeat the call to continue (drive_refresh_index does the same with a larger budget).`,
+    }
+    : {};
 
 export const DEFAULT_EXCLUDE = [".git", "node_modules"];
 const DEFAULT_MAX_CALLS = 300;
@@ -161,8 +190,8 @@ function pick(entries: Iterable<CacheEntry>, root: string, maxDepth: number | un
     if (e.key === key) return { e, exact: true }; // same request, even if it was partial
     // An ancestor's walk can answer a subfolder request if it saw everything and went deep enough.
     if (e.excludeKey !== excludeKey || e.skipped.length > 0 || !isUnder(root, e.root)) continue;
-    // A subpath the ancestor never saw as a folder must be walked fresh so it fails like a cold call.
-    if (!e.nodes.some((n) => n.path === root && n.type === "folder")) continue;
+    // A subpath the ancestor never saw as a folder must be walked fresh so it fails like a cold call (the root of a walk is not one of its nodes).
+    if (root !== e.root && !e.nodes.some((n) => n.path === root && n.type === "folder")) continue;
     // The ancestor never listed an excluded folder, so it cannot answer for it or anything below it.
     if (segments(root).slice(e.root === "/" ? 0 : depthOf(e.root)).some((seg) => exclude.has(seg))) continue;
     const reach = e.maxDepth === undefined ? Infinity : e.maxDepth - (depthOf(root) - depthOf(e.root));
@@ -188,18 +217,23 @@ interface WalkParams {
   exclude: Set<string>;
   key: string;
   excludeKey: string;
+  /** Set for an incremental walk: it merges fresh listings into the saved tree `entry` (none = start from the root) instead of walking from scratch. */
+  inc?: { entry?: IndexEntry; maxAgeMs: number; deadlineAt?: number; track: boolean };
 }
 /** Walk state a time-budget snapshot can read while the walk runs. */
-interface LiveWalk { nodes: WalkNode[]; skipped: { path: string; reason: string }[]; queue: { path: string; depth: number }[]; active: Set<string>; callsMade: number }
-const newLive = (root: string): LiveWalk => ({ nodes: [], skipped: [], queue: [{ path: root, depth: 0 }], active: new Set(), callsMade: 0 });
-interface RawWalk { nodes: WalkNode[]; skipped: { path: string; reason: string }[]; callsMade: number; complete: boolean }
+interface LiveWalk { nodes: WalkNode[]; skipped: { path: string; reason: string }[]; queue: { path: string; depth: number }[]; active: Set<string>; callsMade: number; listed: Map<string, number> }
+const newLive = (root: string): LiveWalk => ({ nodes: [], skipped: [], queue: [{ path: root, depth: 0 }], active: new Set(), callsMade: 0, listed: new Map() });
+interface RawWalk {
+  nodes: WalkNode[]; skipped: { path: string; reason: string }[]; callsMade: number; complete: boolean;
+  /** Folder path -> ms its listing was read, for every folder the nodes contain a listing of. */
+  listed: Map<string, number>;
+  inc?: IncStats;
+}
 
-/** The actual breadth-first walk (no caching). */
-async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined, live: LiveWalk = newLive(p.root)): Promise<RawWalk> {
-  const { root, maxDepth, maxCalls, concurrency, exclude } = p;
-  const { nodes, skipped, queue } = live;
-  let active = 0;
+type ListEntries = Awaited<ReturnType<DriveService["listEntries"]>>;
 
+/** `fs list` with the process-wide concurrency cap and one retry, counting calls in `live`. */
+function makeLister(svc: DriveService, signal: AbortSignal | undefined, live: { callsMade: number }, maxCalls: number) {
   const listOnce = async (path: string) => {
     live.callsMade++;
     const release = await walkLimiter().acquire(signal);
@@ -210,7 +244,7 @@ async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | u
     }
   };
   // One retry covers a transient failure the subprocess layer already gave up on.
-  const listWithRetry = async (path: string) => {
+  return async (path: string): Promise<ListEntries> => {
     try {
       return await listOnce(path);
     } catch (err) {
@@ -220,6 +254,27 @@ async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | u
       return listOnce(path);
     }
   };
+}
+
+function toNode({ item, file }: ListEntries[number]): WalkNode {
+  const rev = (item.activeRevision ?? {}) as Record<string, unknown>;
+  const digests = (rev.claimedDigests ?? {}) as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+  return {
+    path: file.path, uid: item.uid as string, parentUid: str(item.parentUid), type: file.type,
+    mediaType: file.mimeType, size: file.size, storageSize: file.storageSize,
+    mtime: str(rev.claimedModificationTime), uploadedAt: file.modifiedAt, sha1: str(digests.sha1),
+    isShared: typeof item.isShared === "boolean" ? item.isShared : undefined,
+    isSharedByUrl: typeof item.isSharedByUrl === "boolean" ? item.isSharedByUrl : undefined,
+  };
+}
+
+/** The actual breadth-first walk (no caching). */
+async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined, live: LiveWalk = newLive(p.root)): Promise<RawWalk> {
+  const { root, maxDepth, maxCalls, concurrency, exclude } = p;
+  const { nodes, skipped, queue } = live;
+  let active = 0;
+  const listWithRetry = makeLister(svc, signal, live, maxCalls);
 
   await new Promise<void>((resolve, reject) => {
     let settled = false;
@@ -232,19 +287,12 @@ async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | u
     const onAbort = () => finish(abortError(signal));
     signal?.addEventListener("abort", onAbort, { once: true });
 
-    const handle = (job: { path: string; depth: number }, entries: Awaited<ReturnType<typeof listOnce>>) => {
-      for (const { item, file } of entries) {
+    const handle = (job: { path: string; depth: number }, entries: ListEntries) => {
+      live.listed.set(job.path, Date.now());
+      for (const entry of entries) {
+        const { item, file } = entry;
         if (typeof item.uid !== "string") continue; // "/" lists path-only roots, not nodes
-        const rev = (item.activeRevision ?? {}) as Record<string, unknown>;
-        const digests = (rev.claimedDigests ?? {}) as Record<string, unknown>;
-        const str = (v: unknown) => (typeof v === "string" ? v : undefined);
-        const node: WalkNode = {
-          path: file.path, uid: item.uid, parentUid: str(item.parentUid), type: file.type,
-          mediaType: file.mimeType, size: file.size, storageSize: file.storageSize,
-          mtime: str(rev.claimedModificationTime), uploadedAt: file.modifiedAt, sha1: str(digests.sha1),
-          isShared: typeof item.isShared === "boolean" ? item.isShared : undefined,
-          isSharedByUrl: typeof item.isSharedByUrl === "boolean" ? item.isSharedByUrl : undefined,
-        };
+        const node = toNode(entry);
         nodes.push(node);
         if (file.type === "folder" && !exclude.has(file.name) && (maxDepth === undefined || job.depth + 1 < maxDepth)) {
           queue.push({ path: file.path, depth: job.depth + 1 });
@@ -277,13 +325,208 @@ async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | u
 
   nodes.sort(byPath);
   skipped.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  return { nodes, skipped, callsMade: live.callsMade, complete: skipped.length === 0 && !isDepthCut(nodes, depthOf(root), maxDepth, exclude) };
+  return { nodes, skipped, callsMade: live.callsMade, complete: skipped.length === 0 && !isDepthCut(nodes, depthOf(root), maxDepth, exclude), listed: live.listed };
 }
 
-function remember(p: WalkParams, w: RawWalk): void {
+function remember(p: WalkParams, w: RawWalk, createdAt = Date.now()): void {
   cache.delete(p.key);
-  cache.set(p.key, { root: p.root, key: p.key, excludeKey: p.excludeKey, maxDepth: p.maxDepth, createdAt: Date.now(), nodes: w.nodes, skipped: w.skipped, complete: w.complete });
+  cache.set(p.key, { root: p.root, key: p.key, excludeKey: p.excludeKey, maxDepth: p.maxDepth, createdAt, nodes: w.nodes, skipped: w.skipped, complete: w.complete });
   while (cache.size > CACHE_ENTRIES) cache.delete(cache.keys().next().value as string);
+}
+
+// ---- incremental walk: merge fresh listings into a saved tree ---------------------
+// The Drive listing carries no usable change signal for a folder (a folder's modification time does not move when its
+// contents change, directly or deeper), so the only sound rule is age: a listing younger than the allowed age is reused,
+// anything older (or never read) is listed again, oldest first. Changes below a reused folder stay unseen until it ages out.
+
+interface IncStats {
+  /** Listings read by this call, reused from the saved tree, and (at the end) still older than allowed or never read. */
+  refreshed: number; reused: number; remaining: number;
+  /** Folders whose listing failed in this call. */
+  failed: number;
+  /** Why the walk stopped with listings left to do. */
+  stop?: "time" | "calls";
+  oldestListedAt?: number;
+  changes?: WalkChanges;
+}
+
+/** A saved tree: every folder's children as last listed, and when. */
+interface Tree {
+  root: string;
+  kids: Map<string, WalkNode[]>;
+  /** Folder path -> uid, for every folder node below the root. */
+  folders: Map<string, string>;
+  listed: Map<string, number>;
+  changes?: WalkChanges;
+}
+
+function treeFromEntry(root: string, exclude: Set<string>, entry: IndexEntry | undefined, track: boolean): Tree {
+  const t: Tree = { root, kids: new Map(), folders: new Map(), listed: new Map(), ...(track ? { changes: { added: 0, removed: 0, modified: 0, samples: [] } } : {}) };
+  if (!entry) return t;
+  for (const n of entry.nodes) {
+    const parent = parentPath(n.path);
+    const list = t.kids.get(parent);
+    if (list) list.push(n); else t.kids.set(parent, [n]);
+    if (n.type === "folder") t.folders.set(n.path, n.uid);
+  }
+  if (entry.listed) {
+    for (const [path, at] of Object.entries(entry.listed)) if (path === root || t.folders.has(path)) t.listed.set(path, at);
+  } else {
+    // A version 1 file saved complete walks only, so every folder it lists was read at completedAt.
+    t.listed.set(root, entry.completedAt);
+    for (const path of t.folders.keys()) if (!exclude.has(baseName(path))) t.listed.set(path, entry.completedAt);
+  }
+  return t;
+}
+
+/** The tree's nodes in walk order. Anything not reachable from the root is left out. */
+function flatten(t: Tree): WalkNode[] {
+  const out: WalkNode[] = [], seen = new Set<string>(), stack = [t.root];
+  while (stack.length) {
+    const path = stack.pop()!;
+    if (seen.has(path)) continue;
+    seen.add(path);
+    for (const n of t.kids.get(path) ?? []) { out.push(n); if (n.type === "folder") stack.push(n.path); }
+  }
+  return out.sort(byPath);
+}
+
+const SAMPLES_PER_KIND = 16;
+function noteChange(t: Tree, kind: "added" | "removed" | "modified", path: string, sample = true): void {
+  const c = t.changes;
+  if (!c) return;
+  c[kind]++;
+  if (sample && c.samples.filter((s) => s.kind === kind).length < SAMPLES_PER_KIND) c.samples.push({ kind, path });
+}
+const changedNode = (a: WalkNode, b: WalkNode) =>
+  a.size !== b.size || a.mtime !== b.mtime || a.uploadedAt !== b.uploadedAt || a.sha1 !== b.sha1 || a.isShared !== b.isShared || a.isSharedByUrl !== b.isSharedByUrl;
+
+/** Forgets a removed folder's cached descendants and listing times, so nothing below a deleted, moved or renamed folder survives. */
+function dropSubtree(t: Tree, n: WalkNode): void {
+  if (n.type !== "folder") return;
+  const stack = [n.path];
+  while (stack.length) {
+    const path = stack.pop()!;
+    for (const c of t.kids.get(path) ?? []) { noteChange(t, "removed", c.path, false); if (c.type === "folder") stack.push(c.path); }
+    t.kids.delete(path);
+    t.listed.delete(path);
+    t.folders.delete(path);
+  }
+}
+
+/** Replaces one folder's children with its fresh listing. Returns the folders that are new (their contents are unknown). */
+function applyListing(t: Tree, folder: string, fresh: WalkNode[], at: number): WalkNode[] {
+  const old = t.kids.get(folder) ?? [];
+  const freshBy = new Map(fresh.map((n) => [n.uid, n]));
+  const oldBy = new Map(old.map((n) => [n.uid, n]));
+  const same = (a: WalkNode, b: WalkNode | undefined) => !!b && a.path === b.path && a.type === b.type;
+  // Removals first: a renamed or replaced folder can leave a new one at the old path.
+  for (const o of old) {
+    if (same(o, freshBy.get(o.uid))) continue;
+    noteChange(t, "removed", o.path);
+    dropSubtree(t, o);
+  }
+  const added: WalkNode[] = [];
+  for (const n of fresh) {
+    const o = oldBy.get(n.uid);
+    if (o && same(n, o)) { if (t.changes && changedNode(o, n)) noteChange(t, "modified", n.path); continue; }
+    noteChange(t, "added", n.path);
+    if (n.type === "folder") { t.folders.set(n.path, n.uid); added.push(n); }
+  }
+  t.kids.set(folder, fresh);
+  t.listed.set(folder, at);
+  return added;
+}
+
+/**
+ * Lists the folders of the saved tree (p.inc.entry; empty = from the root) whose listing is older than p.inc.maxAgeMs or was never
+ * read, oldest first, merging each fresh listing in. Stops at the deadline or the call limit; what is left stays as it was (nothing is
+ * deleted from a folder that was not listed) and is reported as skipped, so a stopped walk is never complete.
+ */
+async function runIncremental(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined, live: LiveWalk): Promise<RawWalk> {
+  const inc = p.inc!;
+  const { root, maxCalls, concurrency, exclude } = p;
+  const t = treeFromEntry(root, exclude, inc.entry, inc.track);
+  const cutoff = Date.now() - inc.maxAgeMs;
+  const listable = (path: string) => path === root || !exclude.has(baseName(path));
+  const stale = (path: string) => { const at = t.listed.get(path); return at === undefined || at < cutoff; };
+  const all = [root, ...t.folders.keys()].filter(listable);
+  const todo = all.filter(stale)
+    .map((path) => ({ path, uid: path === root ? "" : t.folders.get(path)!, at: t.listed.get(path) ?? 0, depth: depthOf(path) }))
+    .sort((a, b) => a.at - b.at || a.depth - b.depth || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const reused = all.length - todo.length;
+
+  const discovered: { path: string; uid: string }[] = []; // folders first seen in this walk go before everything else
+  let next = 0, head = 0, active = 0, refreshed = 0;
+  let stop: "time" | "calls" | undefined;
+  const failed = new Map<string, string>();
+  const more = () => head < discovered.length || next < todo.length;
+  const listWithRetry = makeLister(svc, signal, live, maxCalls);
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (err?: unknown) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      if (err !== undefined) reject(err); else resolve();
+    };
+    const onAbort = () => finish(abortError(signal));
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    const pump = () => {
+      if (settled) return;
+      while (active < concurrency && more()) {
+        if (live.callsMade >= maxCalls) { stop = "calls"; break; }
+        if (inc.deadlineAt !== undefined && Date.now() >= inc.deadlineAt) { stop = "time"; break; }
+        const job = head < discovered.length ? discovered[head++]! : todo[next++]!;
+        if (job.path !== root && t.folders.get(job.path) !== job.uid) continue; // dropped or replaced by an earlier listing of this walk
+        active++;
+        live.active.add(job.path);
+        listWithRetry(job.path)
+          .then((entries) => {
+            const children = entries.filter(({ item }) => typeof item.uid === "string").map(toNode);
+            for (const f of applyListing(t, job.path, children, Date.now())) if (listable(f.path)) discovered.push({ path: f.path, uid: f.uid });
+            refreshed++;
+          })
+          .catch((err) => {
+            if (job.path === root || err instanceof DriveNotAuthenticatedError) return finish(err);
+            failed.set(job.path, String(err instanceof Error ? err.message : err).slice(0, 200));
+          })
+          .finally(() => { active--; live.active.delete(job.path); pump(); });
+      }
+      if (active === 0 && (stop || !more())) finish();
+    };
+    pump();
+  });
+
+  const skipped: { path: string; reason: string }[] = [];
+  let oldest: number | undefined;
+  for (const path of [root, ...t.folders.keys()]) {
+    if (!listable(path)) continue;
+    const at = t.listed.get(path);
+    if (at !== undefined && (oldest === undefined || at < oldest)) oldest = at;
+    if (stale(path)) skipped.push({ path, reason: failed.get(path) ?? (stop === "calls" ? `not listed: maxCalls (${maxCalls}) reached` : "not refreshed yet: time budget") });
+  }
+  skipped.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const complete = skipped.length === 0;
+  return {
+    nodes: flatten(t), skipped, callsMade: live.callsMade, complete, listed: t.listed,
+    inc: { refreshed, reused, remaining: skipped.length, failed: failed.size, ...(complete ? {} : { stop }), oldestListedAt: oldest, changes: t.changes },
+  };
+}
+
+function incResult(root: string, w: RawWalk): WalkResult {
+  const s = w.inc!;
+  const ageMs = s.oldestListedAt === undefined ? 0 : Math.max(0, Date.now() - s.oldestListedAt);
+  return {
+    root, nodes: w.nodes.slice(), complete: w.complete, callsMade: w.callsMade, skipped: w.skipped.slice(),
+    fromCache: s.refreshed === 0, ageMs,
+    ...(s.reused > 0 || !w.complete ? { stale: true } : {}),
+    ...(s.stop ? { partial: true, continuing: true } : {}),
+    foldersRefreshed: s.refreshed, foldersReused: s.reused, foldersRemaining: s.remaining, oldestListingAgeMs: ageMs,
+    ...(s.changes ? { changes: s.changes } : {}),
+  };
 }
 
 // ---- persistent index (opt-in, PROTON_DRIVE_INDEX=1) ------------------------
@@ -382,20 +625,69 @@ async function verifyDisk(svc: DriveService, signal: AbortSignal | undefined): P
   return (await raceAbort(diskVerified.promise, signal)) === "match";
 }
 
+/** Age of a saved tree = its oldest folder listing (entries without per-folder times were saved complete at completedAt). */
+const oldestMemo = new WeakMap<IndexEntry, number>();
+function oldestListedAt(e: IndexEntry): number {
+  let at = oldestMemo.get(e);
+  if (at === undefined) {
+    at = Infinity;
+    for (const v of e.listed ? Object.values(e.listed) : []) if (v < at) at = v;
+    if (at === Infinity) at = e.completedAt;
+    oldestMemo.set(e, at);
+  }
+  return at;
+}
+
+/** True when every folder that a walk of this scope lists has a listing time; a tree from an unfinished refresh is only partial. */
+const completeMemo = new WeakMap<IndexEntry, boolean>();
+function treeComplete(e: IndexEntry): boolean {
+  let c = completeMemo.get(e);
+  if (c === undefined) {
+    const { listed } = e;
+    const ex = new Set(e.opts.exclude), rootDepth = depthOf(e.root), md = e.opts.maxDepth;
+    c = !listed || (listed[e.root] !== undefined && e.nodes.every((n) =>
+      n.type !== "folder" || ex.has(baseName(n.path)) || (md !== undefined && depthOf(n.path) - rootDepth >= md) || listed[n.path] !== undefined));
+    completeMemo.set(e, c);
+  }
+  return c;
+}
+
 const toCacheEntry = (e: IndexEntry): CacheEntry => ({
   root: e.root, key: e.key, excludeKey: e.opts.exclude.join("\0"), maxDepth: e.opts.maxDepth,
-  createdAt: e.completedAt, nodes: e.nodes, skipped: [], complete: true,
+  createdAt: oldestListedAt(e), nodes: e.nodes, skipped: [], complete: true,
 });
 
 function diskCandidates(): CacheEntry[] {
   const st = loadDisk();
   const now = Date.now(), maxAge = indexMaxAgeMs();
-  return st ? st.entries.filter((e) => { const age = now - e.completedAt; return Number.isFinite(age) && age >= 0 && age <= maxAge; }).map(toCacheEntry) : [];
+  return st ? st.entries.filter((e) => { const age = now - oldestListedAt(e); return Number.isFinite(age) && age >= 0 && age <= maxAge && treeComplete(e); }).map(toCacheEntry) : [];
 }
 
+const sameScope = (e: IndexEntry, p: WalkParams) => e.root === p.root && e.opts.maxDepth === p.maxDepth && e.opts.exclude.join("\0") === p.excludeKey;
+
+/** Incremental walks need the opt-in index, a full-depth walk and a root inside the account (the only place the index saves). */
+const incPossible = (p: WalkParams) => indexEnabled() && indexMaxAgeMs() > 0 && p.maxDepth === undefined && isUnder(p.root, ACCOUNT_ROOT);
+
+/** The saved tree for exactly this scope (any age, complete or partial), once the index is proven to belong to the signed-in account. */
+async function incSeed(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined, check: AccountCheck): Promise<IndexEntry | undefined> {
+  const find = () => loadDisk()?.entries.find((e) => sameScope(e, p));
+  if (check.failed || !find()) return undefined;
+  if (!(await verifyDisk(svc, signal))) { check.failed = true; return undefined; }
+  return find();
+}
+
+let lastPersistOk = false;
+/** Waits for queued index writes; true when the most recent one reached the disk. */
+export async function settleIndexWrites(): Promise<boolean> {
+  await persistChain;
+  return lastPersistOk;
+}
+
+/** Saves a complete walk, or (incremental walks) whatever progress it made: unfinished folders simply have no listing time. */
 function persist(svc: DriveService, p: WalkParams, w: RawWalk, startSeq: number): void {
-  if (!indexEnabled() || !w.complete || !isUnder(p.root, ACCOUNT_ROOT)) return;
+  if (!indexEnabled() || (!w.complete && !w.inc) || !isUnder(p.root, ACCOUNT_ROOT)) return;
   persistChain = persistChain.then(async () => {
+    lastPersistOk = false;
     try {
       if (shuttingDown || invalidationSeq !== startSeq) return; // a write happened mid-walk: do not save a possibly outdated tree
       let acct = knownAccountKey ?? (p.root === ACCOUNT_ROOT ? fingerprint(w.nodes.filter((n) => depthOf(n.path) === 2)) : undefined);
@@ -404,11 +696,12 @@ function persist(svc: DriveService, p: WalkParams, w: RawWalk, startSeq: number)
       knownAccountKey = acct;
       const cur = loadDisk();
       const base = cur && cur.accountKey === acct ? cur.entries : [];
-      const entry: IndexEntry = { key: p.key, root: p.root, opts: { maxDepth: p.maxDepth, maxCalls: p.maxCalls, exclude: p.excludeList }, completedAt: Date.now(), nodes: w.nodes };
-      const entries = [entry, ...base.filter((e) => e.key !== p.key)].sort((a, b) => b.completedAt - a.completedAt).slice(0, MAX_ENTRIES);
+      const entry: IndexEntry = { key: p.key, root: p.root, opts: { maxDepth: p.maxDepth, maxCalls: p.maxCalls, exclude: p.excludeList }, completedAt: Date.now(), nodes: w.nodes, listed: Object.fromEntries(w.listed) };
+      const entries = [entry, ...base.filter((e) => !sameScope(e, p))].sort((a, b) => b.completedAt - a.completedAt).slice(0, MAX_ENTRIES);
       const file: IndexFile = { version: INDEX_VERSION, accountKey: acct, savedAt: Date.now(), entries };
       if (writeIndex(file) === "ok") {
         disk = { accountKey: acct, entries };
+        lastPersistOk = true;
         diskVerified = { at: Date.now(), ctl: new AbortController(), promise: Promise.resolve("match") }; // saved under the live drive's own account key
       }
     } catch (err) {
@@ -434,10 +727,19 @@ function startRefresh(svc: DriveService, p: WalkParams): boolean {
   const rec = { controller, root: p.root, superseded: false, promise: Promise.resolve() };
   const startSeq = invalidationSeq;
   refreshes.set(p.key, rec);
+  // A saved tree for this scope is refreshed in place (listings younger than the memory TTL are kept), so a refresh that is cut short still saves its progress.
+  const entry = incPossible(p) && ttlMs() > 0 ? loadDisk()?.entries.find((e) => sameScope(e, p)) : undefined;
+  const bg: WalkParams = entry ? { ...p, inc: { entry, maxAgeMs: ttlMs(), track: false } } : p;
   // Own signal, not the triggering request's: that request has already returned.
-  rec.promise = callContext.run({ signal: controller.signal }, () => runWalk(svc, p, controller.signal))
+  rec.promise = callContext.run({ signal: controller.signal }, () => (bg.inc ? runIncremental(svc, bg, controller.signal, newLive(p.root)) : runWalk(svc, p, controller.signal)))
     .then((w) => {
       if (rec.superseded) return;
+      if (w.inc) {
+        if (w.inc.failed > 0 || (!w.complete && w.inc.refreshed === 0)) refreshFailedAt.set(p.key, Date.now()); else refreshFailedAt.delete(p.key);
+        if (w.complete) remember(p, w, w.inc.oldestListedAt);
+        persist(svc, p, w, startSeq);
+        return;
+      }
       if (!w.complete) { refreshFailedAt.set(p.key, Date.now()); return; } // keep the stale entry rather than store a partial tree
       refreshFailedAt.delete(p.key);
       remember(p, w);
@@ -452,15 +754,20 @@ function startRefresh(svc: DriveService, p: WalkParams): boolean {
   return true;
 }
 
-async function diskLookup(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined): Promise<WalkResult | undefined> {
+/** Whether this call already failed to prove the saved index belongs to the signed-in account (it is not retried within the call). */
+interface AccountCheck { failed: boolean }
+
+async function diskLookup(svc: DriveService, p: WalkParams, signal: AbortSignal | undefined, check: AccountCheck, maxAgeMs?: number): Promise<WalkResult | undefined> {
   if (!indexEnabled() || indexMaxAgeMs() <= 0) return undefined;
   const find = () => pick(diskCandidates(), p.root, p.maxDepth, p.key, p.excludeKey, p.exclude);
   if (!find()) return undefined;
-  if (!(await verifyDisk(svc, signal))) return undefined;
+  if (!(await verifyDisk(svc, signal))) { check.failed = true; return undefined; }
   const hit = find(); // the file may have been invalidated or discarded while we checked the account
   if (!hit) return undefined;
   const res = fromCache(hit.e, p.root, p.maxDepth, p.exclude, hit.exact);
-  if (res.ageMs < ttlMs()) return { ...res, stale: true };
+  if (maxAgeMs !== undefined && res.ageMs > maxAgeMs) return undefined; // the caller needs fresher listings than the index has
+  // A depth-limited answer cut from a deeper saved walk is not refreshed on its own (a depth-cut walk is never saved); that walk is.
+  if (res.ageMs < ttlMs() || (p.maxDepth !== undefined && !hit.exact)) return { ...res, stale: true };
   return { ...res, stale: true, ...(startRefresh(svc, p) ? { refreshing: true } : {}) };
 }
 
@@ -485,46 +792,60 @@ export async function walkTree(svc: DriveService, rootPath: string, opts: WalkOp
   const excludeKey = excludeList.join("\0");
   const key = [root, maxDepth ?? "", maxCalls, excludeKey].join("\0");
   const params: WalkParams = { root, maxDepth, maxCalls, concurrency, excludeList, exclude, key, excludeKey };
-  if (!opts.refresh) {
+  // Oldest listing the caller accepts. Callers that cannot use saved data (noDisk) get what the memory cache would give.
+  const explicitAge = opts.maxListingAgeMs !== undefined && Number.isFinite(opts.maxListingAgeMs) && opts.maxListingAgeMs >= 0 ? opts.maxListingAgeMs : undefined;
+  const listingAgeMs = explicitAge ?? (opts.noDisk ? ttlMs() : Math.min(folderMaxAgeMs(), indexMaxAgeMs()));
+  const check: AccountCheck = { failed: false };
+  if (!opts.refresh && !opts.resumable) {
     const hit = lookup(root, maxDepth, key, excludeKey, exclude);
-    if (hit) return hit;
+    if (hit && (explicitAge === undefined || hit.ageMs <= explicitAge)) return hit;
     if (!opts.noDisk) {
-      const fromDisk = await diskLookup(svc, params, signal);
+      const fromDisk = await diskLookup(svc, params, signal, check, explicitAge);
       if (fromDisk) return fromDisk;
     }
   }
 
   const budgetMs = opts.budgetMs !== undefined && Number.isFinite(opts.budgetMs) && opts.budgetMs >= 0 ? opts.budgetMs : defaultBudgetMs();
+  if (!opts.refresh && listingAgeMs > 0 && incPossible(params)) {
+    const entry = await incSeed(svc, params, signal, check);
+    if (entry || opts.resumable) params.inc = { entry, maxAgeMs: listingAgeMs, track: opts.trackChanges === true, deadlineAt: budgetMs > 0 ? Date.now() + budgetMs : undefined };
+  }
   const rec = joinOrStartWalk(svc, params);
-  const out = await waitForWalk(rec, signal, budgetMs);
+  // An incremental walk stops itself at its deadline (and saves its progress), so nobody takes a snapshot of it.
+  const out = await waitForWalk(rec, signal, params.inc ? 0 : budgetMs);
   if (out.partial) return out.partial;
   const w = out.full;
+  if (w.inc) return incResult(root, w);
   return { root, nodes: w.nodes.slice(), complete: w.complete, callsMade: w.callsMade, skipped: w.skipped.slice(), fromCache: false, ageMs: 0 };
 }
 
 /** One shared walk per key: it runs on its own signal, caches itself when done, and callers only wait for it. */
 function joinOrStartWalk(svc: DriveService, p: WalkParams): WalkRec & { fg: NonNullable<WalkRec["fg"]> } {
-  const existing = refreshes.get(FG + p.key);
+  const fgKey = FG + p.key + (p.inc ? `\0inc\0${p.inc.maxAgeMs}` : "");
+  const existing = refreshes.get(fgKey);
   if (existing?.fg && !existing.superseded && !existing.controller.signal.aborted) return existing as WalkRec & { fg: NonNullable<WalkRec["fg"]> };
   if (!exitHooked) { exitHooked = true; process.once("exit", abortBackgroundRefreshes); }
   const controller = new AbortController();
   const live = newLive(p.root);
   const startSeq = invalidationSeq;
   const rec: WalkRec = { controller, root: p.root, superseded: false, promise: Promise.resolve() };
-  const done = callContext.run({ signal: controller.signal }, () => runWalk(svc, p, controller.signal, live)).then(
+  const done = callContext.run({ signal: controller.signal }, () => (p.inc ? runIncremental(svc, p, controller.signal, live) : runWalk(svc, p, controller.signal, live))).then(
     (w) => {
-      if (refreshes.get(FG + p.key) === rec) refreshes.delete(FG + p.key);
-      if (!rec.superseded) { remember(p, w); persist(svc, p, w, startSeq); }
+      if (refreshes.get(fgKey) === rec) refreshes.delete(fgKey);
+      if (!rec.superseded) {
+        if (!w.inc || w.complete) remember(p, w, w.inc?.oldestListedAt);
+        persist(svc, p, w, startSeq);
+      }
       return w;
     },
     (err) => {
-      if (refreshes.get(FG + p.key) === rec) refreshes.delete(FG + p.key);
+      if (refreshes.get(fgKey) === rec) refreshes.delete(fgKey);
       throw err;
     }
   );
   rec.fg = { live, startedAt: Date.now(), waiters: 0, partialReturned: false, done };
   rec.promise = done.then(() => undefined, () => undefined);
-  refreshes.set(FG + p.key, rec);
+  refreshes.set(fgKey, rec);
   return rec as WalkRec & { fg: NonNullable<WalkRec["fg"]> };
 }
 

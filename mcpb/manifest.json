@@ -300,6 +300,10 @@
       "description": "Search the text inside indexed Proton Drive files and return ranked paths with snippets."
     },
     {
+      "name": "drive_refresh_index",
+      "description": "Refresh the opt-in saved folder index of a huge drive in resumable slices, re-listing only folders older than a set age, oldest first."
+    },
+    {
       "name": "drive_audit_log",
       "description": "Show the newest entries of the server's audit log and whether its hash chain is intact."
     }

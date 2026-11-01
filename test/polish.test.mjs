@@ -161,6 +161,7 @@ const EXPECTED = {
   drive_share_expiry_report: R, drive_recent_changes: R,
   drive_content_index: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   drive_search_content: { ...R, openWorldHint: false },
+  drive_refresh_index: R,
   drive_bulk_move: { destructiveHint: false },
   drive_bulk_trash: { destructiveHint: false, idempotentHint: true },
 };
