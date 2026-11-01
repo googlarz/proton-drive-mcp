@@ -59,6 +59,7 @@ tools:
   - drive_usage
   - drive_find_duplicates
   - drive_sharing_audit
+  - drive_audit_log
 startCommand:
   type: stdio
   configSchema:

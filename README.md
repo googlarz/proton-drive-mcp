@@ -58,7 +58,7 @@ What to expect: search matches names, sizes and dates, not the text of every fil
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
 - **Proton Photos album management** — list albums, create/delete albums, add and remove photos
-- **Companion CLI** — 45 of the 47 operations, scriptable and pipeable, works in cron and shell scripts (the two sync-folder tools, `drive_read_file` and `drive_write_file`, are MCP-only)
+- **Companion CLI** — 45 of the 48 operations, scriptable and pipeable, works in cron and shell scripts (the two sync-folder tools, `drive_read_file` and `drive_write_file`, and `drive_audit_log` are MCP-only)
 - **Full Proton Drive CLI command coverage** — all 32 scriptable commands of CLI 0.8.0 have a matching tool (checked against the CLI's own help; `auth login` is the one command excluded, since it's an interactive browser flow). Not every optional flag is exposed: `sharing invite --include-node-name` is deliberately off (it would put the file name in the invitation email in clear text) and the `inherited` invite role is not offered; commands that accept several paths run one path per call except bulk move and bulk trash
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
 - **Shell injection safe** — all CLI calls use `execFile` with discrete argument arrays, never string interpolation
@@ -363,6 +363,9 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 ### Analytics
 `drive_usage` · `drive_find_duplicates` · `drive_sharing_audit`
 
+### Audit (see [Guard layer](#guard-layer-opt-in))
+`drive_audit_log`
+
 ### Photos
 `photos_list_albums` · `photos_create_album` · `photos_update_album` · `photos_delete_album` · `photos_list_album_photos` · `photos_add_to_album` · `photos_remove_from_album` · `photos_list_timeline` · `photos_download` · `photos_upload`
 
@@ -392,6 +395,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 | `drive_usage` | Storage analytics for a subtree: totals, largest files/folders, extension and media-type breakdown, old files, trash stats (sum of file sizes, not the account quota) | `path?`, `top?`, `olderThanDays?`, `refresh?` |
 | `drive_find_duplicates` | Likely duplicate groups (claimed sha1 / same size; `verify` downloads and sha256s candidates), wasted bytes, suggested keeper — never deletes | `path?`, `minSize?`, `verify?`, `maxVerifyBytes?`, `maxVerifyTotalBytes?` (default 500 MB, max 2 GB), `limit?`, `refresh?` |
 | `drive_sharing_audit` | Public links (no URL), invitees, pending invitations and risk flags for shared items (max 100) | `path?`, `refresh?` |
+| `drive_audit_log` | Newest audit-log entries plus a hash-chain check (needs `PROTON_DRIVE_AUDIT_LOG`; works in readonly mode) | `limit?` (default 50) |
 | `drive_share_invite` | Invite a user (sends an email) ⚠️ | `path`, `email`, `role` (viewer/editor/admin), `message?`, `confirmed: true` |
 | `drive_share_revoke` | Revoke one person's access (fails if not a member) ⚠️ | `path`, `email`, `confirmed: true` |
 | `drive_share_remove_all` | Remove every member + pending invitation at once ⚠️ | `path`, `confirmed: true` |
@@ -453,11 +457,20 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 
 ### Token cost
 
-`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` 40.1 KB (47 tools), `core` 17.9 KB (19 tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
+`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` 40.8 KB (48 tools), `core` 17.9 KB (19 tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
 
 `drive_auth_status`, `drive_version`, `drive_list`, `drive_info`, `drive_read_content`, `drive_list_trash`, `drive_search`, `drive_tree`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`, `drive_trash`, `drive_restore`, `drive_share_status`, `photos_list_timeline`, `photos_download`.
 
 Left out of `core` (use `full`): permanent deletion (`drive_delete`, `drive_empty_trash`), `drive_auth_logout`, public links, invitations and invites, album management, `photos_upload` and the sync-file tools. A call to a hidden tool returns an error asking for `PROTON_DRIVE_TOOL_TIER=full`; no CLI command runs.
+
+### Guard layer (opt-in)
+
+Four environment variables limit what a model (or a prompt-injected one) can do with your Drive. All are read once at startup and are off by default. They apply to the MCP server only: the companion CLI (`proton-drive-cli`) is a tool you run yourself and is not restricted by them.
+
+- **`PROTON_DRIVE_MODE=readonly`** hides every tool that changes Drive or the account from `tools/list` and refuses it at call time (no CLI command runs). Hidden: `drive_upload`, `drive_mkdir`, `drive_rename`, `drive_move`, `drive_copy`, `drive_trash`, `drive_restore`, `drive_delete`, `drive_empty_trash`, `drive_bulk_move`, `drive_bulk_trash`, `drive_write_file`, `drive_auth_logout`, every `drive_share_*` that changes sharing (`invite`, `revoke`, `set_url`, `remove_url`, `remove_all`, `leave`), `drive_invitation_accept`/`reject`, and `photos_create_album`, `photos_update_album`, `photos_delete_album`, `photos_add_to_album`, `photos_remove_from_album`, `photos_upload`. Reads, analytics and downloads to local disk stay. An invalid value is treated as `readonly`. Prompts that name a hidden tool are not offered.
+- **`PROTON_DRIVE_REMOTE_ROOTS`** (list separated by `:` on macOS/Linux, `;` on Windows, e.g. `/my-files/Projects/X`) confines every Drive path argument to those folders. Paths are matched by whole segment and case-sensitively (`/my-files/AB` is not inside `/my-files/A`); `..` and empty (`//`) segments are refused. Paths include sources, destinations, bulk lists, walk roots (`drive_tree`, `drive_search`, `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_sync_plan`; their default `/my-files` is refused, so pass a `path`) and the sync-file tools. The root folder itself cannot be renamed, moved or trashed. `drive_usage` leaves out the account-wide trash summary. An entry that is not a clean absolute path is dropped with a warning; if none is left everything is refused. **These tools cannot be limited to a folder and are refused while roots are set:** `drive_auth_logout`, `drive_delete`, `drive_restore`, `drive_empty_trash`, `drive_list_trash` (trash is account-wide and addressed by name or UID), `drive_list_invitations`, `drive_invitation_accept`, `drive_invitation_reject`, and all ten `photos_*` tools. `drive_auth_status`, `drive_version` and `drive_audit_log` touch no Drive content and keep working.
+- **`PROTON_DRIVE_AUDIT_LOG=/absolute/path/audit.jsonl`** appends one JSON line per tool call, refused calls included: `ts`, `seq`, `tool`, redacted `args`, `outcome` (`ok`, `error` or `refused`), a short `code` (`roots`, `readonly`, `tier`, `confirm`, `audit`, `snapshot`, `invalid`, `cli_error`, ...), `durationMs`, and `prev`/`hash`, a SHA-256 chain over the previous hash and the record. The file is created `0600` (its folder `0700` if missing). Passwords and message bodies are never written; for `drive_write_file` only the byte length and SHA-256 of the content are. If the log cannot be written, tools that change Drive are refused (reads continue, with a warning on stderr). `drive_audit_log` returns the newest entries (default 50, full tier only) and `verification`: `{ok: true, entries, head}` or the first broken `seq`. The chain detects edited, inserted, reordered and mid-file removed lines, not removal of the newest lines: keep `head` somewhere else if you need that. Several servers can share one file; the hash chain is only as trustworthy as the account that can write the file.
+- **`PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE=1`** copies an existing remote file to `<same folder>/.versions/<name>.<UTC timestamp>` before `drive_write_file` overwrites it and before `drive_upload` with `fileConflictStrategy: replace` replaces it (the result carries `snapshot`). If the copy fails, the overwrite is refused. A folder is not snapshotted (the result says so), and a file with no remote copy yet has nothing to preserve. Snapshots are never pruned.
 
 ### Reading file contents
 
@@ -524,7 +537,11 @@ Every tool group was live-tested on 2026-09-28 against a real Proton account, **
 | `PROTON_DRIVE_INDEX_MAX_AGE_H` | Optional | Oldest saved index data that may be served, in hours (default 24; 0 = never serve saved data). Served data is marked `stale: true` and refreshed in the background (`drive_sync_plan`, `drive_find_duplicates` and the sharing audit never use it). |
 | `PROTON_DRIVE_READ_MAX_BYTES` | Optional | Largest file `drive_read_content` will download, in bytes (default 10485760 = 10 MB; values above 52428800 = 50 MB are clamped). Larger files are refused before any download. |
 | `PROTON_DRIVE_READ_TIMEOUT_MS` | Optional | Hard time limit for parsing one `.pdf`/`.docx` in `drive_read_content`, in milliseconds (default 20000; clamped to 1-120000). On expiry the parsing worker is terminated and the call returns an error. |
-| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 47 tools) or `core` (19 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
+| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 48 tools) or `core` (19 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
+| `PROTON_DRIVE_MODE` | Optional | `full` (default) or `readonly`: hide and refuse every tool that changes Drive or the account. An unknown value is treated as `readonly`, with a warning. See [Guard layer](#guard-layer-opt-in). |
+| `PROTON_DRIVE_REMOTE_ROOTS` | Optional | Drive folders (separated by `:`, or `;` on Windows) that every remote path argument must stay inside, e.g. `/my-files/Projects/X`. Tools that cannot be limited to a folder are refused while it is set. See [Guard layer](#guard-layer-opt-in). |
+| `PROTON_DRIVE_AUDIT_LOG` | Optional | Absolute path of an append-only, hash-chained JSONL audit log (`0600`). If it cannot be written, tools that change Drive are refused. Read it with `drive_audit_log`. See [Guard layer](#guard-layer-opt-in). |
+| `PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE` | Optional | `1` to copy a remote file to `.versions/<name>.<timestamp>` in its folder before `drive_write_file` or `drive_upload` (`replace`) overwrites it; the overwrite is refused if the copy fails. Off by default. See [Guard layer](#guard-layer-opt-in). |
 
 ---
 

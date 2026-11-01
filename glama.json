@@ -201,6 +201,10 @@
     {
       "name": "drive_sharing_audit",
       "description": "Audit public links, invitees and risk flags across shared items in Proton Drive."
+    },
+    {
+      "name": "drive_audit_log",
+      "description": "Show the newest entries of the server's audit log and whether its hash chain is intact."
     }
   ]
 }

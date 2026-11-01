@@ -12,8 +12,11 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createRequire } from "node:module";
+import { statSync } from "node:fs";
+import { basename } from "node:path";
 import {
   DriveService,
+  joinRemote,
   type FileConflictStrategy,
   type FolderConflictStrategy,
   type FileDownloadConflictStrategy,
@@ -43,6 +46,9 @@ import { readDriveContent } from "./services/content.js";
 import { showValue } from "./utils/text.js";
 import { sweepStaleTempDirs } from "./utils/tempSweep.js";
 import { driveUsage, driveFindDuplicates, driveSharingAudit } from "./services/analytics.js";
+import { snapshotBeforeOverwrite, snapshotEnabled, type Snapshot } from "./services/snapshot.js";
+import { AuditLog, redactArgs } from "./utils/audit.js";
+import { parseRemoteRoots, pathInRoots } from "./utils/remoteroots.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version?: string };
@@ -75,18 +81,29 @@ function truncate(s: string, max = 500): string {
 // Results produced by a NeedsConfirmationError; the only results that may trigger a human prompt.
 const confirmationRefusals = new WeakSet<ToolResult>();
 
+// Outcome recorded in the audit log for a failed result. Unregistered failures count as plain errors ("invalid").
+const resultOutcomes = new WeakMap<ToolResult, { outcome: "error" | "refused"; code: string }>();
+
+function failWith(outcome: "error" | "refused", code: string, message: string): ToolResult {
+  const r = fail(message);
+  resultOutcomes.set(r, { outcome, code });
+  return r;
+}
+/** A guard (mode, roots, tier, audit, snapshot) said no before the tool did anything. */
+const refuse = (code: string, message: string) => failWith("refused", code, message);
+
 function handleError(err: unknown): ToolResult {
   if (err instanceof NeedsConfirmationError) {
-    const r = fail(err.message);
+    const r = failWith("refused", "confirm", err.message);
     confirmationRefusals.add(r);
     return r;
   }
-  if (err instanceof DriveCliNotFoundError) return fail(err.message);
-  if (err instanceof DriveNotAuthenticatedError) return fail(err.message);
-  if (err instanceof DriveCliError) return fail(`CLI error: ${truncate(err.message)}`);
-  if (err instanceof DriveParseError) return fail(`Parse error: ${err.message}`);
-  if (err instanceof Error) return fail(truncate(err.message));
-  return fail(`Unexpected error: ${truncate(String(err))}`);
+  if (err instanceof DriveCliNotFoundError) return failWith("error", "cli_not_found", err.message);
+  if (err instanceof DriveNotAuthenticatedError) return failWith("error", "not_authenticated", err.message);
+  if (err instanceof DriveCliError) return failWith("error", "cli_error", `CLI error: ${truncate(err.message)}`);
+  if (err instanceof DriveParseError) return failWith("error", "parse_error", `Parse error: ${err.message}`);
+  if (err instanceof Error) return failWith("error", "error", truncate(err.message));
+  return failWith("error", "error", `Unexpected error: ${truncate(String(err))}`);
 }
 
 // Outward-facing / destructive tools refuse to run without an explicit
@@ -1057,6 +1074,20 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "drive_audit_log",
+    description:
+      "Show the most recent entries of this server's audit log (PROTON_DRIVE_AUDIT_LOG) and whether its hash chain is intact. Returns {entries, verification: {ok, entries, head} | {ok: false, brokenSeq, reason}}. Errors when no audit log is configured.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 1000, description: "Newest entries to return (default 50)." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 // ---- Tool surface: derived from TOOLS so the literal stays readable ----------
@@ -1107,6 +1138,7 @@ const TOOL_TITLES: Record<string, string> = {
   photos_update_album: "Update photo album", photos_delete_album: "Delete photo album", photos_list_album_photos: "List album photos",
   photos_add_to_album: "Add photos to album", photos_remove_from_album: "Remove photo from album", photos_list_timeline: "List photo timeline",
   photos_download: "Download photo", photos_upload: "Upload photos", drive_read_file: "Read synced text file", drive_read_content: "Read file text", drive_write_file: "Write synced text file",
+  drive_audit_log: "Show audit log",
 };
 // Hint for clients that cap tool-result size: these tools can legitimately return large payloads.
 const LARGE_RESULT_TOOLS = new Set(["drive_list", "drive_read_file", "drive_read_content"]);
@@ -1159,6 +1191,79 @@ export function resolveTier(raw: string | undefined): "full" | "core" {
   return "full";
 }
 
+// ---- Guard layer: PROTON_DRIVE_MODE and PROTON_DRIVE_REMOTE_ROOTS -------------------------------
+// Every tool is in exactly one of these two sets (test/guards.test.mjs enforces it), so a new tool cannot
+// slip past readonly mode unclassified.
+/** Changes Drive content, sharing, photos or the signed-in account. Hidden and refused in readonly mode. */
+export const MUTATING_TOOL_NAMES = new Set([
+  "drive_auth_logout", "drive_upload", "drive_mkdir", "drive_rename", "drive_move", "drive_copy", "drive_delete",
+  "drive_trash", "drive_restore", "drive_empty_trash", "drive_bulk_move", "drive_bulk_trash", "drive_write_file",
+  "drive_share_invite", "drive_share_revoke", "drive_share_set_url", "drive_share_remove_url", "drive_share_remove_all",
+  "drive_share_leave", "drive_invitation_accept", "drive_invitation_reject",
+  "photos_create_album", "photos_update_album", "photos_delete_album", "photos_add_to_album", "photos_remove_from_album", "photos_upload",
+]);
+/** Reads and analytics. Downloads only write to the local disk. */
+export const READ_TOOL_NAMES = new Set([
+  "drive_auth_status", "drive_version", "drive_list", "drive_info", "drive_tree", "drive_search", "drive_download",
+  "drive_list_trash", "drive_share_status", "drive_list_invitations", "drive_read_content", "drive_read_file",
+  "drive_sync_plan", "drive_usage", "drive_find_duplicates", "drive_sharing_audit", "drive_audit_log",
+  "photos_list_albums", "photos_list_album_photos", "photos_list_timeline", "photos_download",
+]);
+
+/** Fails closed: anything but full or readonly is treated as readonly. */
+export function resolveMode(raw: string | undefined): "full" | "readonly" {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (v === "" || v === "full") return "full";
+  if (v !== "readonly") logger.warn(`Unknown PROTON_DRIVE_MODE "${raw}" — using "readonly" (valid: full, readonly).`);
+  return "readonly";
+}
+
+// With PROTON_DRIVE_REMOTE_ROOTS set, every Drive path argument below must resolve inside a root.
+// strict = the root folder itself is not accepted (renaming, moving or trashing it would take it out of scope).
+type PathArg = { arg: string; list?: boolean; dflt?: string; strict?: boolean };
+const walkRoot: PathArg[] = [{ arg: "path", dflt: "/my-files" }];
+const sharePath: PathArg[] = [{ arg: "path" }];
+export const REMOTE_PATH_ARGS: Record<string, PathArg[]> = {
+  drive_list: [{ arg: "path" }], drive_info: [{ arg: "path" }], drive_read_content: [{ arg: "path" }],
+  drive_read_file: [{ arg: "path" }], drive_write_file: [{ arg: "path" }], drive_mkdir: [{ arg: "path" }],
+  drive_tree: walkRoot, drive_search: walkRoot, drive_usage: walkRoot, drive_find_duplicates: walkRoot, drive_sharing_audit: walkRoot,
+  drive_upload: [{ arg: "remotePath" }], drive_download: [{ arg: "remotePath" }],
+  drive_rename: [{ arg: "path", strict: true }], drive_trash: [{ arg: "path", strict: true }],
+  drive_move: [{ arg: "sourcePath", strict: true }, { arg: "destinationPath" }],
+  drive_copy: [{ arg: "sourcePath" }, { arg: "destinationPath" }],
+  drive_bulk_move: [{ arg: "sources", list: true, strict: true }, { arg: "destinationFolder" }],
+  drive_bulk_trash: [{ arg: "paths", list: true, strict: true }],
+  drive_sync_plan: [{ arg: "drivePath" }],
+  drive_share_status: sharePath, drive_share_invite: sharePath, drive_share_revoke: sharePath, drive_share_leave: sharePath,
+  drive_share_set_url: sharePath, drive_share_remove_url: sharePath, drive_share_remove_all: sharePath,
+};
+/** Take no Drive path, or only a trash path or UID: they cannot be limited to a root, so they are refused while roots are set. */
+export const ROOT_UNSCOPED_TOOL_NAMES = new Set([
+  "drive_auth_logout", "drive_delete", "drive_restore", "drive_empty_trash", "drive_list_trash",
+  "drive_list_invitations", "drive_invitation_accept", "drive_invitation_reject",
+  "photos_list_albums", "photos_create_album", "photos_update_album", "photos_delete_album", "photos_list_album_photos",
+  "photos_add_to_album", "photos_remove_from_album", "photos_list_timeline", "photos_download", "photos_upload",
+]);
+/** Touch no Drive content at all. */
+export const ROOT_EXEMPT_TOOL_NAMES = new Set(["drive_auth_status", "drive_version", "drive_audit_log"]);
+
+/** Why the call must be refused under `roots`, or undefined when every path argument is inside. Throws on a malformed path. */
+export function rootsRefusal(name: string, a: Record<string, unknown>, roots: string[]): string | undefined {
+  if (ROOT_EXEMPT_TOOL_NAMES.has(name)) return undefined;
+  const specs = REMOTE_PATH_ARGS[name];
+  if (!specs) return `${name} cannot be limited to PROTON_DRIVE_REMOTE_ROOTS (it acts on the trash, invitations, photos or the whole account), so it is refused while roots are set.`;
+  for (const { arg, list, dflt, strict } of specs) {
+    const value = a[arg] ?? dflt;
+    if (value === undefined) continue;
+    for (const p of list ? validateRemotePathList(value, arg) : [validateRemotePath(value)]) {
+      if (pathInRoots(p, roots, strict)) continue;
+      const why = strict && pathInRoots(p, roots) ? "is a root folder itself, which cannot be renamed, moved or trashed" : "is outside PROTON_DRIVE_REMOTE_ROOTS";
+      return `${name} refused: ${arg} ${showValue(p)} ${why} (allowed: ${roots.map((r) => showValue(r)).join(", ") || "nothing, no valid root is configured"}).`;
+    }
+  }
+  return undefined;
+}
+
 export { showValue };
 
 export function describeArgs(args: Record<string, unknown>): string {
@@ -1197,7 +1302,14 @@ async function elicitApproval(server: Server, message: string, signal?: AbortSig
 export async function main() {
   const drive = new DriveService();
   const tier = resolveTier(process.env.PROTON_DRIVE_TOOL_TIER); // read once at startup
-  const activeDefs = tier === "core" ? TOOL_DEFS.filter((t) => CORE_TOOL_NAMES.has(t.name)) : TOOL_DEFS;
+  const mode = resolveMode(process.env.PROTON_DRIVE_MODE);
+  const remoteRoots = parseRemoteRoots(process.env.PROTON_DRIVE_REMOTE_ROOTS);
+  const audit = AuditLog.fromEnv(process.env.PROTON_DRIVE_AUDIT_LOG);
+  const auditProblem = audit?.checkWritable();
+  if (auditProblem) logger.warn(`PROTON_DRIVE_AUDIT_LOG cannot be written (${auditProblem}): tools that change Drive are refused until it can.`);
+  const tierDefs = tier === "core" ? TOOL_DEFS.filter((t) => CORE_TOOL_NAMES.has(t.name)) : TOOL_DEFS;
+  const activeDefs = mode === "readonly" ? tierDefs.filter((t) => !MUTATING_TOOL_NAMES.has(t.name)) : tierDefs;
+  const withinRoots = (path: string) => !remoteRoots || pathInRoots(path, remoteRoots);
 
   // A looping model must not be able to spam the human: after this many declined/cancelled
   // prompts within a minute, refuse without prompting until the window clears.
@@ -1251,14 +1363,17 @@ export async function main() {
     return { description: def?.description, messages: [{ role: "user" as const, content: { type: "text" as const, text } }] };
   });
 
-  const handleCall = async (req: { params: { name: string; arguments?: Record<string, unknown> } }): Promise<ToolResult> => {
+  const callTool = async (req: { params: { name: string; arguments?: Record<string, unknown> } }): Promise<ToolResult> => {
     const { name, arguments: args = {} } = req.params;
     let a = args as Record<string, unknown>;
 
     const def = TOOL_DEFS.find((t) => t.name === name);
     // A client may remember a name from a fuller tools/list; refuse before any CLI call.
     if (def && !activeDefs.includes(def)) {
-      return fail(`Tool ${name} is not available in the "${tier}" tool tier. Set PROTON_DRIVE_TOOL_TIER=full and restart the server to use it.`);
+      if (mode === "readonly" && MUTATING_TOOL_NAMES.has(name)) {
+        return refuse("readonly", `Tool ${name} changes Drive or the account and is not available in readonly mode. Set PROTON_DRIVE_MODE=full and restart the server to use it.`);
+      }
+      return refuse("tier", `Tool ${name} is not available in the "${tier}" tool tier. Set PROTON_DRIVE_TOOL_TIER=full and restart the server to use it.`);
     }
     if (def) {
       const problem = checkArgs(def, a);
@@ -1268,6 +1383,22 @@ export async function main() {
         const asConfirmFalse = { ...a, confirmed: false };
         if (a.confirmed !== undefined && a.confirmed !== null || !canElicit() || checkArgs(def, asConfirmFalse)) return fail(problem);
         a = asConfirmFalse;
+      }
+      if (remoteRoots) {
+        try {
+          const why = rootsRefusal(name, a, remoteRoots);
+          if (why) return refuse("roots", why);
+        } catch (err) {
+          return handleError(err);
+        }
+      }
+      // A change that cannot be recorded does not happen; reads go on.
+      if (audit && MUTATING_TOOL_NAMES.has(name)) {
+        const problem = audit.checkWritable();
+        if (problem) {
+          logger.warn(`PROTON_DRIVE_AUDIT_LOG cannot be written (${problem}): refusing ${name}.`);
+          return refuse("audit", `${name} refused: the audit log (PROTON_DRIVE_AUDIT_LOG) cannot be written, so changes are blocked. Reads still work.`);
+        }
       }
     }
 
@@ -1318,9 +1449,26 @@ export async function main() {
           if ((fcs === "replace" || dcs2 === "replace") && a.confirmed !== true) {
             throw new NeedsConfirmationError("drive_upload with strategy 'replace' trashes the existing remote item. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
+          const uploadLocal = validateLocalPath(a.localPath, { scan: true });
+          const uploadRemote = validateRemotePath(a.remotePath);
+          const uploadExtra: { snapshot?: string; warnings?: string[] } = {};
+          if (snapshotEnabled() && (fcs === "replace" || dcs2 === "replace")) {
+            if (statSync(uploadLocal, { throwIfNoEntry: false })?.isDirectory()) {
+              uploadExtra.warnings = ["snapshot skipped: a folder upload with 'replace' is not versioned"];
+            } else if (fcs === "replace") {
+              const target = joinRemote(uploadRemote, basename(uploadLocal));
+              try {
+                const snap = await snapshotBeforeOverwrite(drive, target, withinRoots);
+                if (snap.snapshot) uploadExtra.snapshot = snap.snapshot;
+                if (snap.warning) uploadExtra.warnings = [snap.warning];
+              } catch (err) {
+                return refuse("snapshot", `drive_upload refused: could not snapshot ${showValue(target)} before replacing it (${truncate(err instanceof Error ? err.message : String(err), 200)}). Nothing was uploaded.`);
+              }
+            }
+          }
           const uploadResult = await drive.upload(
-            validateLocalPath(a.localPath, { scan: true }),
-            validateRemotePath(a.remotePath),
+            uploadLocal,
+            uploadRemote,
             fcs as FileConflictStrategy,
             dcs2 as FolderConflictStrategy,
             a.skipThumbnails === true
@@ -1328,7 +1476,7 @@ export async function main() {
           if (uploadResult.failed > 0) {
             return fail(`Upload completed with ${uploadResult.failed} failed file(s). uploaded=${uploadResult.uploaded} skipped=${uploadResult.skipped}`);
           }
-          return ok(uploadResult);
+          return ok({ ...uploadResult, ...uploadExtra });
         }
 
         case "drive_download": {
@@ -1385,6 +1533,7 @@ export async function main() {
             top: a.top as number | undefined,
             olderThanDays: a.olderThanDays as number | undefined,
             refresh: a.refresh === true,
+            skipTrash: remoteRoots !== null,
           }));
 
         case "drive_find_duplicates":
@@ -1654,6 +1803,16 @@ export async function main() {
         case "drive_read_content":
           return ok(await readDriveContent(drive, { path: validateRemotePath(a.path), maxChars: a.maxChars as number | undefined, offset: a.offset as number | undefined }));
 
+        case "drive_audit_log": {
+          if (!audit) return fail("No audit log is configured. Set PROTON_DRIVE_AUDIT_LOG to an absolute file path and restart the server.");
+          try {
+            return ok({ entries: audit.last(typeof a.limit === "number" ? a.limit : 50), verification: audit.verify() });
+          } catch (err) {
+            logger.warn(`Audit log read failed: ${err instanceof Error ? err.message : String(err)}`);
+            return fail("The audit log could not be read.");
+          }
+        }
+
         case "drive_read_file": {
           const syncRoot = getSyncRoot();
           if (!syncRoot) return fail("PROTON_DRIVE_SYNC_PATH is not set. Set it to the root of your Proton Drive sync folder.");
@@ -1667,11 +1826,21 @@ export async function main() {
           if (!syncRoot) return fail("PROTON_DRIVE_SYNC_PATH is not set. Set it to the root of your Proton Drive sync folder.");
           if (typeof a.content !== "string") return fail("content must be a string");
           const writePath = validateRemotePath(a.path);
-          if (a.confirmed !== true && (await syncFileExists(syncRoot, writePath))) {
+          const exists = await syncFileExists(syncRoot, writePath);
+          if (a.confirmed !== true && exists) {
             throw new NeedsConfirmationError(`drive_write_file would overwrite the existing file ${writePath}. Ask the user to confirm, then call again with confirmed=true.`);
           }
+          let snap: Snapshot = {};
+          if (exists && snapshotEnabled()) {
+            try {
+              // A path outside the Drive roots is relative to the sync folder, i.e. to /my-files.
+              snap = await snapshotBeforeOverwrite(drive, writePath === "/my-files" || writePath.startsWith("/my-files/") ? writePath : `/my-files${writePath}`, withinRoots);
+            } catch (err) {
+              return refuse("snapshot", `drive_write_file refused: could not snapshot ${showValue(writePath)} before overwriting it (${truncate(err instanceof Error ? err.message : String(err), 200)}). The file was not changed.`);
+            }
+          }
           await writeSyncFile(syncRoot, writePath, a.content);
-          return ok({ message: `Written: ${writePath}` });
+          return ok({ message: `Written: ${writePath}`, ...(snap.snapshot ? { snapshot: snap.snapshot } : {}), ...(snap.warning ? { warnings: [snap.warning] } : {}) });
         }
 
         default:
@@ -1681,6 +1850,36 @@ export async function main() {
       if (err instanceof McpError) throw err;
       return handleError(err);
     }
+  };
+
+  // Every call, refused ones included, is recorded once it has an outcome.
+  const handleCall = async (req: { params: { name: string; arguments?: Record<string, unknown> } }): Promise<ToolResult> => {
+    const started = Date.now();
+    const { name, arguments: args = {} } = req.params;
+    const record = (outcome: "ok" | "error" | "refused", code?: string) => {
+      if (!audit) return;
+      try {
+        audit.append({
+          tool: truncate(name, 100), args: redactArgs(name, args, TOOL_DEFS.find((t) => t.name === name)?.inputSchema.properties ?? {}),
+          outcome, ...(code ? { code } : {}), durationMs: Date.now() - started,
+        });
+      } catch (err) {
+        logger.warn(`Audit log write failed for ${name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    let result: ToolResult;
+    try {
+      result = await callTool(req);
+    } catch (err) {
+      record("error", err instanceof McpError ? "unknown_tool" : "exception");
+      throw err;
+    }
+    if (!result.isError) record("ok");
+    else {
+      const o = resultOutcomes.get(result);
+      record(o?.outcome ?? "error", o?.code ?? "invalid");
+    }
+    return result;
   };
 
   let inFlight = 0;

@@ -28,7 +28,10 @@ describe("mcpb manifest", () => {
     const refs = Object.values(env).map((v) => v.match(/^\$\{user_config\.(\w+)\}$/)?.[1]);
     assert.ok(refs.every(Boolean));
     assert.deepEqual([...refs].sort(), Object.keys(manifest.user_config).sort());
-    assert.deepEqual(Object.keys(env).sort(), ["PROTON_DRIVE_BIN", "PROTON_DRIVE_INDEX", "PROTON_DRIVE_SYNC_PATH"]);
+    assert.deepEqual(Object.keys(env).sort(), [
+      "PROTON_DRIVE_AUDIT_LOG", "PROTON_DRIVE_BIN", "PROTON_DRIVE_INDEX", "PROTON_DRIVE_MODE", "PROTON_DRIVE_REMOTE_ROOTS",
+      "PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE", "PROTON_DRIVE_SYNC_PATH",
+    ]);
     assert.ok(Object.values(manifest.user_config).every((c) => c.required === false));
   });
 
@@ -57,6 +60,19 @@ describe("mcpb manifest", () => {
     assert.equal(run("TRUE"), "1");
     assert.equal(run("1"), "1");
     for (const v of ["false", "", "  ", "0", "${user_config.persistent_index}", undefined]) assert.equal(run(v), null, String(v));
+  });
+
+  it("launcher maps read_only/snapshot booleans to the server values and drops empty guard strings", () => {
+    const src = read("mcpb", "launcher.mjs").split("// index.js only")[0];
+    const run = (env) => {
+      const base = { ...process.env };
+      for (const k of ["PROTON_DRIVE_MODE", "PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE", "PROTON_DRIVE_REMOTE_ROOTS", "PROTON_DRIVE_AUDIT_LOG"]) delete base[k];
+      const keys = ["PROTON_DRIVE_MODE", "PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE", "PROTON_DRIVE_REMOTE_ROOTS", "PROTON_DRIVE_AUDIT_LOG"];
+      const out = execFileSync(process.execPath, ["--input-type=module", "-e", `${src}\nconsole.log(JSON.stringify(${JSON.stringify(keys)}.map((k) => process.env[k] ?? null)));`], { env: { ...base, ...env }, encoding: "utf8" });
+      return JSON.parse(out);
+    };
+    assert.deepEqual(run({ PROTON_DRIVE_MODE: "true", PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE: "true", PROTON_DRIVE_REMOTE_ROOTS: "/my-files/A", PROTON_DRIVE_AUDIT_LOG: "/tmp/a.jsonl" }), ["readonly", "1", "/my-files/A", "/tmp/a.jsonl"]);
+    assert.deepEqual(run({ PROTON_DRIVE_MODE: "false", PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE: "false", PROTON_DRIVE_REMOTE_ROOTS: "", PROTON_DRIVE_AUDIT_LOG: "${user_config.audit_log}" }), [null, null, null, null]);
   });
 
   it("tool names equal the server's real tools/list", async () => {

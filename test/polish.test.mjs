@@ -156,7 +156,7 @@ const EXPECTED = {
   drive_read_file: { ...R, openWorldHint: false },
   drive_read_content: { ...R, openWorldHint: false },
   drive_write_file: { destructiveHint: true, openWorldHint: true },
-  drive_tree: R, drive_search: R, drive_usage: R, drive_find_duplicates: R, drive_sharing_audit: R, drive_sync_plan: R,
+  drive_tree: R, drive_search: R, drive_usage: R, drive_find_duplicates: R, drive_sharing_audit: R, drive_sync_plan: R, drive_audit_log: R,
   drive_bulk_move: { destructiveHint: false },
   drive_bulk_trash: { destructiveHint: false, idempotentHint: true },
 };
