@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.8.0 — unreleased
+## 1.8.0 — 2026-11-01
 
 ### Added
 - **Opt-in local OCR** (`PROTON_DRIVE_OCR=1`, off by default): scanned PDFs and images become readable by `drive_read_content` and `drive_read_many` and searchable through the content index. A PDF whose text layer is empty or very sparse (under about 20 non-blank characters per page on average) falls back to OCR; `.png`, `.jpg`/`.jpeg`, `.tif`/`.tiff`, `.bmp`, `.webp` (and `.heic` with Vision) are read as images. Without the opt-in nothing changes. Results carry `ocr: true`, `engine`, `pagesOcrd` and a note that OCR text may contain recognition errors; `drive_read_many` items and `drive_search_content` results carry `ocr: true`.
@@ -19,6 +19,7 @@
 - A depth-limited answer cut from a deeper saved walk is not refreshed in the background (that walk is).
 
 ### Notes
+- Known limits: a scanned PDF is rendered with one `pdftoppm` call per page on the tesseract path (slower; Vision renders itself); a fake `Pages:` line in a PDF's metadata can make OCR read fewer pages of that same file; a PDF indexed with some text while OCR was unavailable is not re-read once OCR works; a warm-up that keeps timing out can cost up to 180 s per content-index call before deferring.
 - **A folder's modification time does not change when something inside it changes.** Live probe (2026-11-01, scratch folder, trashed afterwards): a folder's entry in its parent's listing (`modificationTime`, no revision field) did not change after adding, renaming or trashing a file directly inside it or deeper, nor after creating a subfolder, checked up to several minutes later, so no skip based on a folder timestamp is sound. The refresh therefore relies on listing age only: changes below a folder whose saved listing is within the allowed age stay unseen until it ages out (lower `maxAgeHours` or use `refresh: true`).
 - Limits: each checkpoint rewrites the whole index file (200 MB cap, roughly 300,000 to 400,000 entries); a write made through this server clears the listing times it touched (see above); the MCP server now lists 54 tools (the companion CLI still mirrors 45).
 - `npm run build` now also copies `src/ocr/` to `dist/ocr/` (the Swift source ships in the npm package and the `.mcpb` bundle through `dist/`).
