@@ -2,9 +2,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { delimiter, join } from "node:path";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { delimiter, dirname, join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { makeSandbox, startServer, nonVersionCalls, sleep, fakeEnv, DIST_INDEX } from "./helpers/mcp-client.mjs";
 import {
@@ -138,6 +138,8 @@ describe("PROTON_DRIVE_REMOTE_ROOTS: matching", () => {
     assert.match(rootsRefusal("drive_bulk_move", { sources: ["/my-files/A/x"], destinationFolder: "/my-files/B" }, roots), /destinationFolder.*outside/);
     assert.match(rootsRefusal("drive_tree", {}, roots), /path \/my-files is outside/, "the /my-files default is checked too");
     assert.match(rootsRefusal("drive_trash", { path: "/my-files/A" }, roots), /root folder itself/);
+    assert.match(rootsRefusal("drive_share_leave", { path: "/my-files/A" }, roots), /root folder itself/, "leaving the root itself would take it out of scope");
+    assert.equal(rootsRefusal("drive_share_leave", { path: "/my-files/A/sub" }, roots), undefined);
     assert.equal(rootsRefusal("drive_list", { path: "/my-files/A" }, roots), undefined);
     assert.match(rootsRefusal("drive_empty_trash", {}, roots), /cannot be limited/);
     assert.equal(rootsRefusal("drive_version", {}, roots), undefined);
@@ -323,13 +325,55 @@ describe("audit log: chain", () => {
     } finally { rmSync(d, { recursive: true, force: true }); }
   });
 
-  it("redacts passwords and message bodies, and reduces file text to its length and SHA-256", () => {
+  it("redacts passwords and message bodies, and reduces file text to its length (no hash)", () => {
     const declared = { path: {}, content: {}, password: {}, message: {} };
     const r = redactArgs("drive_write_file", { path: "/my-files/a.txt", content: "top secret é", extra: "leak" }, declared);
-    assert.deepEqual(r, { path: "/my-files/a.txt", content: "[redacted]", contentBytes: 13, contentSha256: createHash("sha256").update("top secret é").digest("hex"), extra: "[unknown argument]" });
-    assert.match(r.contentSha256, /^[0-9a-f]{64}$/);
+    assert.deepEqual(r, { path: "/my-files/a.txt", content: "[redacted]", contentBytes: 13, extra: "[unknown argument]" });
     assert.deepEqual(redactArgs("drive_share_set_url", { path: "/p", password: "pw" }, declared), { path: "/p", password: "[redacted]" });
     assert.deepEqual(redactArgs("drive_share_invite", { path: "/p", message: "hello" }, declared), { path: "/p", message: "[redacted]" });
+  });
+
+  it("an argument named like an Object.prototype member is undeclared, not logged by value", () => {
+    const r = redactArgs("drive_list", JSON.parse('{"path":"/p","toString":"SECRET","constructor":"SECRET2"}'), { path: {} });
+    assert.deepEqual(r, { path: "/p", toString: "[unknown argument]", constructor: "[unknown argument]" });
+  });
+
+  it("two processes appending at once keep one unbroken chain with every seq present", async () => {
+    const d = tmp();
+    try {
+      const file = join(d, "audit.jsonl");
+      const script = `import { AuditLog } from ${JSON.stringify(pathToFileURL(join(dirname(DIST_INDEX), "utils", "audit.js")).href)};
+        const log = new AuditLog(process.argv[1]);
+        for (let i = 0; i < 60; i++) log.append({ tool: "t" + process.argv[2], args: {}, outcome: "ok", durationMs: 1 });`;
+      const run = (id) => new Promise((resolve) => {
+        const p = spawn(process.execPath, ["--input-type=module", "-e", script, file, id], { stdio: ["ignore", "ignore", "pipe"] });
+        let err = ""; p.stderr.on("data", (x) => { err += x; });
+        p.on("exit", (code) => resolve({ code, err }));
+      });
+      const results = await Promise.all([run("a"), run("b"), run("c")]);
+      for (const r of results) assert.equal(r.code, 0, r.err);
+      const v = new AuditLog(file).verify();
+      assert.equal(v.ok, true, JSON.stringify(v));
+      assert.equal(v.entries, 180);
+      assert.deepEqual(readLog(file).map((e) => e.seq), Array.from({ length: 180 }, (_, i) => i + 1));
+      assert.equal(existsSync(file + ".lock"), false, "the lock is released");
+    } finally { rmSync(d, { recursive: true, force: true }); }
+  });
+
+  it("a stale lock from a crashed process is taken over; a fresh one that never clears fails the write", () => {
+    const d = tmp();
+    try {
+      const file = join(d, "audit.jsonl");
+      const log = new AuditLog(file, { lockWaitMs: 300 });
+      writeFileSync(file + ".lock", "");
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(file + ".lock", old, old);
+      log.append({ tool: "a", args: {}, outcome: "ok", durationMs: 1 });
+      assert.equal(log.verify().ok, true);
+      writeFileSync(file + ".lock", ""); // fresh, held by "someone else"
+      assert.throws(() => log.append({ tool: "b", args: {}, outcome: "ok", durationMs: 1 }), /lock/);
+      assert.match(log.checkWritable(), /lock/, "mutating tools are refused before they run");
+    } finally { rmSync(d, { recursive: true, force: true }); }
   });
 });
 
@@ -372,7 +416,7 @@ describe("PROTON_DRIVE_AUDIT_LOG: server", () => {
     } finally { rmSync(sync, { recursive: true, force: true }); }
   });
 
-  it("records the outcome of real calls: ok, cli error, readonly and confirmation refusals; write_file keeps only length and hash", async () => {
+  it("records the outcome of real calls: ok, cli error, readonly and confirmation refusals; write_file keeps only the length", async () => {
     const sync = mkdtempSync(join(tmpdir(), "pdmcp-sync-"));
     try {
       writeFileSync(join(sync, "old.txt"), "old");
@@ -384,7 +428,7 @@ describe("PROTON_DRIVE_AUDIT_LOG: server", () => {
         assert.deepEqual(e.map((x) => [x.tool, x.outcome, x.code]), [["drive_write_file", "ok", undefined], ["drive_write_file", "refused", "confirm"], ["drive_list", "ok", undefined]]);
         assert.equal(e[0].args.content, "[redacted]");
         assert.equal(e[0].args.contentBytes, 16);
-        assert.match(e[0].args.contentSha256, /^[0-9a-f]{64}$/);
+        assert.equal(e[0].args.contentSha256, undefined);
         assert.ok(!readFileSync(file, "utf8").includes("FILE-TEXT-SECRET"));
       }, { PROTON_DRIVE_SYNC_PATH: sync });
     } finally { rmSync(sync, { recursive: true, force: true }); }
@@ -392,6 +436,18 @@ describe("PROTON_DRIVE_AUDIT_LOG: server", () => {
       await c.call("drive_trash", { path: "/my-files/x" });
       assert.deepEqual(readLog(file).map((x) => [x.outcome, x.code]), [["refused", "readonly"]]);
     }, { PROTON_DRIVE_MODE: "readonly" });
+  });
+
+  it("an argument named toString/constructor is rejected as undeclared and never reaches the log", async () => {
+    await withAudit(async (c, sb, file) => {
+      for (const k of ["toString", "constructor", "hasOwnProperty"]) {
+        const r = await c.call("drive_list", JSON.parse(`{"path":"/my-files","${k}":"SECRET"}`));
+        assert.equal(r.isError, true);
+        assert.match(r.text, new RegExp(`Unknown argument '${k}'`));
+      }
+      assert.ok(!readFileSync(file, "utf8").includes("SECRET"));
+      assert.deepEqual(nonVersionCalls(sb.argvLog), []);
+    });
   });
 
   it("drive_audit_log returns the newest entries with an intact chain, and notices tampering", async () => {
@@ -491,30 +547,35 @@ describe("PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE", () => {
   }
   const cli = (sb) => nonVersionCalls(sb.argvLog);
 
-  it("write_file: copies the existing remote file to <parent>/.versions/<name>.<UTC timestamp> first, creating .versions", async () => {
-    await withFs({ "/my-files/old.txt": file }, {}, async (c, sb, { sync }) => {
+  it("write_file: copies the existing LOCAL file to <dir>/.versions/<name>.<UTC timestamp> in the sync folder, without touching the CLI", async () => {
+    await withFs({}, {}, async (c, sb, { sync }) => { // no remote copy at all: the file was never uploaded
+      writeFileSync(join(sync, "old.txt"), "unsynced local edit");
       const r = await c.call("drive_write_file", { path: "/my-files/old.txt", content: "fresh", confirmed: true });
       assert.equal(r.isError, false, r.text);
       assert.match(r.data.snapshot, /^\/my-files\/\.versions\/old\.txt\.\d{8}T\d{6}\.\d{3}Z$/);
       assert.equal(readFileSync(join(sync, "old.txt"), "utf8"), "fresh");
-      const calls = cli(sb);
-      assert.deepEqual(calls.map((a) => a.slice(0, 2).join(" ")), ["filesystem info", "filesystem info", "filesystem create-folder", "filesystem copy"]);
-      assert.deepEqual(calls[2].slice(2, 4), ["/my-files", ".versions"]);
-      const copy = calls[3];
-      assert.equal(copy[copy.indexOf("--name") + 1], r.data.snapshot.split("/").pop());
-      assert.deepEqual(copy.filter((x) => x.startsWith("/")), ["/my-files/old.txt", "/my-files/.versions"]);
+      assert.equal(readFileSync(join(sync, ".versions", r.data.snapshot.split("/").pop()), "utf8"), "unsynced local edit");
+      assert.deepEqual(cli(sb), []);
     });
   });
 
-  it("does not recreate an existing .versions folder", async () => {
-    await withFs({ "/my-files/old.txt": file, "/my-files/.versions": { type: "folder" } }, {}, async (c, sb) => {
-      assert.equal((await c.call("drive_write_file", { path: "/my-files/old.txt", content: "x", confirmed: true })).isError, false);
-      assert.deepEqual(cli(sb).map((a) => a[1]), ["info", "info", "copy"]);
+  it("write_file: snapshots next to the file in a subfolder, and never clobbers an earlier snapshot", async () => {
+    await withFs({}, {}, async (c, sb, { sync }) => {
+      mkdirSync(join(sync, "sub"));
+      writeFileSync(join(sync, "sub", "n.txt"), "v1");
+      const r1 = await c.call("drive_write_file", { path: "/my-files/sub/n.txt", content: "v2", confirmed: true });
+      assert.match(r1.data.snapshot, /^\/my-files\/sub\/\.versions\/n\.txt\./);
+      await sleep(5);
+      const r2 = await c.call("drive_write_file", { path: "/my-files/sub/n.txt", content: "v3", confirmed: true });
+      assert.deepEqual(readdirSync(join(sync, "sub", ".versions")).length, 2);
+      assert.equal(readFileSync(join(sync, "sub", ".versions", r1.data.snapshot.split("/").pop()), "utf8"), "v1");
+      assert.equal(readFileSync(join(sync, "sub", ".versions", r2.data.snapshot.split("/").pop()), "utf8"), "v2");
     });
   });
 
-  it("write_file: a failed snapshot refuses the overwrite and leaves the file untouched", async () => {
-    await withFs({ "/my-files/old.txt": file }, { FAKE_FAIL_CMD: "copy" }, async (c, sb, { sync }) => {
+  it("write_file: a failed snapshot copy refuses the overwrite and leaves the file untouched", async () => {
+    await withFs({}, {}, async (c, sb, { sync }) => {
+      writeFileSync(join(sync, ".versions"), "a file where the folder should be");
       const r = await c.call("drive_write_file", { path: "/my-files/old.txt", content: "fresh", confirmed: true });
       assert.equal(r.isError, true);
       assert.match(r.text, /refused: could not snapshot/);
@@ -522,30 +583,31 @@ describe("PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE", () => {
     });
   });
 
-  it("write_file: a new file, or one with no remote copy yet, is written without a snapshot", async () => {
+  it("write_file: a new file is written without a snapshot or a .versions folder", async () => {
     await withFs({}, {}, async (c, sb, { sync }) => {
-      assert.equal((await c.call("drive_write_file", { path: "/my-files/brand-new.txt", content: "x" })).isError, false);
-      assert.deepEqual(cli(sb), []);
-      const r = await c.call("drive_write_file", { path: "/my-files/old.txt", content: "x", confirmed: true });
+      const r = await c.call("drive_write_file", { path: "/my-files/brand-new.txt", content: "x" });
       assert.equal(r.isError, false, r.text);
       assert.equal(r.data.snapshot, undefined);
-      assert.deepEqual(cli(sb).map((a) => a[1]), ["info"]);
+      assert.equal(existsSync(join(sync, ".versions")), false);
+      assert.deepEqual(cli(sb), []);
     });
   });
 
-  it("write_file: a folder at the target is not snapshotted and the result says so", async () => {
-    await withFs({ "/my-files/folder": { type: "folder" } }, {}, async (c, sb) => {
-      const r = await c.call("drive_write_file", { path: "/my-files/folder", content: "x", confirmed: true });
-      assert.equal(r.isError, false, r.text);
-      assert.match(r.data.warnings[0], /snapshot skipped.*folder/);
-      assert.deepEqual(cli(sb).map((a) => a[1]), ["info"]);
+  it("write_file: a folder at the target is refused when snapshots are on, nothing changes", async () => {
+    await withFs({}, {}, async (c, sb, { sync }) => {
+      mkdirSync(join(sync, "adir"));
+      const r = await c.call("drive_write_file", { path: "/my-files/adir", content: "x", confirmed: true });
+      assert.equal(r.isError, true);
+      assert.match(r.text, /refused: could not snapshot/);
+      assert.equal(statSync(join(sync, "adir")).isDirectory(), true);
     });
   });
 
   it("is off unless enabled", async () => {
-    await withFs({ "/my-files/old.txt": file }, { PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE: "0" }, async (c, sb) => {
+    await withFs({ "/my-files/old.txt": file }, { PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE: "0" }, async (c, sb, { sync }) => {
       assert.equal((await c.call("drive_write_file", { path: "/my-files/old.txt", content: "x", confirmed: true })).isError, false);
       assert.deepEqual(cli(sb), []);
+      assert.equal(existsSync(join(sync, ".versions")), false);
     });
   });
 
@@ -562,28 +624,56 @@ describe("PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE", () => {
     });
   });
 
-  it("upload: a failed snapshot refuses the upload; a local folder is skipped with a warning", async () => {
+  it("upload: a failed snapshot refuses the upload", async () => {
     await withFs({ "/my-files/Docs/old.txt": file }, { FAKE_FAIL_CMD: "copy" }, async (c, sb, { local }) => {
       const r = await c.call("drive_upload", { localPath: join(local, "old.txt"), remotePath: "/my-files/Docs", fileConflictStrategy: "replace", confirmed: true });
       assert.equal(r.isError, true);
       assert.match(r.text, /drive_upload refused: could not snapshot/);
       assert.ok(!cli(sb).some((a) => a[1] === "upload"));
     });
+  });
+
+  it("upload: replacing a FOLDER while snapshots are on is refused before anything is uploaded", async () => {
     await withFs({}, {}, async (c, sb, { local }) => {
+      for (const extra of [{ folderConflictStrategy: "replace" }, { fileConflictStrategy: "replace" }]) {
+        const r = await c.call("drive_upload", { localPath: local, remotePath: "/my-files/Docs", confirmed: true, ...extra });
+        assert.equal(r.isError, true);
+        assert.match(r.text, /drive_upload refused: .*folder.*not versioned.*PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE/);
+      }
+      assert.deepEqual(cli(sb), []);
+    });
+    await withFs({}, { PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE: "" }, async (c, sb, { local }) => {
       const r = await c.call("drive_upload", { localPath: local, remotePath: "/my-files/Docs", folderConflictStrategy: "replace", confirmed: true });
       assert.equal(r.isError, false, r.text);
-      assert.match(r.data.warnings[0], /snapshot skipped.*folder/);
       assert.deepEqual(cli(sb).map((a) => a[1]), ["upload"]);
     });
   });
 
+  it("upload: a remote FOLDER at the replace target is refused, not warned about", async () => {
+    await withFs({ "/my-files/Docs/old.txt": { type: "folder" } }, {}, async (c, sb, { local }) => {
+      const r = await c.call("drive_upload", { localPath: join(local, "old.txt"), remotePath: "/my-files/Docs", fileConflictStrategy: "replace", confirmed: true });
+      assert.equal(r.isError, true);
+      assert.match(r.text, /drive_upload refused: could not snapshot.*folder/);
+      assert.ok(!cli(sb).some((a) => a[1] === "upload"));
+    });
+  });
+
+  it("upload: a missing CLI is not 'no remote file': the replace is refused (fail closed)", async () => {
+    await withFs({ "/my-files/Docs/old.txt": file }, { PROTON_DRIVE_BIN: "/nonexistent/dir/proton-drive" }, async (c, sb, { local }) => {
+      const r = await c.call("drive_upload", { localPath: join(local, "old.txt"), remotePath: "/my-files/Docs", fileConflictStrategy: "replace", confirmed: true });
+      assert.equal(r.isError, true);
+      assert.match(r.text, /drive_upload refused: could not snapshot.*CLI not found/);
+    });
+  });
+
   it("the .versions folder is vetted against PROTON_DRIVE_REMOTE_ROOTS (same parent, so it passes inside a root)", async () => {
-    await withFs({ "/my-files/A/old.txt": file }, { PROTON_DRIVE_REMOTE_ROOTS: "/my-files/A" }, async (c, sb, { sync }) => {
+    await withFs({}, { PROTON_DRIVE_REMOTE_ROOTS: "/my-files/A" }, async (c, sb, { sync }) => {
       mkdirSync(join(sync, "A"));
       writeFileSync(join(sync, "A", "old.txt"), "old");
       const r = await c.call("drive_write_file", { path: "/my-files/A/old.txt", content: "x", confirmed: true });
       assert.equal(r.isError, false, r.text);
       assert.match(r.data.snapshot, /^\/my-files\/A\/\.versions\//);
+      assert.equal(readdirSync(join(sync, "A", ".versions")).length, 1);
     });
   });
 
@@ -592,9 +682,10 @@ describe("PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE", () => {
     const sync = mkdtempSync(join(tmpdir(), "pdmcp-sync-"));
     try {
       writeFileSync(join(sync, "old.txt"), "old");
-      writeFileSync(join(sb.dir, "info.json"), JSON.stringify({ "/my-files/old.txt": file }));
+      writeFileSync(join(sync, ".versions"), "blocks the snapshot folder");
+      writeFileSync(join(sb.dir, "info.json"), JSON.stringify({}));
       const log = join(sb.dir, "audit.jsonl");
-      const c = await startServer("fs", sb, { FAKE_INFO: join(sb.dir, "info.json"), FAKE_FAIL_CMD: "copy", PROTON_DRIVE_SYNC_PATH: sync, PROTON_DRIVE_AUDIT_LOG: log, ...SNAP });
+      const c = await startServer("fs", sb, { FAKE_INFO: join(sb.dir, "info.json"), PROTON_DRIVE_SYNC_PATH: sync, PROTON_DRIVE_AUDIT_LOG: log, ...SNAP });
       await c.call("drive_write_file", { path: "/my-files/old.txt", content: "x", confirmed: true });
       await c.close();
       assert.deepEqual(readLog(log).map((e) => [e.outcome, e.code]), [["refused", "snapshot"]]);
@@ -619,5 +710,49 @@ describe("startup: stdout stays pure JSON-RPC with every guard configured", () =
     sb.cleanup();
     assert.ok(out.split("\n").filter(Boolean).every((l) => JSON.parse(l).jsonrpc === "2.0"));
     for (const k of ["PROTON_DRIVE_MODE", "PROTON_DRIVE_REMOTE_ROOTS", "PROTON_DRIVE_AUDIT_LOG"]) assert.match(err, new RegExp(k), k);
+  });
+});
+
+describe("startup: PROTON_DRIVE_AUDIT_LOG inside PROTON_DRIVE_SYNC_PATH", () => {
+  const start = async (sync, audit) => {
+    const sb = makeSandbox();
+    const p = spawn(process.execPath, [DIST_INDEX], { env: fakeEnv("json", sb, { PROTON_DRIVE_SYNC_PATH: sync, PROTON_DRIVE_AUDIT_LOG: audit }), stdio: ["pipe", "pipe", "pipe"] });
+    let err = "";
+    p.stderr.on("data", (d) => { err += d; });
+    const exited = new Promise((r) => p.on("exit", r));
+    await Promise.race([exited, sleep(1500)]);
+    const code = p.exitCode;
+    p.stdin.end();
+    await exited;
+    sb.cleanup();
+    return { code, err };
+  };
+
+  it("refuses to start (exit 1, clear error) when the log is in the sync folder, also via a symlinked path", async () => {
+    const sync = mkdtempSync(join(tmpdir(), "pdmcp-sync-"));
+    try {
+      for (const audit of [join(sync, "audit.jsonl"), join(sync, "sub", "deeper", "audit.jsonl")]) {
+        const r = await start(sync, audit);
+        assert.equal(r.code, 1, r.err);
+        assert.match(r.err, /PROTON_DRIVE_AUDIT_LOG.*PROTON_DRIVE_SYNC_PATH/);
+        assert.ok(!existsSync(audit), "nothing is written");
+      }
+      const link = sync + "-link";
+      symlinkSync(sync, link);
+      try {
+        const r = await start(sync, join(link, "audit.jsonl"));
+        assert.equal(r.code, 1, r.err);
+      } finally { rmSync(link, { force: true }); }
+    } finally { rmSync(sync, { recursive: true, force: true }); }
+  });
+
+  it("starts when the log is outside the sync folder (a sibling with a shared name prefix is outside)", async () => {
+    const sync = mkdtempSync(join(tmpdir(), "pdmcp-sync-"));
+    const other = sync + "-audit";
+    mkdirSync(other);
+    try {
+      const r = await start(sync, join(other, "audit.jsonl"));
+      assert.equal(r.code, null, r.err);
+    } finally { rmSync(sync, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true }); }
   });
 });

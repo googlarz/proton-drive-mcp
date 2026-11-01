@@ -1,4 +1,4 @@
-import { open, mkdir, realpath, lstat, stat } from "node:fs/promises";
+import { open, mkdir, realpath, lstat, stat, copyFile } from "node:fs/promises";
 import { constants as fsc } from "node:fs";
 import { join, resolve, dirname, basename, relative, isAbsolute, sep } from "node:path";
 
@@ -101,6 +101,20 @@ export async function syncFileExists(syncRoot: string, remotePath: string): Prom
     if (code === "ENOENT" || code === "ENOTDIR") return false;
     throw e;
   }
+}
+
+/**
+ * Copies the regular file at `fromRemotePath` to `toRemotePath` (both inside the sync folder, parent folders created).
+ * Never replaces an existing destination (the copy fails instead).
+ */
+export async function copySyncFile(syncRoot: string, fromRemotePath: string, toRemotePath: string): Promise<void> {
+  const { real: src } = await containedReal(syncRoot, fromRemotePath);
+  if (!(await stat(src)).isFile()) throw new Error(`${fromRemotePath} is not a regular file.`);
+  const { realRoot, real: dst } = await containedReal(syncRoot, toRemotePath);
+  await mkdir(dirname(dst), { recursive: true });
+  const dstDir = await realpath(dirname(dst));
+  assertInside(realRoot, dstDir, toRemotePath);
+  await copyFile(src, join(dstDir, basename(dst)), fsc.COPYFILE_EXCL);
 }
 
 export async function readSyncFile(syncRoot: string, remotePath: string): Promise<string> {

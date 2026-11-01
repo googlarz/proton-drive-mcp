@@ -48,8 +48,8 @@ import { sweepStaleTempDirs } from "./utils/tempSweep.js";
 import { driveUsage, driveFindDuplicates, driveSharingAudit, driveShareExpiryReport } from "./services/analytics.js";
 import { driveRecentChanges } from "./services/changes.js";
 import { driveReadMany } from "./services/readMany.js";
-import { snapshotBeforeOverwrite, snapshotEnabled, type Snapshot } from "./services/snapshot.js";
-import { AuditLog, redactArgs } from "./utils/audit.js";
+import { snapshotBeforeOverwrite, snapshotLocalBeforeOverwrite, snapshotEnabled, type Snapshot } from "./services/snapshot.js";
+import { AuditLog, auditLogInside, redactArgs } from "./utils/audit.js";
 import { parseRemoteRoots, pathInRoots } from "./utils/remoteroots.js";
 
 const require = createRequire(import.meta.url);
@@ -149,7 +149,7 @@ type ToolDef = {
 function checkArgs(def: ToolDef, a: Record<string, unknown>): string | undefined {
   const props = def.inputSchema.properties;
   for (const k of Object.keys(a)) {
-    if (!(k in props)) return `Unknown argument '${k}'. Allowed: ${Object.keys(props).join(", ") || "(none)"}.`;
+    if (!Object.hasOwn(props, k)) return `Unknown argument '${k}'. Allowed: ${Object.keys(props).join(", ") || "(none)"}.`;
   }
   for (const k of def.inputSchema.required ?? []) {
     if (a[k] === undefined || a[k] === null) return `Missing required argument '${k}'.`;
@@ -1278,7 +1278,7 @@ export function resolveMode(raw: string | undefined): "full" | "readonly" {
 }
 
 // With PROTON_DRIVE_REMOTE_ROOTS set, every Drive path argument below must resolve inside a root.
-// strict = the root folder itself is not accepted (renaming, moving or trashing it would take it out of scope).
+// strict = the root folder itself is not accepted (renaming, moving, trashing or leaving it would take it out of scope).
 type PathArg = { arg: string; list?: boolean; dflt?: string; strict?: boolean };
 const walkRoot: PathArg[] = [{ arg: "path", dflt: "/my-files" }];
 const sharePath: PathArg[] = [{ arg: "path" }];
@@ -1294,7 +1294,7 @@ export const REMOTE_PATH_ARGS: Record<string, PathArg[]> = {
   drive_bulk_move: [{ arg: "sources", list: true, strict: true }, { arg: "destinationFolder" }],
   drive_bulk_trash: [{ arg: "paths", list: true, strict: true }],
   drive_sync_plan: [{ arg: "drivePath" }],
-  drive_share_status: sharePath, drive_share_invite: sharePath, drive_share_revoke: sharePath, drive_share_leave: sharePath,
+  drive_share_status: sharePath, drive_share_invite: sharePath, drive_share_revoke: sharePath, drive_share_leave: [{ arg: "path", strict: true }],
   drive_share_set_url: sharePath, drive_share_remove_url: sharePath, drive_share_remove_all: sharePath,
 };
 /** Take no Drive path, or only a trash path or UID: they cannot be limited to a root, so they are refused while roots are set. */
@@ -1318,7 +1318,7 @@ export function rootsRefusal(name: string, a: Record<string, unknown>, roots: st
     if (value === undefined) continue;
     for (const p of list ? validateRemotePathList(value, arg) : [validateRemotePath(value)]) {
       if (pathInRoots(p, roots, strict)) continue;
-      const why = strict && pathInRoots(p, roots) ? "is a root folder itself, which cannot be renamed, moved or trashed" : "is outside PROTON_DRIVE_REMOTE_ROOTS";
+      const why = strict && pathInRoots(p, roots) ? "is a root folder itself, which cannot be renamed, moved, trashed or left" : "is outside PROTON_DRIVE_REMOTE_ROOTS";
       return `${name} refused: ${arg} ${showValue(p)} ${why} (allowed: ${roots.map((r) => showValue(r)).join(", ") || "nothing, no valid root is configured"}).`;
     }
   }
@@ -1366,6 +1366,11 @@ export async function main() {
   const mode = resolveMode(process.env.PROTON_DRIVE_MODE);
   const remoteRoots = parseRemoteRoots(process.env.PROTON_DRIVE_REMOTE_ROOTS);
   const audit = AuditLog.fromEnv(process.env.PROTON_DRIVE_AUDIT_LOG);
+  const syncPath = process.env.PROTON_DRIVE_SYNC_PATH;
+  if (audit && syncPath && auditLogInside(audit.file, syncPath)) {
+    // The log would sync to Drive, and drive_write_file / drive_read_file could then rewrite or read it.
+    throw new Error("PROTON_DRIVE_AUDIT_LOG must be outside PROTON_DRIVE_SYNC_PATH (the sync folder is uploaded and can be edited with drive_write_file).");
+  }
   const auditProblem = audit?.checkWritable();
   if (auditProblem) logger.warn(`PROTON_DRIVE_AUDIT_LOG cannot be written (${auditProblem}): tools that change Drive are refused until it can.`);
   const tierDefs = tier === "core" ? TOOL_DEFS.filter((t) => CORE_TOOL_NAMES.has(t.name)) : TOOL_DEFS;
@@ -1512,16 +1517,15 @@ export async function main() {
           }
           const uploadLocal = validateLocalPath(a.localPath, { scan: true });
           const uploadRemote = validateRemotePath(a.remotePath);
-          const uploadExtra: { snapshot?: string; warnings?: string[] } = {};
+          const uploadExtra: { snapshot?: string } = {};
           if (snapshotEnabled() && (fcs === "replace" || dcs2 === "replace")) {
             if (statSync(uploadLocal, { throwIfNoEntry: false })?.isDirectory()) {
-              uploadExtra.warnings = ["snapshot skipped: a folder upload with 'replace' is not versioned"];
+              return refuse("snapshot", `drive_upload refused: replacing a folder is not versioned and PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE is on. Nothing was uploaded. Use 'merge', 'rename' or 'skip' instead, or turn snapshots off.`);
             } else if (fcs === "replace") {
               const target = joinRemote(uploadRemote, basename(uploadLocal));
               try {
                 const snap = await snapshotBeforeOverwrite(drive, target, withinRoots);
                 if (snap.snapshot) uploadExtra.snapshot = snap.snapshot;
-                if (snap.warning) uploadExtra.warnings = [snap.warning];
               } catch (err) {
                 return refuse("snapshot", `drive_upload refused: could not snapshot ${showValue(target)} before replacing it (${truncate(err instanceof Error ? err.message : String(err), 200)}). Nothing was uploaded.`);
               }
@@ -1926,13 +1930,13 @@ export async function main() {
           if (exists && snapshotEnabled()) {
             try {
               // A path outside the Drive roots is relative to the sync folder, i.e. to /my-files.
-              snap = await snapshotBeforeOverwrite(drive, writePath === "/my-files" || writePath.startsWith("/my-files/") ? writePath : `/my-files${writePath}`, withinRoots);
+              snap = await snapshotLocalBeforeOverwrite(syncRoot, writePath === "/my-files" || writePath.startsWith("/my-files/") ? writePath : `/my-files${writePath}`, withinRoots);
             } catch (err) {
               return refuse("snapshot", `drive_write_file refused: could not snapshot ${showValue(writePath)} before overwriting it (${truncate(err instanceof Error ? err.message : String(err), 200)}). The file was not changed.`);
             }
           }
           await writeSyncFile(syncRoot, writePath, a.content);
-          return ok({ message: `Written: ${writePath}`, ...(snap.snapshot ? { snapshot: snap.snapshot } : {}), ...(snap.warning ? { warnings: [snap.warning] } : {}) });
+          return ok({ message: `Written: ${writePath}`, ...(snap.snapshot ? { snapshot: snap.snapshot } : {}) });
         }
 
         default:

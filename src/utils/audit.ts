@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
-import { dirname, isAbsolute } from "node:path";
+import { chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const GENESIS = "0".repeat(64);
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -33,7 +33,7 @@ const hashOf = (e: Omit<AuditEntry, "hash">) => sha256(e.prev + canonical(e));
 
 /**
  * What goes in the log for a call. Nothing secret or free-text: passwords and message bodies are replaced, file text is
- * reduced to its size and SHA-256, and arguments the tool does not declare are recorded as present but never by value.
+ * reduced to its size, and arguments the tool does not declare are recorded as present but never by value.
  */
 export function redactArgs(tool: string, args: Record<string, unknown>, declared: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -41,9 +41,8 @@ export function redactArgs(tool: string, args: Record<string, unknown>, declared
     if (tool === "drive_write_file" && k === "content" && typeof v === "string") {
       out.content = "[redacted]";
       out.contentBytes = Buffer.byteLength(v);
-      out.contentSha256 = sha256(v);
     } else if (k === "password" || k === "message") out[k] = "[redacted]";
-    else if (!(k in declared)) out[k] = "[unknown argument]";
+    else if (!Object.hasOwn(declared, k)) out[k] = "[unknown argument]";
     else {
       const size = JSON.stringify(v)?.length ?? 0;
       out[k] = size > 20_000 ? `[omitted: ${size} chars]` : v;
@@ -51,6 +50,30 @@ export function redactArgs(tool: string, args: Record<string, unknown>, declared
   }
   return out;
 }
+
+/** realpath of the deepest existing ancestor of `p` with the missing remainder appended. */
+function realResolve(p: string): string {
+  const rest: string[] = [];
+  for (let cur = resolve(p); ; cur = dirname(cur)) {
+    try {
+      return join(realpathSync(cur), ...rest);
+    } catch (err) {
+      const parent = dirname(cur);
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT" || parent === cur) return resolve(p);
+      rest.unshift(basename(cur));
+    }
+  }
+}
+
+/** True when `file` is `dir` itself or lies below it, symlinks resolved. */
+export function auditLogInside(file: string, dir: string): boolean {
+  if (!isAbsolute(file)) return false; // unusable anyway: AuditLog refuses a relative path
+  const rel = relative(realResolve(dir), realResolve(file));
+  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(".." + sep));
+}
+
+const STALE_LOCK_MS = 2_000; // a holder keeps the lock for a few milliseconds
+const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /** Last line of the file, or undefined when empty. Throws when the file does not end in a newline (a torn write). */
 function lastLine(fd: number, size: number): string | undefined {
@@ -73,7 +96,11 @@ function lastLine(fd: number, size: number): string | undefined {
 
 /** Append-only JSONL log; each line commits to the previous one's hash, so editing or removing an entry breaks the chain. */
 export class AuditLog {
-  constructor(readonly file: string) {}
+  private readonly lockWaitMs: number;
+
+  constructor(readonly file: string, opts: { lockWaitMs?: number } = {}) {
+    this.lockWaitMs = opts.lockWaitMs ?? 4_000;
+  }
 
   /** null when PROTON_DRIVE_AUDIT_LOG is unset or blank. A set but unusable value still yields a log whose writes fail (fail closed). */
   static fromEnv(raw: string | undefined): AuditLog | null {
@@ -94,6 +121,29 @@ export class AuditLog {
     return fd;
   }
 
+  /**
+   * Exclusive lock (file.lock, created with O_EXCL) so two server processes cannot both read the same tail and write the
+   * same seq. Retries with backoff for lockWaitMs, then throws (a write failure). A lock older than STALE_LOCK_MS belongs
+   * to a crashed process and is removed. Returns the release function.
+   */
+  private lock(): () => void {
+    const path = this.file + ".lock";
+    const deadline = Date.now() + this.lockWaitMs;
+    for (let delay = 1; ; delay = Math.min(delay * 2, 50)) {
+      try {
+        closeSync(openSync(path, "wx", 0o600));
+        return () => { try { unlinkSync(path); } catch { /* already gone */ } };
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      }
+      try {
+        if (Date.now() - statSync(path).mtimeMs > STALE_LOCK_MS) { unlinkSync(path); continue; }
+      } catch { continue; /* released meanwhile */ }
+      if (Date.now() >= deadline) throw new Error(`audit log is locked by another process (${path})`);
+      sleepSync(delay);
+    }
+  }
+
   private tail(fd: number): { seq: number; hash: string } {
     const line = lastLine(fd, fstatSync(fd).size);
     if (line === undefined) return { seq: 0, hash: GENESIS };
@@ -106,20 +156,28 @@ export class AuditLog {
   checkWritable(): string | undefined {
     try {
       const fd = this.open();
-      try { this.tail(fd); } finally { closeSync(fd); }
+      try {
+        const release = this.lock(); // also proves a later append will not time out on a stuck lock
+        try { this.tail(fd); } finally { release(); }
+      } finally { closeSync(fd); }
       return undefined;
     } catch (err) {
       return err instanceof Error ? err.message : String(err);
     }
   }
 
-  /** The tail is re-read on every append so several server processes sharing one file keep a single chain. Throws on failure. */
+  /** The tail is re-read under a lock on every append so several server processes sharing one file keep a single chain. Throws on failure. */
   append(rec: { tool: string; args: Record<string, unknown>; outcome: AuditEntry["outcome"]; code?: string; durationMs: number }): void {
     const fd = this.open();
     try {
-      const { seq, hash: prev } = this.tail(fd);
-      const body: Omit<AuditEntry, "hash"> = { ts: new Date().toISOString(), seq: seq + 1, ...rec, prev };
-      writeSync(fd, JSON.stringify({ ...body, hash: hashOf(body) }) + "\n");
+      const release = this.lock();
+      try {
+        const { seq, hash: prev } = this.tail(fd);
+        const body: Omit<AuditEntry, "hash"> = { ts: new Date().toISOString(), seq: seq + 1, ...rec, prev };
+        writeSync(fd, JSON.stringify({ ...body, hash: hashOf(body) }) + "\n");
+      } finally {
+        release();
+      }
     } finally {
       closeSync(fd);
     }
