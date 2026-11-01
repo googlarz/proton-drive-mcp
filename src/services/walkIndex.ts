@@ -49,26 +49,17 @@ const FUTURE_SKEW_MS = 5 * 60_000;
 const foreignOrLoose = (st: { uid: number; mode: number }) =>
   (typeof process.getuid === "function" && st.uid !== process.getuid()) || (st.mode & 0o077) !== 0;
 
-/** Reads and validates the index; anything wrong (missing, symlink, loose mode, foreign owner, oversize, corrupt, other version) is "no index". */
-export function readIndex(o: { requireWritable?: boolean } = {}): IndexFile | undefined {
-  const p = indexPath();
+/** Reads a JSON file from the private index directory; anything wrong (missing, symlink, loose mode, foreign owner, oversize, corrupt) is undefined. */
+export function readPrivateJson(fileName: string, maxBytes = MAX_BYTES): unknown {
+  const p = join(indexDir(), fileName);
   const dst = lstatOrNull(indexDir());
   if (!dst || !dst.isDirectory()) return undefined;
-  if (o.requireWritable) {
-    // Data we cannot keep current (a read-only directory can neither be rewritten nor cleared after our own
-    // writes) must not be served: a trashed or moved item would reappear in the next process.
-    try { accessSync(indexDir(), constants.W_OK); accessSync(p, constants.W_OK); } catch { return undefined; }
-  }
   let fd: number | undefined;
   try {
     fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW); // a symlink is never followed
     const st = fstatSync(fd);
-    if (!st.isFile() || foreignOrLoose(st) || st.size > MAX_BYTES) return undefined; // checked before reading
-    const j = JSON.parse(readFileSync(fd, "utf8")) as Partial<IndexFile> | null;
-    if (!j || j.version !== INDEX_VERSION || typeof j.accountKey !== "string" || !Array.isArray(j.entries)) return undefined;
-    const horizon = Date.now() + FUTURE_SKEW_MS;
-    const ok = j.entries.every((e) => e && typeof e.key === "string" && typeof e.root === "string" && Number.isFinite(e.completedAt) && e.completedAt <= horizon && Array.isArray(e.nodes) && e.opts && Array.isArray(e.opts.exclude));
-    return ok ? (j as IndexFile) : undefined;
+    if (!st.isFile() || foreignOrLoose(st) || st.size > maxBytes) return undefined; // checked before reading
+    return JSON.parse(readFileSync(fd, "utf8"));
   } catch {
     return undefined;
   } finally {
@@ -76,21 +67,29 @@ export function readIndex(o: { requireWritable?: boolean } = {}): IndexFile | un
   }
 }
 
+/** Reads and validates the index; anything wrong (missing, symlink, loose mode, foreign owner, oversize, corrupt, other version) is "no index". */
+export function readIndex(o: { requireWritable?: boolean } = {}): IndexFile | undefined {
+  if (o.requireWritable) {
+    // Data we cannot keep current (a read-only directory can neither be rewritten nor cleared after our own
+    // writes) must not be served: a trashed or moved item would reappear in the next process.
+    try { accessSync(indexDir(), constants.W_OK); accessSync(indexPath(), constants.W_OK); } catch { return undefined; }
+  }
+  const j = readPrivateJson(FILE_NAME) as Partial<IndexFile> | null | undefined;
+  if (!j || j.version !== INDEX_VERSION || typeof j.accountKey !== "string" || !Array.isArray(j.entries)) return undefined;
+  const horizon = Date.now() + FUTURE_SKEW_MS;
+  const ok = j.entries.every((e) => e && typeof e.key === "string" && typeof e.root === "string" && Number.isFinite(e.completedAt) && e.completedAt <= horizon && Array.isArray(e.nodes) && e.opts && Array.isArray(e.opts.exclude));
+  return ok ? (j as IndexFile) : undefined;
+}
+
 let warnedSize = false;
 const warnedDirs = new Set<string>();
 
-/** Atomic write. Never throws; the result says what happened. */
-export function writeIndex(file: IndexFile, o: { maxBytes?: number } = {}): "ok" | "disabled" | "refused" | "too-large" | "error" {
-  if (!indexEnabled()) return "disabled";
+/** Atomic 0600 write of `body` into the private index directory. Never throws; the result says what happened. */
+export function writePrivateFile(fileName: string, body: string, maxBytes = MAX_BYTES): "ok" | "too-large" | "refused" | "error" {
   const dir = indexDir();
   let tmp: string | undefined;
   try {
-    const trimmed: IndexFile = { ...file, entries: [...file.entries].sort((a, b) => b.completedAt - a.completedAt).slice(0, MAX_ENTRIES) };
-    const body = JSON.stringify(trimmed);
-    if (Buffer.byteLength(body) > (o.maxBytes ?? MAX_BYTES)) {
-      if (!warnedSize) { warnedSize = true; logger.warn("Persistent walk index not saved: it would exceed the size cap."); }
-      return "too-large";
-    }
+    if (Buffer.byteLength(body) > maxBytes) return "too-large";
     const existing = lstatOrNull(dir);
     if (existing) {
       // Never chmod or take over a directory this code did not create.
@@ -108,10 +107,10 @@ export function writeIndex(file: IndexFile, o: { maxBytes?: number } = {}): "ok"
       const made = lstatSync(dir);
       if (!made.isDirectory() || foreignOrLoose(made)) return "refused";
     }
-    const target = join(dir, FILE_NAME);
+    const target = join(dir, fileName);
     const tst = lstatOrNull(target);
     if (tst && !tst.isFile()) return "refused"; // symlink or directory in the way
-    tmp = join(dir, `${FILE_NAME}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+    tmp = join(dir, `${fileName}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
     const fd = openSync(tmp, "wx", 0o600); // O_EXCL: never follows a pre-planted link
     try { writeSync(fd, body); fsyncSync(fd); } finally { closeSync(fd); }
     chmodSync(tmp, 0o600);
@@ -128,12 +127,28 @@ export function writeIndex(file: IndexFile, o: { maxBytes?: number } = {}): "ok"
   }
 }
 
+/** Atomic write. Never throws; the result says what happened. */
+export function writeIndex(file: IndexFile, o: { maxBytes?: number } = {}): "ok" | "disabled" | "refused" | "too-large" | "error" {
+  if (!indexEnabled()) return "disabled";
+  const trimmed: IndexFile = { ...file, entries: [...file.entries].sort((a, b) => b.completedAt - a.completedAt).slice(0, MAX_ENTRIES) };
+  const r = writePrivateFile(FILE_NAME, JSON.stringify(trimmed), o.maxBytes);
+  if (r === "too-large" && !warnedSize) { warnedSize = true; logger.warn("Persistent walk index not saved: it would exceed the size cap."); }
+  return r;
+}
+
 /** Deletes the index file (a symlink is removed itself, never followed). */
 export function deleteIndex(): { path: string; deleted: boolean; bytes: number } {
   const path = indexPath();
   const st = lstatOrNull(path);
   if (!st) return { path, deleted: false, bytes: 0 };
   try { unlinkSync(path); return { path, deleted: true, bytes: st.size }; } catch { return { path, deleted: false, bytes: 0 }; }
+}
+
+/** Deletes another private file of this directory (a symlink is removed itself, never followed). */
+export function deletePrivateFile(fileName: string): boolean {
+  const p = join(indexDir(), fileName);
+  if (!lstatOrNull(p)) return false;
+  try { unlinkSync(p); return true; } catch { return false; }
 }
 
 export function indexStatus() {

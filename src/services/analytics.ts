@@ -44,7 +44,7 @@ function breakdown(nodes: WalkNode[], key: (n: WalkNode) => string, top: number)
   return topBy([...m].map(([k, v]) => ({ key: k, ...v })), top, (r) => r.key);
 }
 
-function walkMeta(w: WalkResult) {
+export function walkMeta(w: WalkResult) {
   return { complete: w.complete, skippedCount: w.skipped.length, skipped: w.skipped.slice(0, 10), fromCache: w.fromCache, ...staleFields(w), ...partialFields(w) };
 }
 
@@ -153,7 +153,7 @@ export function findDuplicateCandidates(nodes: WalkNode[], minSize: number): Dup
   return groups.sort((a, b) => wasted(b) - wasted(a) || (a.members[0].path < b.members[0].path ? -1 : 1));
 }
 
-async function pool<T>(items: T[], concurrency: number, fn: (x: T) => Promise<void>): Promise<void> {
+export async function pool<T>(items: T[], concurrency: number, fn: (x: T) => Promise<void>): Promise<void> {
   let i = 0;
   await Promise.all(
     Array.from({ length: Math.min(concurrency, items.length) }, async () => {
@@ -342,5 +342,58 @@ export async function driveSharingAudit(
     errors,
     note: "Public link URLs are intentionally omitted. Only sharing set directly on each item is shown (inherited access is not).",
     ...walkMeta(walk),
+  };
+}
+
+// ---- drive_share_expiry_report ---------------------------------------------
+
+export const DEFAULT_EXPIRY_WITHIN_DAYS = 14;
+
+/** Public links under a path with how long each has left, built on the sharing audit (same walk, same 100-item cap). */
+export async function driveShareExpiryReport(
+  drive: DriveService,
+  o: { path: string; withinDays?: number; refresh?: boolean },
+  deps: { walk?: WalkFn; status?: (path: string) => Promise<ShareStatus>; now?: number } = {}
+) {
+  const withinDays = o.withinDays ?? DEFAULT_EXPIRY_WITHIN_DAYS;
+  const now = deps.now ?? Date.now();
+  const audit = await driveSharingAudit(drive, { path: o.path, refresh: o.refresh }, deps);
+  const items = audit.items.flatMap((i) => {
+    if (!i.publicLink) return [];
+    const { role, expiresAt, passwordProtected } = i.publicLink;
+    const t = expiresAt ? Date.parse(expiresAt) : NaN;
+    const expired = Number.isFinite(t) && t <= now;
+    return [{
+      path: i.path,
+      role,
+      expiresAt,
+      daysLeft: Number.isFinite(t) ? Math.floor((t - now) / DAY_MS) : undefined,
+      expired,
+      expiringSoon: Number.isFinite(t) && !expired && t - now <= withinDays * DAY_MS,
+      noExpiry: !expiresAt,
+      hasPassword: passwordProtected,
+    }];
+  });
+  // Nearest expiry first (expired links lead), links without expiry last.
+  items.sort((a, b) => (a.expiresAt ? Date.parse(a.expiresAt) : Infinity) - (b.expiresAt ? Date.parse(b.expiresAt) : Infinity) || (a.path < b.path ? -1 : 1));
+  return {
+    root: audit.root,
+    withinDays,
+    links: items.length,
+    expired: items.filter((i) => i.expired).length,
+    expiringSoon: items.filter((i) => i.expiringSoon).length,
+    noExpiry: items.filter((i) => i.noExpiry).length,
+    items,
+    sharedNodes: audit.sharedNodes,
+    audited: audit.audited,
+    capped: audit.capped,
+    errors: audit.errors,
+    note: audit.capped
+      ? `Only the first ${SHARE_AUDIT_CAP} of ${audit.sharedNodes} shared items were checked, so links beyond that are missing. Narrow \`path\` to cover the rest. Link URLs are omitted.`
+      : "Link URLs are intentionally omitted. Only links set directly on each item are shown.",
+    complete: audit.complete,
+    skippedCount: audit.skippedCount,
+    skipped: audit.skipped,
+    fromCache: audit.fromCache,
   };
 }

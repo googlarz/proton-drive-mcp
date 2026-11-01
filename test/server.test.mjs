@@ -44,7 +44,7 @@ describe("initialize and tools/list", () => {
   let tools;
   before(async () => { tools = await s.c.listTools(); });
 
-  it("advertises exactly 48 tools", () => assert.equal(tools.length, 48));
+  it("advertises exactly 51 tools", () => assert.equal(tools.length, 51));
 
   it("has unique tool names", () => {
     assert.equal(new Set(tools.map((t) => t.name)).size, tools.length);
@@ -495,7 +495,7 @@ describe("CLI output handling and error sanitization", () => {
 
   it("masks --password even when the CLI itself echoes its argv on stderr", () =>
     withServer("fail-stderr-echo", {}, async (c) => {
-      const r = await c.call("drive_share_set_url", { path: P, password: SECRET, confirmed: true });
+      const r = await c.call("drive_share_set_url", { path: P, password: SECRET, resetSettings: true, confirmed: true });
       assert.equal(r.isError, true);
       assert.ok(!r.text.includes(SECRET), `password leaked: ${r.text}`);
       assert.match(r.text, /--password \*\*\*/);
@@ -584,7 +584,7 @@ describe("CLI output handling and error sanitization", () => {
       const r = await c.call("drive_list", { path: "/my-files" });
       assert.equal(r.isError, true);
       assert.match(r.text, /not found/i);
-      assert.equal((await c.listTools()).length, 48);
+      assert.equal((await c.listTools()).length, 51);
     } finally { await c.close(); sb.cleanup(); }
   });
 });

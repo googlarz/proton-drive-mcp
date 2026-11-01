@@ -60,7 +60,7 @@ describe("PROTON_DRIVE_MODE=readonly", () => {
   it("hides every mutating tool and keeps every read tool", async () => {
     const tools = await withServer({ PROTON_DRIVE_MODE: "readonly" }, (c) => c.listTools());
     assert.deepEqual(names(tools).sort(), [...READ_TOOL_NAMES].sort());
-    assert.equal(tools.length, 21);
+    assert.equal(tools.length, 24);
   });
 
   it("refuses a mutating tool at call time, with a clear message, without touching the CLI", async () => {
@@ -84,12 +84,12 @@ describe("PROTON_DRIVE_MODE=readonly", () => {
     });
   });
 
-  it("an invalid value fails closed (readonly) with one stderr warning; full still lists 48", async () => {
+  it("an invalid value fails closed (readonly) with one stderr warning; full still lists 51", async () => {
     await withServer({ PROTON_DRIVE_MODE: "bogus" }, async (c) => {
-      assert.equal((await c.listTools()).length, 21);
+      assert.equal((await c.listTools()).length, 24);
       assert.equal((c.stderr.match(/PROTON_DRIVE_MODE/g) ?? []).length, 1);
     });
-    await withServer({ PROTON_DRIVE_MODE: "full" }, async (c) => assert.equal((await c.listTools()).length, 48));
+    await withServer({ PROTON_DRIVE_MODE: "full" }, async (c) => assert.equal((await c.listTools()).length, 51));
   });
 
   it("offers only prompts whose tools are all available", async () => {

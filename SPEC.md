@@ -27,7 +27,7 @@ CLI:     node dist/cli.js <command>
 ```
 src/index.ts              MCP server: TOOLS (schemas), tool-surface derivation (gates, pagination),
                           schema enforcement, dispatch, lifecycle (signals, cancellation)
-src/cli.ts                Companion CLI (mirrors 45 of 48 tools; drive_read_file/drive_write_file/drive_audit_log are MCP-only)
+src/cli.ts                Companion CLI (mirrors 45 of 51 tools; drive_read_file/drive_write_file/drive_audit_log/drive_read_many/drive_share_expiry_report/drive_recent_changes are MCP-only)
 src/services/content.ts   drive_read_content: private-temp download, text/docx/pdf extraction, paging
 src/services/drive.ts     DriveService: one method per operation, CLI argv building, response parsing
 src/utils/subprocess.ts   Runs the CLI: timeouts, process-group kill, cancellation, sanitized errors
@@ -42,15 +42,15 @@ src/types/index.ts        Shared response types
 test/                     Unit tests (injected runner) + real-process tests (fake CLI over stdio)
 ```
 
-## Tools (48)
+## Tools (51)
 
 - **Auth / meta:** `drive_auth_status`, `drive_auth_logout`, `drive_version`
-- **Filesystem:** `drive_list`, `drive_info`, `drive_read_content`, `drive_tree`, `drive_search`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`
+- **Filesystem:** `drive_list`, `drive_info`, `drive_read_content`, `drive_read_many`, `drive_tree`, `drive_search`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`
 - **Trash:** `drive_list_trash`, `drive_trash`, `drive_restore`, `drive_delete`, `drive_empty_trash`
 - **Sharing:** `drive_share_status`, `drive_share_invite`, `drive_share_revoke`, `drive_share_remove_all`, `drive_share_set_url`, `drive_share_remove_url`, `drive_share_leave`
 - **Invitations:** `drive_list_invitations`, `drive_invitation_accept`, `drive_invitation_reject`
 - **Plan & bulk:** `drive_sync_plan` (plan only), `drive_bulk_move`, `drive_bulk_trash` (plan first, `confirmed` to apply)
-- **Analytics:** `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`
+- **Analytics:** `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_share_expiry_report`, `drive_recent_changes`
 - **Photos:** `photos_list_albums`, `photos_create_album`, `photos_update_album`, `photos_delete_album`, `photos_list_album_photos`, `photos_add_to_album`, `photos_remove_from_album`, `photos_list_timeline`, `photos_download`, `photos_upload`
 - **Local sync folder (needs `PROTON_DRIVE_SYNC_PATH`):** `drive_read_file`, `drive_write_file`
 - **Audit (needs `PROTON_DRIVE_AUDIT_LOG`):** `drive_audit_log`

@@ -112,7 +112,7 @@ const CLI_COMMAND = {
 };
 // Operate on the local sync folder via env var, so intentionally MCP-only. drive_audit_log reads the
 // MCP server's own audit log (the guard layer applies to the MCP server, not to this CLI).
-const MCP_ONLY = new Set(["drive_read_file", "drive_write_file", "drive_audit_log"]);
+const MCP_ONLY = new Set(["drive_read_file", "drive_write_file", "drive_audit_log", "drive_read_many", "drive_share_expiry_report", "drive_recent_changes"]);
 
 describe("CLI reachability", () => {
   let usage;

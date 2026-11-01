@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.6.0 — unreleased
+
+### Added
+- **Guard layer** (all opt-in, off by default; they apply to the MCP server only, so the companion `proton-drive-cli` bypasses them):
+  - `PROTON_DRIVE_MODE=readonly` hides and refuses every tool that changes Drive or the account (an invalid value fails closed to readonly). Every tool is classified as reading or mutating, and a test fails if a new tool is not.
+  - `PROTON_DRIVE_REMOTE_ROOTS` confines every Drive path argument to the listed folders; tools that cannot be limited to a folder (trash, invitations, photos, sign-out) are refused while it is set.
+  - `PROTON_DRIVE_AUDIT_LOG` appends a hash-chained JSON line per tool call, refused calls included, with passwords and file text redacted; if the log cannot be written, tools that change Drive are refused. New tool **`drive_audit_log`** returns the newest entries and checks the chain.
+  - `PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE=1` copies a remote file to `.versions/<name>.<timestamp>` before `drive_write_file` or `drive_upload` (`replace`) overwrites it; the overwrite is refused if the copy fails.
+- **`drive_recent_changes`**: files added or modified since a date (`7d`, `12h`, `2w` or an ISO date). With `snapshot: "diff" | "save"` and `PROTON_DRIVE_INDEX=1` it compares against a saved per-path snapshot and reports added, removed, modified and moved files. An incomplete walk never overwrites a snapshot. `proton-drive-cli index clear` also removes the snapshot file.
+- **`drive_share_expiry_report`**: public links with `expiresAt`, `daysLeft` and the flags `expired`, `expiringSoon`, `noExpiry`, `hasPassword`. Built on the sharing audit, so it keeps its limit of 100 shared items and reports `capped`.
+- **`drive_read_many`**: reads the text of up to 10 files in one call, two at a time, with per-file and total character caps. One failing file does not fail the batch.
+
+### Changed
+- `drive_share_set_url` now refuses, before changing anything, to replace a link whose password and/or expiration the call omits (set-url replaces all link settings), naming what would be lost. Pass them again, or pass the new `resetSettings: true` to drop them on purpose. It also refuses when the existing settings cannot be read. Previously this only produced a warning after the fact.
+
+### Notes
+- The MCP server now lists 51 tools (47 in 1.5.3). The three new tools are MCP-only; the companion CLI still mirrors 45.
+
 ## 1.5.3 — 2026-10-31
 
 ### Security
