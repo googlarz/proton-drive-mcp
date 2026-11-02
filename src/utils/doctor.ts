@@ -2,7 +2,7 @@ import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DriveService } from "../services/drive.js";
 import { runDriveRaw } from "./subprocess.js";
-import { cliCompatWarning, TESTED_CLI } from "./cliVersion.js";
+import { cliCompatWarning, TESTED_CLIS } from "./cliVersion.js";
 import { chooseEngines, ocrEnabled, ocrLanguages, resolveTool, runOcrTool } from "../services/ocr.js";
 import { defaultConfigPath, findOwnServerKey, isDirectory, isExecutableFile, resolveBinary, resolveDriveCli } from "./claudeConfig.js";
 
@@ -47,7 +47,7 @@ async function cliChecks(): Promise<{ checks: Check[]; cliPath?: string }> {
     const warning = cliCompatWarning(versionText);
     checks.push(warning
       ? { id: "cli-version", status: "warn", message: version, hint: warning }
-      : { id: "cli-version", status: "ok", message: `matches tested ${TESTED_CLI}.x` });
+      : { id: "cli-version", status: "ok", message: `matches tested ${TESTED_CLIS.map((v) => `${v}.x`).join(" and ")}` });
   }
 
   try {

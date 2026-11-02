@@ -50,7 +50,7 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 
 | | Status |
 |---|---|
-| Proton Drive CLI | Built and live-tested against **0.8.0** (all 32 scriptable commands covered). Other versions are untested: run `proton-drive-cli doctor` after upgrading the CLI. |
+| Proton Drive CLI | Built against **0.8.0** (all 32 scriptable commands covered). **0.9.0** (SDK js 0.22.2) was live-tested for file operations (list, info, tree, search, read, download, upload, mkdir, rename, move, trash), sharing reads and the audit, and photo and album reads; sharing changes, album and photo writes, and other versions are untested. Run `proton-drive-cli doctor` after upgrading the CLI. |
 | Node.js | 22 or newer |
 | macOS | Live-tested. Built-in Vision OCR. |
 | Linux | The test suite runs on Ubuntu in CI; not live-tested against a real account. |
@@ -591,12 +591,12 @@ These come from the upstream `proton-drive` CLI (v0.8.0), not from this server:
 
 | Component | Tested with |
 |---|---|
-| Proton Drive CLI | 0.8.x (SDK js 0.21) |
+| Proton Drive CLI | 0.8.x (SDK js 0.21) and 0.9.x (SDK js 0.22; photo and album writes and sharing changes only on 0.8.x) |
 | macOS | Live-tested against a real account |
 | Linux | CI with a fake CLI only |
 | Windows | Not supported (see [Platform support](#platform-support)) |
 
-`proton-drive-cli doctor` warns when the installed CLI is not 0.8.x, and the server logs one warning line to stderr at startup. Other versions may work but are unverified. If something breaks, open an issue at [github.com/googlarz/proton-drive-mcp/issues](https://github.com/googlarz/proton-drive-mcp/issues) with the output of `proton-drive version` and `proton-drive-cli doctor`.
+`proton-drive-cli doctor` warns when the installed CLI is neither 0.8.x nor 0.9.x, and the server logs one warning line to stderr at startup. Other versions may work but are unverified. If something breaks, open an issue at [github.com/googlarz/proton-drive-mcp/issues](https://github.com/googlarz/proton-drive-mcp/issues) with the output of `proton-drive version` and `proton-drive-cli doctor`.
 
 ## Platform support
 
