@@ -10,6 +10,7 @@
 ### Changed
 - `doctor` recognises the server under another key exactly (command `proton-drive-mcp`, an argument `proton-drive-mcp` or `proton-drive-mcp@<version>`, or a `/proton-drive-mcp/dist/` path) instead of by substring, so a directory like `proton-drive-mcp-notes` no longer matches and the README global-install form now does.
 - `@modelcontextprotocol/sdk` is pinned to an exact version (1.32.2, no caret); updates go through a deliberate bump.
+- Proton Drive CLI **0.9.0** (SDK js 0.22.2) no longer triggers the version warning in `doctor` and at startup (0.8.x and 0.9.x are both accepted). Live-tested on 0.9.0 against a real account: `doctor`, list, info, tree, search, read (text layer and OCR), download, upload, mkdir, rename, move, trash, sharing status and audit, album list and photo timeline. Not tested on 0.9.0: sharing changes (invite, links, revoke), album and photo writes, restore and permanent delete. The new CLI command `filesystem size` is not used yet.
 
 ## 1.8.0 — 2026-11-01
 
