@@ -24,6 +24,8 @@
 
 ---
 
+> **Unofficial community project, not affiliated with or endorsed by Proton AG.** Proton and Proton Drive are trademarks of Proton AG. This server only drives the official Proton Drive CLI and never handles your password or session. See the [threat model](THREAT_MODEL.md) for what it protects and what reaches your AI provider.
+
 Give Claude Desktop (or any MCP client) full access to your Proton Drive and Proton Photos: list folders, upload and download files, invite collaborators, manage sharing, handle trash, and manage photo albums — all with end-to-end encryption intact. The same capabilities are available as a full CLI for scripting, backups, and cron.
 
 ## Quick start (60 seconds)
@@ -32,13 +34,27 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 2. Connect Claude Desktop, either way:
    - **Bundle:** install `proton-drive-mcp-<version>.mcpb` from the [latest release](https://github.com/googlarz/proton-drive-mcp/releases/latest) and set **proton-drive CLI path** to the output of `which proton-drive`.
    - **Global install:** `npm install -g proton-drive-mcp`, then `proton-drive-cli doctor`, then `proton-drive-cli setup-claude-desktop --write`. (`setup-claude-desktop` refuses to run from a temporary `npx` cache, so install globally first.) Fully quit and restart Claude Desktop afterwards.
+   - **Claude Code:** `claude mcp add --env PROTON_DRIVE_BIN="$(which proton-drive)" proton-drive -- npx -y proton-drive-mcp`
 3. Try these prompts:
    - "Find files named *invoice* in my Drive." (`drive_search`)
    - "What is using my Drive space?" (`drive_usage`)
    - "Find duplicate files in my Drive." (`drive_find_duplicates`)
    - "Who has access to my shared folders?" (`drive_sharing_audit`)
    - "Tidy up /Downloads, show me a plan first." (`drive_bulk_move` / `drive_bulk_trash` preview first, nothing changes until you confirm)
-4. Optional: `PROTON_DRIVE_INDEX=1` keeps a plaintext local copy of file names so searches are instant after a restart ([details](#persistent-index-opt-in)); `PROTON_DRIVE_TOOL_TIER=core` exposes a smaller tool set.
+4. Sensitive files? Start read-only and confined: `PROTON_DRIVE_MODE=readonly` and `PROTON_DRIVE_REMOTE_ROOTS=/my-files/<folder>`, plus an audit log ([guard layer](#guard-layer-opt-in), [secure setup](SECURITY.md#secure-deployment-profile)).
+5. Optional: `PROTON_DRIVE_INDEX=1` keeps a plaintext local copy of file names so searches are instant after a restart ([details](#persistent-index-opt-in)); `PROTON_DRIVE_TOOL_TIER=core` exposes a smaller tool set.
+
+---
+
+## Compatibility
+
+| | Status |
+|---|---|
+| Proton Drive CLI | Built and live-tested against **0.8.0** (all 32 scriptable commands covered). Other versions are untested: run `proton-drive-cli doctor` after upgrading the CLI. |
+| Node.js | 22 or newer |
+| macOS | Live-tested. Built-in Vision OCR. |
+| Linux | The test suite runs on Ubuntu in CI; not live-tested against a real account. |
+| Windows | Not supported |
 
 ---
 
