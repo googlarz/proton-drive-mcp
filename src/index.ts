@@ -2120,7 +2120,9 @@ export async function main() {
 }
 
 if (isMainModule(import.meta.url)) {
-  main().catch((err) => {
+  // `npx -y proton-drive-mcp init` reaches this bin; the setup command lives in the companion CLI.
+  // Only the literal first argument "init" is diverted: an MCP client starting the server passes none.
+  (process.argv[2] === "init" ? import("./cli.js") : main()).catch((err) => {
     logger.error("Fatal:", err);
     process.exit(1);
   });

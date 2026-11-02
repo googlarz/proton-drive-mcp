@@ -20,7 +20,8 @@ import {
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./utils/errors.js";
 import { checkCliAvailable } from "./utils/subprocess.js";
 import { runDoctor, formatDoctor } from "./utils/doctor.js";
-import { buildEntry, defaultConfigPath, isDirectory, resolveDriveCli, writeEntry, SERVER_KEY } from "./utils/claudeConfig.js";
+import { runInit } from "./utils/init.js";
+import { buildEntry,defaultConfigPath, isDirectory, resolveDriveCli, writeEntry, SERVER_KEY } from "./utils/claudeConfig.js";
 import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type Direction, type Compare } from "./services/plan.js";
 import { invalidatePath } from "./services/walk.js";
 import { indexStatus, deleteIndex } from "./services/walkIndex.js";
@@ -103,6 +104,9 @@ Commands:
 
   doctor [--config <path>]                 Read-only diagnostics: Node, proton-drive CLI, auth, sync path, Claude Desktop config
                                            (exit 1 if any check fails)
+  init [--config <path>] [--write]         First-run helper (also: npx -y proton-drive-mcp init): runs the doctor checks, prints the Claude
+                                           Desktop and Claude Code config; --write adds the npx entry to the Desktop config (timestamped
+                                           backup first, dry run by default, other servers untouched)
   setup-claude-desktop [--config <path>] [--sync-path <dir>] [--write]
                                            Print the Claude Desktop entry for this server (dry run); --write adds it to the
                                            config (timestamped backup first). Restart Claude Desktop afterwards.
@@ -211,6 +215,13 @@ async function run() {
 
   if (cmd === "setup-claude-desktop") {
     setupClaudeDesktop();
+    return;
+  }
+
+  if (cmd === "init") {
+    const result = await runInit({ configPath: resolve(getFlag("--config") ?? defaultConfigPath()), write: args.includes("--write") });
+    console.log(jsonMode ? JSON.stringify({ ...result.json, ok: result.ok }) : result.text);
+    process.exitCode = result.ok ? 0 : 1;
     return;
   }
 

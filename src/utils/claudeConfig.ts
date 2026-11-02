@@ -73,6 +73,11 @@ export function buildEntry(cliPath: string, syncPath?: string): McpEntry {
   return { command: process.execPath, args: [entryPath], env };
 }
 
+/** Entry for the `npx -y proton-drive-mcp` form: nothing is pinned to an install or cache path, except the CLI. */
+export function buildNpxEntry(cliPath: string): McpEntry {
+  return { command: "npx", args: ["-y", "proton-drive-mcp"], env: { PROTON_DRIVE_BIN: cliPath } };
+}
+
 export function isDirectory(p: string): boolean {
   try { return statSync(p).isDirectory(); } catch { return false; }
 }
@@ -90,6 +95,18 @@ function parseConfig(file: string): Record<string, unknown> {
     throw new Error(`${file} does not contain a JSON object; refusing to modify it.`);
   }
   return parsed as Record<string, unknown>;
+}
+
+/** How `entry` relates to what is already in the config file; throws like writeEntry on an unusable file. */
+export function inspectEntry(file: string, entry: McpEntry): "no-file" | "absent" | "same" | "different" {
+  if (!existsSync(file)) return "no-file";
+  const servers = parseConfig(file)["mcpServers"];
+  if (servers !== undefined && (!servers || typeof servers !== "object" || Array.isArray(servers))) {
+    throw new Error(`"mcpServers" in ${file} is not an object; refusing to modify it.`);
+  }
+  const current = (servers as Record<string, unknown> | undefined)?.[SERVER_KEY];
+  if (current === undefined) return "absent";
+  return JSON.stringify(current) === JSON.stringify(entry) ? "same" : "different";
 }
 
 /**
