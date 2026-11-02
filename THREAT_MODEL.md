@@ -54,7 +54,7 @@ Without them the server runs in full mode. Bulk move and bulk trash are two step
 - **A compromised machine or client.** Whoever controls them controls the session.
 - **Prompt injection that stays within the allowed tools.** Read-only mode and folder roots limit the damage; they cannot make a model ignore a malicious file.
 - **Data you send to the model provider.** See your provider's privacy policy.
-- **Changes in the official CLI.** This project is tested against CLI 0.8.0 only (see the README).
+- **Changes in the official CLI.** This project is tested against CLI 0.8.0 and, for most operations, 0.9.0 (see the README).
 - **No independent security audit** has been done. The code is open for review.
 
 ## Recommended setup for sensitive files
