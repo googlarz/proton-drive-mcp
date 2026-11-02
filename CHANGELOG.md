@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`init` subcommand** (`npx -y proton-drive-mcp init`, also `proton-drive-cli init`): finds the `proton-drive` CLI (`PROTON_DRIVE_BIN`, `PATH`, then `~/.local/bin` and the Homebrew dirs), runs the `doctor` checks, and on a failure prints the exact next step (for example `proton-drive auth login`). When the CLI is found it prints the Claude Desktop entry in the `npx -y proton-drive-mcp` form with `PROTON_DRIVE_BIN` set to the absolute path, and the `claude mcp add --env PROTON_DRIVE_BIN=... proton-drive -- npx -y proton-drive-mcp` line. `--write` adds the Desktop entry through the same writer as `setup-claude-desktop` (dry run by default, timestamped backup first, only `mcpServers["proton-drive-mcp"]` is touched, re-running with the same result changes nothing) and works from a temporary `npx` cache. `--json` is supported. It is a subcommand, not an MCP tool (still 54 tools), reads no session data, and does not change what happens when the server is started without arguments.
+- Official MCP Registry metadata: `mcpName` in `package.json` and a root `server.json` (`io.github.googlarz/proton-drive-mcp`, npm package, stdio). Its versions are bumped by hand with `package.json`; a test and the publish workflow check them against each other and the tag.
+- Release workflow: a CycloneDX SBOM of the production dependencies (`npm sbom --sbom-format cyclonedx --omit dev`) is attached to each GitHub release next to the `.mcpb` bundle.
+
+### Changed
+- `@modelcontextprotocol/sdk` is pinned to an exact version (1.32.2, no caret); updates go through a deliberate bump.
+
 ## 1.8.0 — 2026-11-01
 
 ### Added

@@ -20,7 +20,12 @@ Lint:    npm run lint          # tsc --noEmit
 Test:    npm test              # build + all test/*.test.mjs
 Start:   node dist/index.js    # MCP server over stdio
 CLI:     node dist/cli.js <command>
+Setup:   node dist/index.js init   # = `npx -y proton-drive-mcp init` = `proton-drive-cli init`; a subcommand, not an MCP tool
 ```
+
+`init` (`src/utils/init.ts`, wired in `src/cli.ts`; `src/index.ts` hands over only when the first argument is exactly `init`, so a stdio launch without arguments is unchanged) runs the `doctor` checks in a child process, prints the Claude Desktop entry in the `npx -y proton-drive-mcp` form with `PROTON_DRIVE_BIN` set to the absolute CLI path plus the `claude mcp add` line, and with `--write` reuses `writeEntry` (timestamped backup, only `mcpServers["proton-drive-mcp"]`, dry run by default). It reads and prints no session data. The CLI is looked up via `PROTON_DRIVE_BIN`/`PATH` (the server's resolver), then `~/.local/bin` and the Homebrew dirs.
+
+Registry: `server.json` (official MCP Registry) and `package.json` `mcpName` must keep `io.github.googlarz/proton-drive-mcp`; the `version` fields in `server.json` are bumped by hand together with `package.json` (checked by `test/registry.test.mjs` and by `publish.yml` against the tag).
 
 ## Project structure
 

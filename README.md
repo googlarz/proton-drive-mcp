@@ -31,7 +31,7 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 ## Quick start (60 seconds)
 
 1. Install the official [Proton Drive CLI](https://proton.me/download/drive/cli/index.html), then sign in once: `proton-drive auth login`.
-2. Connect Claude Desktop, either way:
+2. Not sure about the details? Run `npx -y proton-drive-mcp init`. It finds the `proton-drive` CLI, runs the same checks as `doctor`, tells you the exact next step if something is wrong (for example `proton-drive auth login`), and prints the ready-to-paste Claude Desktop config and `claude mcp add` line. Add `--write` to put the Claude Desktop entry in place (dry run by default, timestamped backup first, other servers untouched). Or connect manually, either way:
    - **Bundle:** install `proton-drive-mcp-<version>.mcpb` from the [latest release](https://github.com/googlarz/proton-drive-mcp/releases/latest) and set **proton-drive CLI path** to the output of `which proton-drive`.
    - **Global install:** `npm install -g proton-drive-mcp`, then `proton-drive-cli doctor`, then `proton-drive-cli setup-claude-desktop --write`. (`setup-claude-desktop` refuses to run from a temporary `npx` cache, so install globally first.) Fully quit and restart Claude Desktop afterwards.
    - **Claude Code:** `claude mcp add --env PROTON_DRIVE_BIN="$(which proton-drive)" proton-drive -- npx -y proton-drive-mcp`
@@ -170,9 +170,12 @@ Instead of editing JSON, download `proton-drive-mcp-<version>.mcpb` from the [la
 
 ## Setup and diagnostics
 
-Two commands of the companion CLI help when Claude Desktop reports "proton-drive CLI not found" (it starts servers with a minimal `PATH`):
+Three commands of the companion CLI help when Claude Desktop reports "proton-drive CLI not found" (it starts servers with a minimal `PATH`). `init` combines the first two for a first run (it also works as `npx -y proton-drive-mcp init`, writing the `npx` form of the entry so no package path is pinned):
 
 ```bash
+# First run: doctor checks + ready-to-paste Claude Desktop and Claude Code config; --write adds the Desktop entry
+proton-drive-cli init [--json] [--config <path>] [--write]
+
 # Read-only checks: Node >= 22, proton-drive CLI + version, auth, PROTON_DRIVE_SYNC_PATH, your Claude Desktop entry
 proton-drive-cli doctor [--json] [--config <path>]
 
