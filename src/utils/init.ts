@@ -53,13 +53,24 @@ function runDoctorChild(configPath: string, cliPath: string | undefined, viaFall
 }
 
 function nextStep(checks: Check[]): string {
-  const failed = checks.filter((c) => c.status === "fail" && c.id !== "claude-desktop");
+  const failed = checks.filter((c) => c.status === "fail");
   const first = failed.find((c) => c.id === "cli") ?? failed[0]!;
   const again = "then re-run `npx -y proton-drive-mcp init`";
   if (first.id === "cli") return `Install the official Proton Drive CLI from ${DOWNLOAD_URL} (or set PROTON_DRIVE_BIN to its absolute path), run \`proton-drive auth login\`, ${again}.`;
   if (first.id === "auth") return `Run \`proton-drive auth login\`, ${again}.`;
   return `${first.hint ?? first.message} (${first.id}), ${again}.`;
 }
+
+/** Doctor's claude-desktop line echoes the values of the existing entry's PROTON_DRIVE_* env; init never prints env values. */
+function redact(c: Check): Check {
+  if (c.id !== "claude-desktop") return c;
+  const message = c.message
+    .replace(/ \(PROTON_DRIVE_BIN=.*\)$/, " (env values not shown)")
+    .replace(/PROTON_DRIVE_BIN=.* is not an executable file$/, "PROTON_DRIVE_BIN in the entry is not an executable file");
+  return { ...c, message };
+}
+
+const verdict = (ok: boolean): string => (ok ? "No problems found." : "Problems found.");
 
 export async function runInit(opts: InitOptions): Promise<InitResult> {
   const { configPath, write } = opts;
@@ -69,11 +80,16 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
   const located = locateDriveCli();
   const doctor = await runDoctorChild(configPath, located.path, located.viaFallback);
-  // init is what fixes the Claude Desktop entry, so a stale or missing entry must not block it and
-  // doctor's "run setup-claude-desktop" hint would point the wrong way. Other failures still block.
-  const checks = doctor.checks.map((c) => (c.id === "claude-desktop" && c.status !== "ok" && c.hint?.includes("setup-claude-desktop") ? { ...c, hint: undefined } : c));
-  const doctorOk = !checks.some((c) => c.status === "fail" && c.id !== "claude-desktop");
-  const lines: string[] = ["proton-drive-mcp init", "", formatDoctor({ ok: !checks.some((c) => c.status === "fail"), checks })];
+  // init is what fixes the Claude Desktop entry, so a stale or missing one is shown as a warning, must not block it,
+  // and doctor's "run setup-claude-desktop" hint would point the wrong way. Other failures still block.
+  const checks = doctor.checks.map((c) => {
+    const r = redact(c);
+    if (r.id !== "claude-desktop" || r.status === "ok") return r;
+    return { ...r, status: "warn" as const, ...(r.hint?.includes("setup-claude-desktop") ? { hint: undefined } : {}) };
+  });
+  const doctorOk = !checks.some((c) => c.status === "fail");
+  // formatDoctor ends with a blank line and its own verdict; init prints one verdict at the very end instead.
+  const lines: string[] = ["proton-drive-mcp init", "", ...formatDoctor({ ok: true, checks }).split("\n").slice(0, -2)];
   const json: Record<string, unknown> = { ok: doctorOk, cliPath: located.path ?? null, checks };
 
   if (!doctorOk) {
@@ -82,7 +98,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     json["nextStep"] = step;
   }
   if (!located.path) {
-    if (write) lines.push("", "Nothing was written to your Claude Desktop config.");
+    lines.push("", ...(write ? ["Nothing was written to your Claude Desktop config.", ""] : []), verdict(false));
     return { ok: false, text: lines.join("\n"), json };
   }
 
@@ -91,25 +107,35 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   json["claudeCode"] = claudeCode;
 
   let ok = doctorOk;
+  let bareNpx = true;
   lines.push("", `Claude Desktop (${configPath}):`, shown);
   try {
     const plan = planNpxEntry(configPath, located.path);
+    bareNpx = plan.entry.command === "npx";
     const kept = plan.preservedEnvKeys.length ? ` Kept as they are in the existing entry: env ${plan.preservedEnvKeys.join(", ")} (values not shown).` : "";
-    const pinned = plan.fromPinned ? " The existing entry runs a pinned install (setup-claude-desktop form); it would change to the npx form, which runs the latest published version." : "";
-    json["claudeDesktop"] = { configPath, entry: buildNpxEntry(located.path), preservedEnvKeys: plan.preservedEnvKeys, fromPinned: plan.fromPinned };
+    const extra = [
+      ...(plan.fromPinned ? ["The existing entry runs a pinned install (setup-claude-desktop form); the npx form runs the latest published version instead."] : []),
+      ...(plan.droppedVersionPin ? [`The version pin ${plan.droppedVersionPin} is dropped in favor of the latest published version.`] : []),
+      ...plan.notes.map((n) => `Note: ${n}.`),
+    ].map((t) => ` ${t}`).join("");
+    json["claudeDesktop"] = {
+      configPath, entry: buildNpxEntry(located.path), preservedEnvKeys: plan.preservedEnvKeys, fromPinned: plan.fromPinned,
+      droppedVersionPin: plan.droppedVersionPin ?? null, notes: plan.notes,
+    };
     if (plan.state === "other-key") {
-      if (write) ok = false;
-      lines.push(`Not changed: this server is already registered under ${plan.otherKeys.map((k) => `"${k}"`).join(", ")} in ${configPath}. A second entry would start a second copy and double the tools. Rename or remove that entry yourself, then re-run${write ? "" : " (--write refuses until then)"}.`);
+      ok = false;
+      const names = plan.otherKeys.map((k) => `"${k}"`).join(", ");
+      lines.push(`Not changed: this server is already registered under ${names} in ${configPath}, and a second entry would start a second copy and double the tools. To proceed, remove ${plan.otherKeys.length > 1 ? "those entries" : "that entry"}${plan.hasOwnKey ? "" : ` (or rename it to "${SERVER_KEY}" so init can update it)`}, then re-run \`npx -y proton-drive-mcp init${write ? " --write" : ""}\`.`);
       json["claudeDesktop"] = { ...(json["claudeDesktop"] as object), action: "refused", otherKeys: plan.otherKeys };
     } else if (plan.state === "same") {
-      lines.push(`Already up to date; nothing changed.${kept}`);
+      lines.push(`Already up to date; nothing changed.${kept}${extra}`);
       json["claudeDesktop"] = { ...(json["claudeDesktop"] as object), action: "none" };
     } else if (!write) {
-      lines.push(`Dry run: nothing changed.${plan.state === "different" ? " An existing proton-drive-mcp entry would be replaced." : ""}${kept}${pinned} Re-run with --write to apply (timestamped backup first; other servers are never touched).`);
+      lines.push(`Dry run: nothing changed.${plan.state === "different" ? " An existing proton-drive-mcp entry would be replaced." : ""}${kept}${extra} Re-run with --write to apply (timestamped backup first; other servers are never touched).`);
       json["claudeDesktop"] = { ...(json["claudeDesktop"] as object), action: "dry-run" };
     } else {
       const backup = writeEntry(configPath, plan.entry);
-      lines.push(`Wrote ${SERVER_KEY} to ${configPath}${backup ? ` (backup: ${backup})` : ""}.${kept}${pinned ? " Changed from a pinned install (setup-claude-desktop form) to the npx form, which runs the latest published version." : ""}`, "Fully quit and restart Claude Desktop for the change to take effect.");
+      lines.push(`Wrote ${SERVER_KEY} to ${configPath}${backup ? ` (backup: ${backup})` : ""}.${kept}${extra}`, "Fully quit and restart Claude Desktop for the change to take effect.");
       json["claudeDesktop"] = { ...(json["claudeDesktop"] as object), action: "written", backup: backup ?? null };
     }
   } catch (e) {
@@ -118,9 +144,9 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
   lines.push("Note: the npx entry runs with the Node that Claude Desktop finds on its own PATH (it needs Node 22 or newer); doctor cannot check that.");
   const npx = resolveBinary("npx");
-  if (npx && !GUI_PATH_DIRS.some((d) => npx.startsWith(d + "/"))) {
+  if (bareNpx && npx && !GUI_PATH_DIRS.some((d) => npx.startsWith(d + "/"))) {
     lines.push(`Note: npx is at ${npx}, outside the PATH Claude Desktop is likely to use. If it cannot start the server, put that absolute path in "command" and add "PATH" (the directory of node) to env.`);
   }
-  lines.push("", "Claude Code:", claudeCode);
+  lines.push("", "Claude Code:", claudeCode, "", verdict(ok));
   return { ok, text: lines.join("\n"), json };
 }

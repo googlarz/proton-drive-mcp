@@ -222,7 +222,7 @@ describe("init --write", () => {
     const f = cfgWith(d, { mcpServers: { ...others.mcpServers, "proton-drive-mcp": old } });
     const dry = await run(["init", "--config", f]);
     assert.match(dry.stdout, /existing proton-drive-mcp entry would be replaced/);
-    assert.match(dry.stdout, /pinned install \(setup-claude-desktop form\).*npx form, which runs the latest published version/);
+    assert.match(dry.stdout, /pinned install \(setup-claude-desktop form\).*npx form runs the latest published version instead/);
     assert.match(dry.stdout, /env PROTON_DRIVE_MODE, PROTON_DRIVE_REMOTE_ROOTS, PROTON_DRIVE_AUDIT_LOG, PROTON_DRIVE_SYNC_PATH \(values not shown\)/);
     for (const v of ["readonly", "SECRET-FOLDER", "/x/audit.log", "/x/sync"]) assert.ok(!dry.stdout.includes(v), v);
     assert.deepEqual(JSON.parse(readFileSync(f, "utf8")).mcpServers["proton-drive-mcp"], old);
@@ -261,8 +261,11 @@ describe("init --write", () => {
     const f = cfgWith(d, { mcpServers: { ...others.mcpServers, "my-proton": twin } });
     const before = readFileSync(f, "utf8");
     const dry = await run(["init", "--config", f]);
-    assert.equal(dry.code, 0);
-    assert.match(dry.stdout, /already registered under "my-proton".*double the tools/);
+    assert.equal(dry.code, 1);
+    assert.match(dry.stdout, /already registered under "my-proton".*double the tools.*remove that entry.*rename it to "proton-drive-mcp"/);
+    assert.match(dry.stdout, /\nProblems found\.\n$/);
+    assert.doesNotMatch(dry.stdout, /No problems found/);
+    assert.equal(JSON.parse((await run(["init", "--json", "--config", f])).stdout).ok, false);
     const r = await run(["init", "--config", f, "--write"]);
     assert.equal(r.code, 1);
     assert.match(r.stdout, /already registered under "my-proton"/);
@@ -312,5 +315,142 @@ describe("init --write", () => {
     const written = JSON.parse(readFileSync(f, "utf8"));
     assert.deepEqual(written.mcpServers["proton-drive-mcp"], NPX_ENTRY);
     assert.ok(!JSON.stringify(written).includes("_npx"));
+  });
+});
+
+describe("init: existing entries in other shapes", () => {
+  const entryOf = (f) => JSON.parse(readFileSync(f, "utf8")).mcpServers["proton-drive-mcp"];
+
+  it("a stale entry (dead command, dead PROTON_DRIVE_BIN) does not block init; --write fixes it", async () => {
+    const d = tmp();
+    const f = cfgWith(d, { mcpServers: { "proton-drive-mcp": { command: "/no/such/node", args: [DIST_INDEX], env: { PROTON_DRIVE_BIN: "/no/such/bin" } } } });
+    const dry = await run(["init", "--config", f]);
+    assert.equal(dry.code, 0, dry.stdout);
+    assert.match(dry.stdout, /⚠ claude-desktop/);
+    assert.doesNotMatch(dry.stdout, /✗/);
+    assert.match(dry.stdout, /\nNo problems found\.\n$/);
+    const r = await run(["init", "--config", f, "--write"]);
+    assert.equal(r.code, 0, r.stdout);
+    assert.deepEqual(entryOf(f), NPX_ENTRY);
+  });
+
+  it("an absolute path to an existing npx is kept and is not called a pinned install", async () => {
+    const d = tmp();
+    const npx = join(d, "npx");
+    writeFileSync(npx, "#!/bin/sh\nexit 0\n");
+    chmodSync(npx, 0o755);
+    const same = { command: npx, args: ["-y", "proton-drive-mcp"], env: { PROTON_DRIVE_BIN: FAKE_CLI, PROTON_DRIVE_MODE: "readonly" } };
+    const f = cfgWith(d, { mcpServers: { "proton-drive-mcp": same } });
+    const before = readFileSync(f, "utf8");
+    const r1 = await run(["init", "--config", f, "--write"]);
+    assert.equal(r1.code, 0, r1.stdout);
+    assert.match(r1.stdout, /Already up to date/);
+    assert.doesNotMatch(r1.stdout, /pinned/);
+    assert.equal(readFileSync(f, "utf8"), before);
+    assert.equal(baks(d).length, 0);
+    // A different PROTON_DRIVE_BIN is updated, the command stays absolute.
+    writeFileSync(f, JSON.stringify({ mcpServers: { "proton-drive-mcp": { ...same, env: { ...same.env, PROTON_DRIVE_BIN: "/old/bin" } } } }));
+    const r2 = await run(["init", "--config", f, "--write"]);
+    assert.equal(r2.code, 0, r2.stdout);
+    assert.doesNotMatch(r2.stdout, /pinned/);
+    assert.deepEqual(entryOf(f), same);
+    // A dead absolute npx is replaced by bare npx.
+    writeFileSync(f, JSON.stringify({ mcpServers: { "proton-drive-mcp": { ...same, command: join(d, "gone", "npx") } } }));
+    await run(["init", "--config", f, "--write"]);
+    assert.equal(entryOf(f).command, "npx");
+  });
+
+  it("the README global-install form (command proton-drive-mcp, no args) under another key counts as a second copy", async () => {
+    for (const command of ["proton-drive-mcp", "/usr/local/bin/proton-drive-mcp"]) {
+      const d = tmp();
+      const f = cfgWith(d, { mcpServers: { drive: { command } } });
+      const before = readFileSync(f, "utf8");
+      const dry = await run(["init", "--config", f]);
+      assert.equal(dry.code, 1);
+      assert.match(dry.stdout, /already registered under "drive"/);
+      assert.equal((await run(["init", "--config", f, "--write"])).code, 1);
+      assert.equal(readFileSync(f, "utf8"), before);
+    }
+  });
+
+  it("does not mistake other things for a second copy (e.g. a proton-drive-mcp-notes directory)", async () => {
+    const d = tmp();
+    const others2 = {
+      notes: { command: "node", args: ["/home/u/proton-drive-mcp-notes/server.js"] },
+      grep: { command: "grep", args: ["proton-drive-mcp-notes"] },
+      docs: { command: "/opt/proton-drive-mcp-docs/bin/serve" },
+    };
+    const f = cfgWith(d, { mcpServers: others2 });
+    const r = await run(["init", "--config", f, "--write"]);
+    assert.equal(r.code, 0, r.stdout);
+    const j = JSON.parse(readFileSync(f, "utf8")).mcpServers;
+    assert.deepEqual(entryOf(f), NPX_ENTRY);
+    for (const k of Object.keys(others2)) assert.deepEqual(j[k], others2[k]);
+  });
+
+  it("looksLikeOurServer is precise", async () => {
+    const { looksLikeOurServer } = await import(join(ROOT, "dist", "utils", "claudeConfig.js"));
+    for (const yes of [
+      { command: "proton-drive-mcp" }, { command: "/usr/local/bin/proton-drive-mcp" },
+      { command: "npx", args: ["-y", "proton-drive-mcp"] }, { command: "npx", args: ["-y", "proton-drive-mcp@1.8.0"] }, { command: "npx", args: ["proton-drive-mcp@latest"] },
+      { command: "node", args: ["/usr/lib/node_modules/proton-drive-mcp/dist/index.js"] }, { command: "node", args: ["proton-drive-mcp/dist/index.js"] },
+    ]) assert.equal(looksLikeOurServer(yes), true, JSON.stringify(yes));
+    for (const no of [
+      null, {}, { command: "node" }, { command: "proton-drive-mcp-notes" }, { command: "node", args: ["/h/proton-drive-mcp-notes/a.js"] },
+      { command: "node", args: ["/h/proton-drive-mcp/notes.md"] }, { command: "npx", args: ["xproton-drive-mcp"] }, { command: "npx", args: ["-y", "proton-drive-mcp-extras"] },
+    ]) assert.equal(looksLikeOurServer(no), false, JSON.stringify(no));
+  });
+
+  it("a version pin is reported and dropped in favor of the latest", async () => {
+    const d = tmp();
+    const f = cfgWith(d, { mcpServers: { "proton-drive-mcp": { command: "npx", args: ["-y", "proton-drive-mcp@1.8.0"], env: { PROTON_DRIVE_BIN: FAKE_CLI } } } });
+    const dry = await run(["init", "--config", f]);
+    assert.match(dry.stdout, /version pin proton-drive-mcp@1\.8\.0 is dropped in favor of the latest published version/);
+    assert.doesNotMatch(dry.stdout, /pinned install/);
+    assert.deepEqual(entryOf(f).args, ["-y", "proton-drive-mcp@1.8.0"]);
+    const r = await run(["init", "--config", f, "--write"]);
+    assert.match(r.stdout, /version pin proton-drive-mcp@1\.8\.0 is dropped/);
+    assert.deepEqual(entryOf(f).args, ["-y", "proton-drive-mcp"]);
+    assert.equal(JSON.parse((await run(["init", "--json", "--config", f])).stdout).claudeDesktop.droppedVersionPin, null);
+  });
+
+  it("reports disabled: true and cwd, keeps them, and leaves an otherwise identical entry alone", async () => {
+    const d = tmp();
+    const entry = { ...NPX_ENTRY, disabled: true, cwd: "/some/where-SECRETDIR" };
+    const f = cfgWith(d, { mcpServers: { "proton-drive-mcp": entry } });
+    const before = readFileSync(f, "utf8");
+    const r = await run(["init", "--config", f, "--write"]);
+    assert.equal(r.code, 0, r.stdout);
+    assert.match(r.stdout, /Already up to date/);
+    assert.match(r.stdout, /"disabled": true \(kept\), so Claude Desktop will not start it/);
+    assert.match(r.stdout, /"cwd" field \(kept\)/);
+    assert.ok(!r.stdout.includes("SECRETDIR"));
+    assert.equal(readFileSync(f, "utf8"), before);
+    // When the entry does change, both fields survive.
+    writeFileSync(f, JSON.stringify({ mcpServers: { "proton-drive-mcp": { ...entry, env: { PROTON_DRIVE_BIN: "/old" } } } }));
+    await run(["init", "--config", f, "--write"]);
+    assert.deepEqual(entryOf(f), entry);
+  });
+
+  it("never prints env values of the existing entry (stdout, stderr, --json), though doctor itself does", async () => {
+    const d = tmp();
+    const entry = {
+      command: process.execPath, args: [DIST_INDEX],
+      env: { PROTON_DRIVE_BIN: FAKE_CLI, PROTON_DRIVE_SYNC_PATH: "/leak/SYNCVALUE", PROTON_DRIVE_MODE: "MODEVALUE", PROTON_DRIVE_REMOTE_ROOTS: "/my-files/ROOTVALUE" },
+    };
+    const f = cfgWith(d, { mcpServers: { "proton-drive-mcp": entry } });
+    const doc = await run(["doctor", "--config", f]);
+    assert.ok(doc.stdout.includes("SYNCVALUE"), "precondition: doctor echoes the sync path");
+    for (const flags of [[], ["--json"], ["--write"], ["--write", "--json"]]) {
+      const r = await run(["init", "--config", f, ...flags]);
+      assert.equal(r.code, 0, r.stdout);
+      for (const v of ["SYNCVALUE", "MODEVALUE", "ROOTVALUE"]) assert.ok(!(r.stdout + r.stderr).includes(v), `${v} in ${flags.join(" ")}`);
+    }
+    assert.equal(entryOf(f).env.PROTON_DRIVE_SYNC_PATH, "/leak/SYNCVALUE");
+    // A dead PROTON_DRIVE_BIN in the entry is reported without its value.
+    const g = cfgWith(tmp(), { mcpServers: { "proton-drive-mcp": { ...entry, env: { PROTON_DRIVE_BIN: "/dead/BINVALUE/proton-drive" } } } });
+    const r = await run(["init", "--config", g]);
+    assert.match(r.stdout, /PROTON_DRIVE_BIN in the entry is not an executable file/);
+    assert.ok(!(r.stdout + r.stderr).includes("BINVALUE"));
   });
 });
