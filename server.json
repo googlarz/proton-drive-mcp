@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.googlarz/proton-drive-mcp",
+  "title": "Proton Drive",
+  "description": "Unofficial MCP server for Proton Drive and Photos, driving the official Proton Drive CLI.",
+  "version": "1.8.0",
+  "repository": {
+    "url": "https://github.com/googlarz/proton-drive-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "proton-drive-mcp",
+      "version": "1.8.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
