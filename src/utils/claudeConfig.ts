@@ -97,16 +97,59 @@ function parseConfig(file: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-/** How `entry` relates to what is already in the config file; throws like writeEntry on an unusable file. */
-export function inspectEntry(file: string, entry: McpEntry): "no-file" | "absent" | "same" | "different" {
-  if (!existsSync(file)) return "no-file";
+/** True for a server entry whose args mention this package (how doctor recognises our server under any key). */
+export function looksLikeOurServer(entry: unknown): boolean {
+  const a = (entry as { args?: unknown } | null)?.args;
+  return Array.isArray(a) && a.some((x) => typeof x === "string" && x.includes(SERVER_KEY));
+}
+
+/** The key our server is registered under: "proton-drive-mcp" if present, else the first entry that looks like it. */
+export function findOwnServerKey(servers: Record<string, unknown>): string | undefined {
+  return SERVER_KEY in servers ? SERVER_KEY : Object.keys(servers).find((k) => looksLikeOurServer(servers[k]));
+}
+
+export interface NpxPlan {
+  state: "no-file" | "absent" | "same" | "different" | "other-key";
+  /** What gets written: the npx form, PROTON_DRIVE_BIN set, every other key of an existing entry kept. */
+  entry: McpEntry;
+  /** Names (never values) of the env keys of an existing entry that are kept. */
+  preservedEnvKeys: string[];
+  /** The existing entry is not the npx form (e.g. the pinned global install written by setup-claude-desktop). */
+  fromPinned: boolean;
+  /** Keys other than "proton-drive-mcp" under which this package is already registered. */
+  otherKeys: string[];
+}
+
+/**
+ * What `init` would do to the config at `file`. An existing entry is compared on command, args and PROTON_DRIVE_BIN only,
+ * and replacing it overrides just those: all other env keys (mode, roots, audit log, sync path, ...) and fields survive.
+ * Throws like writeEntry on an unusable file.
+ */
+export function planNpxEntry(file: string, cliPath: string): NpxPlan {
+  const fresh = buildNpxEntry(cliPath);
+  if (!existsSync(file)) return { state: "no-file", entry: fresh, preservedEnvKeys: [], fromPinned: false, otherKeys: [] };
   const servers = parseConfig(file)["mcpServers"];
   if (servers !== undefined && (!servers || typeof servers !== "object" || Array.isArray(servers))) {
     throw new Error(`"mcpServers" in ${file} is not an object; refusing to modify it.`);
   }
-  const current = (servers as Record<string, unknown> | undefined)?.[SERVER_KEY];
-  if (current === undefined) return "absent";
-  return JSON.stringify(current) === JSON.stringify(entry) ? "same" : "different";
+  const all = (servers ?? {}) as Record<string, unknown>;
+  const otherKeys = Object.keys(all).filter((k) => k !== SERVER_KEY && looksLikeOurServer(all[k]));
+  const current = all[SERVER_KEY];
+  if (current === undefined) return { state: otherKeys.length ? "other-key" : "absent", entry: fresh, preservedEnvKeys: [], fromPinned: false, otherKeys };
+  if (!current || typeof current !== "object" || Array.isArray(current)) {
+    throw new Error(`mcpServers["${SERVER_KEY}"] in ${file} is not an object; refusing to modify it.`);
+  }
+  const cur = current as Record<string, unknown>;
+  const curEnv = cur["env"] && typeof cur["env"] === "object" && !Array.isArray(cur["env"]) ? (cur["env"] as Record<string, unknown>) : {};
+  const entry = { ...cur, command: fresh.command, args: fresh.args, env: { ...curEnv, PROTON_DRIVE_BIN: cliPath } } as unknown as McpEntry;
+  const same = cur["command"] === fresh.command && JSON.stringify(cur["args"]) === JSON.stringify(fresh.args) && curEnv["PROTON_DRIVE_BIN"] === cliPath;
+  return {
+    state: otherKeys.length ? "other-key" : same ? "same" : "different",
+    entry,
+    preservedEnvKeys: Object.keys(curEnv).filter((k) => k !== "PROTON_DRIVE_BIN"),
+    fromPinned: cur["command"] !== fresh.command,
+    otherKeys,
+  };
 }
 
 /**

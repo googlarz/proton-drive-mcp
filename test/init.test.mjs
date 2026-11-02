@@ -1,7 +1,7 @@
 // `init` (dist/cli.js and the `proton-drive-mcp init` bin, dist/index.js) — temp dirs only, never the real Claude config or HOME.
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { cpSync, symlinkSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -49,7 +49,7 @@ describe("init: output", () => {
     const block = r.stdout.slice(r.stdout.indexOf("{\n"), r.stdout.lastIndexOf("}\n") + 1);
     assert.deepEqual(JSON.parse(block), { mcpServers: { "proton-drive-mcp": NPX_ENTRY } });
     // Claude Code line.
-    assert.ok(r.stdout.includes(`claude mcp add --env PROTON_DRIVE_BIN="${FAKE_CLI}" proton-drive -- npx -y proton-drive-mcp`));
+    assert.ok(r.stdout.includes(`claude mcp add --env PROTON_DRIVE_BIN='${FAKE_CLI}' proton-drive -- npx -y proton-drive-mcp`));
     assert.ok(!existsSync(join(d, "sub")));
   });
 
@@ -73,10 +73,14 @@ describe("init: output", () => {
     assert.match(j.claudeCode, /^claude mcp add --env PROTON_DRIVE_BIN=/);
   });
 
-  it("quotes the CLI path for the shell", async () => {
+  it("quotes the CLI path for the shell in single quotes (nothing expands, not even `!`)", async () => {
     const { shellQuote } = await import(join(ROOT, "dist", "utils", "init.js"));
-    assert.equal(shellQuote("/a b/c"), '"/a b/c"');
-    assert.equal(shellQuote('/a"$b`c\\d'), '"/a\\"\\$b\\`c\\\\d"');
+    assert.equal(shellQuote("/a b/c"), "'/a b/c'");
+    assert.equal(shellQuote("/a'b"), "'/a'\\''b'");
+    for (const nasty of ["/a b/$HOME/`id`/!!/\"q\"/it's", "'", "''", "\\", "!x"]) {
+      const out = execFileSync("/bin/sh", ["-c", `printf %s ${shellQuote(nasty)}`], { encoding: "utf8" });
+      assert.equal(out, nasty);
+    }
   });
 
   it("never touches the session: only read-only version/filesystem probes reach the CLI", async () => {
@@ -138,7 +142,7 @@ describe("init: CLI resolution", () => {
     const r = await run(["init", "--config", join(tmp(), "c.json")], { env: { PROTON_DRIVE_BIN: undefined, HOME: home, PATH: "/usr/bin:/bin" } });
     assert.equal(r.code, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /✓ auth/);
-    assert.ok(r.stdout.includes(`PROTON_DRIVE_BIN="${wrapper}"`), r.stdout);
+    assert.ok(r.stdout.includes(`PROTON_DRIVE_BIN='${wrapper}'`), r.stdout);
   });
 
   it("an explicit PROTON_DRIVE_BIN is not second-guessed by the fallback", async () => {
@@ -211,21 +215,84 @@ describe("init --write", () => {
     assert.match(doc.stdout, /✓ claude-desktop/);
   });
 
-  it("replaces an existing setup-claude-desktop entry (after a backup) and says so on the dry run", async () => {
+  it("replaces an existing setup-claude-desktop entry (after a backup), says so, and keeps its other env keys", async () => {
     const d = tmp();
-    const old = { command: process.execPath, args: [DIST_INDEX], env: { PROTON_DRIVE_BIN: FAKE_CLI } };
+    const kept = { PROTON_DRIVE_MODE: "readonly", PROTON_DRIVE_REMOTE_ROOTS: "/my-files/SECRET-FOLDER", PROTON_DRIVE_AUDIT_LOG: "/x/audit.log", PROTON_DRIVE_SYNC_PATH: "/x/sync" };
+    const old = { command: process.execPath, args: [DIST_INDEX], env: { PROTON_DRIVE_BIN: "/old/proton-drive", ...kept } };
     const f = cfgWith(d, { mcpServers: { ...others.mcpServers, "proton-drive-mcp": old } });
     const dry = await run(["init", "--config", f]);
     assert.match(dry.stdout, /existing proton-drive-mcp entry would be replaced/);
+    assert.match(dry.stdout, /pinned install \(setup-claude-desktop form\).*npx form, which runs the latest published version/);
+    assert.match(dry.stdout, /env PROTON_DRIVE_MODE, PROTON_DRIVE_REMOTE_ROOTS, PROTON_DRIVE_AUDIT_LOG, PROTON_DRIVE_SYNC_PATH \(values not shown\)/);
+    for (const v of ["readonly", "SECRET-FOLDER", "/x/audit.log", "/x/sync"]) assert.ok(!dry.stdout.includes(v), v);
     assert.deepEqual(JSON.parse(readFileSync(f, "utf8")).mcpServers["proton-drive-mcp"], old);
     const r = await run(["init", "--config", f, "--write"]);
-    assert.equal(r.code, 0);
+    assert.equal(r.code, 0, r.stdout);
+    for (const v of ["readonly", "SECRET-FOLDER", "/x/audit.log"]) assert.ok(!r.stdout.includes(v), v);
     const b = baks(d);
     assert.equal(b.length, 1);
     assert.deepEqual(JSON.parse(readFileSync(join(d, b[0]), "utf8")).mcpServers["proton-drive-mcp"], old);
     const j = JSON.parse(readFileSync(f, "utf8"));
-    assert.deepEqual(j.mcpServers["proton-drive-mcp"], NPX_ENTRY);
+    assert.deepEqual(j.mcpServers["proton-drive-mcp"], { command: "npx", args: ["-y", "proton-drive-mcp"], env: { PROTON_DRIVE_BIN: FAKE_CLI, ...kept } });
     assert.deepEqual(j.mcpServers.other, others.mcpServers.other);
+    // Idempotent on the merged entry: no second backup, file untouched.
+    const text = readFileSync(f, "utf8");
+    const r2 = await run(["init", "--config", f, "--write"]);
+    assert.equal(r2.code, 0);
+    assert.match(r2.stdout, /Already up to date/);
+    assert.match(r2.stdout, /env PROTON_DRIVE_MODE/);
+    assert.equal(readFileSync(f, "utf8"), text);
+    assert.equal(baks(d).length, 1);
+  });
+
+  it("an npx entry that only differs in PROTON_DRIVE_BIN is updated and its readonly guard survives", async () => {
+    const d = tmp();
+    const entry = { command: "npx", args: ["-y", "proton-drive-mcp"], env: { PROTON_DRIVE_BIN: "/old/bin", PROTON_DRIVE_MODE: "readonly", PROTON_DRIVE_REMOTE_ROOTS: "/my-files/a" } };
+    const f = cfgWith(d, { mcpServers: { "proton-drive-mcp": entry } });
+    const r = await run(["init", "--config", f, "--write"]);
+    assert.equal(r.code, 0, r.stdout);
+    assert.doesNotMatch(r.stdout, /pinned install/);
+    assert.deepEqual(JSON.parse(readFileSync(f, "utf8")).mcpServers["proton-drive-mcp"].env, { PROTON_DRIVE_BIN: FAKE_CLI, PROTON_DRIVE_MODE: "readonly", PROTON_DRIVE_REMOTE_ROOTS: "/my-files/a" });
+  });
+
+  it("refuses --write when the server is already registered under another key; the dry run warns", async () => {
+    const d = tmp();
+    const twin = { command: "npx", args: ["-y", "proton-drive-mcp"], env: { PROTON_DRIVE_BIN: FAKE_CLI } };
+    const f = cfgWith(d, { mcpServers: { ...others.mcpServers, "my-proton": twin } });
+    const before = readFileSync(f, "utf8");
+    const dry = await run(["init", "--config", f]);
+    assert.equal(dry.code, 0);
+    assert.match(dry.stdout, /already registered under "my-proton".*double the tools/);
+    const r = await run(["init", "--config", f, "--write"]);
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /already registered under "my-proton"/);
+    assert.equal(readFileSync(f, "utf8"), before);
+    assert.equal(baks(d).length, 0);
+    // Also when the standard key exists next to a twin.
+    const f2 = cfgWith(tmp(), { mcpServers: { "proton-drive-mcp": twin, dup: { command: "node", args: ["/x/proton-drive-mcp/dist/index.js"] } } });
+    const before2 = readFileSync(f2, "utf8");
+    assert.equal((await run(["init", "--config", f2, "--write"])).code, 1);
+    assert.equal(readFileSync(f2, "utf8"), before2);
+  });
+
+  it("always notes that the npx entry uses the Node on Claude Desktop's PATH", async () => {
+    const r = await run(["init", "--config", join(tmp(), "c.json")]);
+    assert.match(r.stdout, /runs with the Node that Claude Desktop finds on its own PATH.*doctor cannot check that/);
+  });
+
+  it("refuses on Windows with a clear message", async () => {
+    const { runInit } = await import(join(ROOT, "dist", "utils", "init.js"));
+    const real = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const f = join(tmp(), "c.json");
+      const r = await runInit({ configPath: f, write: true });
+      assert.equal(r.ok, false);
+      assert.match(r.text, /not supported on Windows/);
+      assert.ok(!existsSync(f));
+    } finally {
+      Object.defineProperty(process, "platform", real);
+    }
   });
 
   it("works from a temporary npx cache, which setup-claude-desktop refuses", async () => {

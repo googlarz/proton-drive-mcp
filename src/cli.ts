@@ -21,7 +21,7 @@ import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, Drive
 import { checkCliAvailable } from "./utils/subprocess.js";
 import { runDoctor, formatDoctor } from "./utils/doctor.js";
 import { runInit } from "./utils/init.js";
-import { buildEntry,defaultConfigPath, isDirectory, resolveDriveCli, writeEntry, SERVER_KEY } from "./utils/claudeConfig.js";
+import { buildEntry, defaultConfigPath, isDirectory, resolveDriveCli, writeEntry, SERVER_KEY } from "./utils/claudeConfig.js";
 import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type Direction, type Compare } from "./services/plan.js";
 import { invalidatePath } from "./services/walk.js";
 import { indexStatus, deleteIndex } from "./services/walkIndex.js";
