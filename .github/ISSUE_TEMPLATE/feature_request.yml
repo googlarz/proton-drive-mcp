@@ -1,0 +1,20 @@
+name: Feature request
+description: Suggest a new tool or an improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The task or problem, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: For a new tool, the name, inputs and what it returns. The tools/list payload is sent to the model every session, so new tools are kept few.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead

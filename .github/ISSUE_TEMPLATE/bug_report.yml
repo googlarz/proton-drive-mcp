@@ -1,0 +1,52 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste file contents, tokens or private Drive paths. For security problems use the private advisory link on the issue chooser instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Which tool or CLI command, what you expected, what you got.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: input
+    id: server-version
+    attributes:
+      label: proton-drive-mcp version
+      placeholder: "1.8.0"
+    validations:
+      required: true
+  - type: input
+    id: cli-version
+    attributes:
+      label: proton-drive CLI version
+      description: Output of the `drive_version` tool or `proton-drive-cli version`.
+    validations:
+      required: true
+  - type: input
+    id: node-os
+    attributes:
+      label: Node.js version and OS
+      placeholder: "Node 22.12, macOS 15"
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      placeholder: "Claude Desktop, Claude Code, ..."
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `proton-drive-cli doctor`
+      render: shell

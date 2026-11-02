@@ -28,6 +28,8 @@
 
 Give Claude Desktop (or any MCP client) full access to your Proton Drive and Proton Photos: list folders, upload and download files, invite collaborators, manage sharing, handle trash, and manage photo albums — all with end-to-end encryption intact. The same capabilities are available as a full CLI for scripting, backups, and cron.
 
+**Related projects:** the same author's [Proton Mail Bridge MCP server](https://github.com/googlarz/proton-mail-bridge-client) handles Proton Mail. It is a separate server on purpose: mail and Drive need different permissions, so you can grant a model one without the other.
+
 ## Quick start (60 seconds)
 
 1. Install the official [Proton Drive CLI](https://proton.me/download/drive/cli/index.html), then sign in once: `proton-drive auth login`.
@@ -58,6 +60,39 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 
 ---
 
+## Recipes
+
+### Find my scanned documents
+
+Searching by name (`drive_search`) will not find a scan called `IMG_0042.jpg`. Search by content instead:
+
+1. Set `PROTON_DRIVE_OCR=1` and `PROTON_DRIVE_CONTENT_INDEX=1` in the server's environment and restart it. Both are off by default.
+2. Ask: "Index my /my-files/Scans folder." Claude calls `drive_content_index` with that `path`. If the result says `partial: true`, it calls again to continue.
+3. Ask: "Find the scan that mentions my 2023 tax return." Claude calls `drive_search_content`.
+
+Honest limits: on macOS the OCR helper is compiled the first time it is needed, a one-time wait of about 30 s (the server warms it in the background shortly after start). OCR makes mistakes, especially on handwriting, low-resolution photos and unusual layouts, so a document can be missed or matched on a wrong word; open the file to check. OCR runs one file at a time, so a big folder of scans takes a while. The index covers only the folders you indexed and reflects the last update. Details: [OCR for scans](#ocr-for-scans-opt-in), [Content search](#content-search-opt-in).
+
+### Audit who can see my files
+
+Ask: "Who has access to my shared folders?" and then "Which public links expire soon or never expire?"
+
+- `drive_sharing_audit` lists public links (role, expiry, password), invitees and pending invitations, with risk flags such as `public-link-no-expiry`, `public-link-editor` and `external-invitee`.
+- `drive_share_expiry_report` lists public links with the time left, soonest first (`withinDays` sets what counts as soon).
+
+Both only read; they change nothing, and link URLs are left out of the results. Each checks at most 100 shared items, so on a big drive point it at one folder at a time. To act on a finding, `drive_share_remove_url` or `drive_share_revoke` change sharing; they ask for confirmation.
+
+### Tidy a folder safely
+
+Ask: "Move all the PDFs in /Downloads into /Documents/Inbox. Show me the plan first."
+
+1. `drive_bulk_move` (or `drive_bulk_trash` for clean-up) without `confirmed` returns a plan and any problems and changes nothing.
+2. Read the plan. If it is right, say so, and Claude repeats the call with `confirmed=true`. It applies only if there are no problems.
+3. Trash is reversible: `drive_restore` brings an item back (`drive_list_trash` shows what is there). `drive_empty_trash` and `drive_delete` are permanent, so do not ask for those during a tidy-up.
+
+Each call handles up to 200 items. For a first attempt on important data, use the [guard layer](#guard-layer-opt-in) (`PROTON_DRIVE_REMOTE_ROOTS` limits the folders Claude can touch).
+
+---
+
 ## Why this, and not just the Proton Drive CLI?
 
 For syncing, backups and cron jobs, **use the official CLI directly**: it is simpler and that is what it is for. This project does not replace it; it needs it, and wraps it so an AI assistant can drive it. It is worth using when you want to work with your Drive by conversation:
@@ -77,7 +112,7 @@ What to expect: search matches names, sizes and dates, not the text of every fil
 - **Companion CLI** — 45 of the 54 operations, scriptable and pipeable, works in cron and shell scripts (the two sync-folder tools, `drive_read_file` and `drive_write_file`, `drive_audit_log` and the newer `drive_read_many`, `drive_share_expiry_report`, `drive_recent_changes`, `drive_content_index`, `drive_search_content` and `drive_refresh_index` are MCP-only)
 - **Full Proton Drive CLI command coverage** — all 32 scriptable commands of CLI 0.8.0 have a matching tool (checked against the CLI's own help; `auth login` is the one command excluded, since it's an interactive browser flow). Not every optional flag is exposed: `sharing invite --include-node-name` is deliberately off (it would put the file name in the invitation email in clear text) and the `inherited` invite role is not offered; commands that accept several paths run one path per call except bulk move and bulk trash
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
-- **Shell injection safe** — all CLI calls use `execFile` with discrete argument arrays, never string interpolation
+- **Shell injection safe** — all CLI calls pass discrete argument arrays to `spawn` (no shell), never string interpolation
 - **Privacy-native** — end-to-end encryption is handled by Proton's own CLI; this server is just a thin MCP wrapper
 
 ---
@@ -481,7 +516,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 | Sharing & invitations | Rarely | Full (invite, revoke, status) |
 | Trash & restore | Rarely | Full |
 | CLI parity | No | The CLI mirrors every MCP tool except `drive_read_file` / `drive_write_file` |
-| Shell injection safe | Varies | Yes — `execFile` only |
+| Shell injection safe | Varies | Yes — `spawn` with argument arrays, no shell |
 
 ---
 
