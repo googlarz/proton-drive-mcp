@@ -28,6 +28,8 @@
 
 Give Claude Desktop (or any MCP client) full access to your Proton Drive and Proton Photos: list folders, upload and download files, invite collaborators, manage sharing, handle trash, and manage photo albums — all with end-to-end encryption intact. The same capabilities are available as a full CLI for scripting, backups, and cron.
 
+**Related projects:** the same author's [Proton Mail Bridge MCP server](https://github.com/googlarz/proton-mail-bridge-client) handles Proton Mail. It is a separate server on purpose: mail and Drive need different permissions, so you can grant a model one without the other.
+
 ## Quick start (60 seconds)
 
 1. Install the official [Proton Drive CLI](https://proton.me/download/drive/cli/index.html), then sign in once: `proton-drive auth login`.
@@ -55,6 +57,39 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 | macOS | Live-tested. Built-in Vision OCR. |
 | Linux | The test suite runs on Ubuntu in CI; not live-tested against a real account. |
 | Windows | Not supported |
+
+---
+
+## Recipes
+
+### Find my scanned documents
+
+Searching by name (`drive_search`) will not find a scan called `IMG_0042.jpg`. Search by content instead:
+
+1. Set `PROTON_DRIVE_OCR=1` and `PROTON_DRIVE_CONTENT_INDEX=1` in the server's environment and restart it. Both are off by default.
+2. Ask: "Index my /my-files/Scans folder." Claude calls `drive_content_index` with that `path`. If the result says `partial: true`, it calls again to continue.
+3. Ask: "Find the scan that mentions my 2023 tax return." Claude calls `drive_search_content`.
+
+Honest limits: on macOS the OCR helper is compiled the first time it is needed, a one-time wait of about 30 s (the server warms it in the background shortly after start). OCR makes mistakes, especially on handwriting, low-resolution photos and unusual layouts, so a document can be missed or matched on a wrong word; open the file to check. OCR runs one file at a time, so a big folder of scans takes a while. The index covers only the folders you indexed and reflects the last update. Details: [OCR for scans](#ocr-for-scans-opt-in), [Content search](#content-search-opt-in).
+
+### Audit who can see my files
+
+Ask: "Who has access to my shared folders?" and then "Which public links expire soon or never expire?"
+
+- `drive_sharing_audit` lists public links (role, expiry, password), invitees and pending invitations, with risk flags such as `public-link-no-expiry`, `public-link-editor` and `external-invitee`.
+- `drive_share_expiry_report` lists public links with the time left, soonest first (`withinDays` sets what counts as soon).
+
+Both only read; they change nothing, and link URLs are left out of the results. Each checks at most 100 shared items, so on a big drive point it at one folder at a time. To act on a finding, `drive_share_remove_url` or `drive_share_revoke` change sharing; they ask for confirmation.
+
+### Tidy a folder safely
+
+Ask: "Move all the PDFs in /Downloads into /Documents/Inbox. Show me the plan first."
+
+1. `drive_bulk_move` (or `drive_bulk_trash` for clean-up) without `confirmed` returns a plan and any problems and changes nothing.
+2. Read the plan. If it is right, say so, and Claude repeats the call with `confirmed=true`. It applies only if there are no problems.
+3. Trash is reversible: `drive_restore` brings an item back (`drive_list_trash` shows what is there). `drive_empty_trash` and `drive_delete` are permanent, so do not ask for those during a tidy-up.
+
+Each call handles up to 200 items. For a first attempt on important data, use the [guard layer](#guard-layer-opt-in) (`PROTON_DRIVE_REMOTE_ROOTS` limits the folders Claude can touch).
 
 ---
 

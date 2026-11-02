@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/googlarz/proton-drive-mcp/security/advisories/new
+    about: Do not open a public issue for vulnerabilities. Use a private GitHub security advisory.
