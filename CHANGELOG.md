@@ -26,7 +26,7 @@
 - **Run one version at a time:** the index file format is version 2. A 1.7.0 server running next to 1.8.0 does not understand it: it reads the file as no index, its own invalidation after a write does nothing to it, and it may overwrite the saved progress. 1.8.0 still reads 1.7.0's version 1 files.
 - The first read after the helper is built took about 25 s in testing (macOS prepares Vision for each new binary); later reads are fast. That preparation now happens in the background after server start and does not count against the per-file limit.
 - OCR text is imperfect and handwriting is not supported; check numbers against the original. Images and scanned PDFs have their own download cap, `PROTON_DRIVE_OCR_MAX_MB` (30 MB); the 10 MB `PROTON_DRIVE_READ_MAX_BYTES` cap still applies to text, `.docx` and text-layer PDFs.
-- Known limits: one OCR at a time, so large scan folders index slowly over several calls; an OCR timeout is recorded as a skip for that file version until `PROTON_DRIVE_OCR_TIMEOUT_MS` changes; pdftoppm renders at most 4000 pixels per side (larger pages are scaled down); `.gif` is not read.
+- Known limits: one OCR at a time, so large scan folders index slowly over several calls; an OCR timeout is recorded as a skip for that file version until `PROTON_DRIVE_OCR_TIMEOUT_MS` changes; pdftoppm renders at most 4000 pixels per side (larger pages are scaled down); `.gif` is not read; tesseract does not auto-rotate, so an upside-down scan or a PDF page rotated 180° reads as garbage there (Vision copes; verified on synthetic samples, 2026-11-02, tesseract 5.5.4).
 
 ## 1.7.0 — 2026-11-01
 
