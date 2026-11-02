@@ -112,7 +112,7 @@ What to expect: search matches names, sizes and dates, not the text of every fil
 - **Companion CLI** — 45 of the 54 operations, scriptable and pipeable, works in cron and shell scripts (the two sync-folder tools, `drive_read_file` and `drive_write_file`, `drive_audit_log` and the newer `drive_read_many`, `drive_share_expiry_report`, `drive_recent_changes`, `drive_content_index`, `drive_search_content` and `drive_refresh_index` are MCP-only)
 - **Full Proton Drive CLI command coverage** — all 32 scriptable commands of CLI 0.8.0 have a matching tool (checked against the CLI's own help; `auth login` is the one command excluded, since it's an interactive browser flow). Not every optional flag is exposed: `sharing invite --include-node-name` is deliberately off (it would put the file name in the invitation email in clear text) and the `inherited` invite role is not offered; commands that accept several paths run one path per call except bulk move and bulk trash
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
-- **Shell injection safe** — all CLI calls use `execFile` with discrete argument arrays, never string interpolation
+- **Shell injection safe** — all CLI calls pass discrete argument arrays to `spawn` (no shell), never string interpolation
 - **Privacy-native** — end-to-end encryption is handled by Proton's own CLI; this server is just a thin MCP wrapper
 
 ---
@@ -516,7 +516,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 | Sharing & invitations | Rarely | Full (invite, revoke, status) |
 | Trash & restore | Rarely | Full |
 | CLI parity | No | The CLI mirrors every MCP tool except `drive_read_file` / `drive_write_file` |
-| Shell injection safe | Varies | Yes — `execFile` only |
+| Shell injection safe | Varies | Yes — `spawn` with argument arrays, no shell |
 
 ---
 

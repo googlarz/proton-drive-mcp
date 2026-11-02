@@ -35,7 +35,7 @@ flowchart LR
 
 1. **MCP client to server.** Anyone who can call the server's tools acts as the logged-in user. Run it only for clients you trust, on machines you trust.
 2. **File content and names to the model.** Both are untrusted input. A file can contain text that tries to instruct the model (prompt injection). The tool descriptions tell the model to treat returned text as data, which reduces but does not remove the risk.
-3. **Server to CLI.** The CLI is always started with an argument list (`execFile`), never through a shell string.
+3. **Server to CLI.** The CLI is always started with an argument array (`spawn`, no shell), never through a command string.
 
 ## Controls (all opt-in, MCP server only)
 
