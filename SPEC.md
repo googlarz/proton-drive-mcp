@@ -32,7 +32,7 @@ Registry: `server.json` (official MCP Registry) and `package.json` `mcpName` mus
 ```
 src/index.ts              MCP server: TOOLS (schemas), tool-surface derivation (gates, pagination),
                           schema enforcement, dispatch, lifecycle (signals, cancellation)
-src/cli.ts                Companion CLI (mirrors 45 of 54 tools; drive_read_file/drive_write_file/drive_audit_log/drive_read_many/drive_share_expiry_report/drive_recent_changes/drive_content_index/drive_search_content/drive_refresh_index are MCP-only)
+src/cli.ts                Companion CLI (mirrors 45 of 55 tools; drive_size/drive_read_file/drive_write_file/drive_audit_log/drive_read_many/drive_share_expiry_report/drive_recent_changes/drive_content_index/drive_search_content/drive_refresh_index are MCP-only)
 src/services/content.ts   drive_read_content: private-temp download, text/docx/pdf extraction, paging
 src/services/ocr.ts       Opt-in local OCR (PROTON_DRIVE_OCR=1): engine choice, Vision helper build, tesseract/pdftoppm runs, limits
 src/ocr/vision-ocr.swift  macOS Vision + PDFKit helper, compiled on first use (copied to dist/ocr/ by the build)
@@ -54,10 +54,10 @@ src/types/index.ts        Shared response types
 test/                     Unit tests (injected runner) + real-process tests (fake CLI over stdio)
 ```
 
-## Tools (54)
+## Tools (55)
 
 - **Auth / meta:** `drive_auth_status`, `drive_auth_logout`, `drive_version`
-- **Filesystem:** `drive_list`, `drive_info`, `drive_read_content`, `drive_read_many`, `drive_tree`, `drive_search`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`
+- **Filesystem:** `drive_list`, `drive_info`, `drive_size`, `drive_read_content`, `drive_read_many`, `drive_tree`, `drive_search`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`
 - **Trash:** `drive_list_trash`, `drive_trash`, `drive_restore`, `drive_delete`, `drive_empty_trash`
 - **Sharing:** `drive_share_status`, `drive_share_invite`, `drive_share_revoke`, `drive_share_remove_all`, `drive_share_set_url`, `drive_share_remove_url`, `drive_share_leave`
 - **Invitations:** `drive_list_invitations`, `drive_invitation_accept`, `drive_invitation_reject`

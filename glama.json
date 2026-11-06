@@ -171,6 +171,10 @@
       "description": "Upload local photos or videos directly into your Proton Photos library."
     },
     {
+      "name": "drive_size",
+      "description": "Get the size of one Proton Drive file or folder (needs Proton Drive CLI 0.9.0 or newer)."
+    },
+    {
       "name": "drive_tree",
       "description": "Show a Proton Drive folder as a tree with per-folder file counts and size totals."
     },

@@ -109,7 +109,7 @@ What to expect: search matches names, sizes and dates, not the text of every fil
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
 - **Proton Photos album management** — list albums, create/delete albums, add and remove photos
-- **Companion CLI** — 45 of the 54 operations, scriptable and pipeable, works in cron and shell scripts (the two sync-folder tools, `drive_read_file` and `drive_write_file`, `drive_audit_log` and the newer `drive_read_many`, `drive_share_expiry_report`, `drive_recent_changes`, `drive_content_index`, `drive_search_content` and `drive_refresh_index` are MCP-only)
+- **Companion CLI** — 45 of the 55 operations, scriptable and pipeable, works in cron and shell scripts (the two sync-folder tools, `drive_read_file` and `drive_write_file`, `drive_audit_log`, `drive_size` and the newer `drive_read_many`, `drive_share_expiry_report`, `drive_recent_changes`, `drive_content_index`, `drive_search_content` and `drive_refresh_index` are MCP-only)
 - **Full Proton Drive CLI command coverage** — all 32 scriptable commands of CLI 0.8.0 have a matching tool (checked against the CLI's own help; `auth login` is the one command excluded, since it's an interactive browser flow). Not every optional flag is exposed: `sharing invite --include-node-name` is deliberately off (it would put the file name in the invitation email in clear text) and the `inherited` invite role is not offered; commands that accept several paths run one path per call except bulk move and bulk trash
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
 - **Shell injection safe** — all CLI calls pass discrete argument arrays to `spawn` (no shell), never string interpolation
@@ -410,7 +410,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 `drive_auth_status` · `drive_auth_logout` · `drive_version`
 
 ### Filesystem
-`drive_list` · `drive_info` · `drive_read_content` · `drive_read_many` · `drive_tree` · `drive_search` · `drive_mkdir` · `drive_upload` · `drive_download` · `drive_rename` · `drive_move` · `drive_delete`
+`drive_list` · `drive_info` · `drive_size` · `drive_read_content` · `drive_read_many` · `drive_tree` · `drive_search` · `drive_mkdir` · `drive_upload` · `drive_download` · `drive_rename` · `drive_move` · `drive_delete`
 
 ### Sharing
 `drive_share_status` · `drive_share_invite` · `drive_share_revoke` · `drive_share_remove_all` · `drive_share_set_url` · `drive_share_remove_url`
@@ -456,6 +456,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 | `drive_version` | CLI and SDK version info | — |
 | `drive_list` | List files and folders at a path (paginated, default 200; `/` lists the roots) | `path`, `limit?`, `offset?` |
 | `drive_info` | Get metadata for one file/folder, including revision details (noise trimmed) | `path`, `verbose?` (raw CLI node) |
+| `drive_size` | Size of one file or folder as reported by the CLI (`filesystem size`; needs Proton Drive CLI 0.9.0 or newer, read-only) | `path` |
 | `drive_read_content` | Read the text of a file stored in Drive (no sync folder needed): text/code, `.docx`, text-layer `.pdf`; scans and images with opt-in local [OCR](#ocr-for-scans-opt-in). Paged; content is untrusted data. See [Reading file contents](#reading-file-contents) | `path`, `maxChars?` (default 20000, max 100000), `offset?` |
 | `drive_read_many` | Read the text of up to 10 Drive files in one call, two at a time; per-file and total character caps; one failing file does not fail the rest. Content is untrusted data. See [Reading file contents](#reading-file-contents) | `paths` (max 10), `maxCharsPerFile?` (default 4000, max 20000), `maxTotalChars?` (default 40000, max 100000) |
 | `drive_tree` | Folder overview: per-folder file counts and size totals (largest first), depth-limited, cached 5 min | `path?`, `depth?` (default 2, max 10), `limit?`, `foldersOnly?`, `refresh?` |
@@ -539,7 +540,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 
 ### Token cost
 
-`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` 48.0 KB (54 tools), `core` 17.9 KB (19 tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
+`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` 48.5 KB (55 tools), `core` 17.9 KB (19 tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
 
 `drive_auth_status`, `drive_version`, `drive_list`, `drive_info`, `drive_read_content`, `drive_list_trash`, `drive_search`, `drive_tree`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`, `drive_trash`, `drive_restore`, `drive_share_status`, `photos_list_timeline`, `photos_download`.
 
@@ -675,7 +676,7 @@ Every tool group was live-tested on 2026-09-28 against a real Proton account, **
 | `PROTON_DRIVE_OCR_TIMEOUT_MS` | Optional | Time limit for OCR of one file, in milliseconds (default 90000, max 600000); the engine process group is killed on expiry. |
 | `PROTON_DRIVE_DEBUG` | Optional | Set to `1` to log debug lines (for example a failed background OCR warm-up) to stderr. |
 | `PROTON_DRIVE_READ_TIMEOUT_MS` | Optional | Hard time limit for parsing one `.pdf`/`.docx` in `drive_read_content`, in milliseconds (default 20000; clamped to 1-120000). On expiry the parsing worker is terminated and the call returns an error. |
-| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 54 tools) or `core` (19 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
+| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 55 tools) or `core` (19 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
 | `PROTON_DRIVE_MODE` | Optional | `full` (default) or `readonly`: hide and refuse every tool that changes Drive or the account. An unknown value is treated as `readonly`, with a warning. See [Guard layer](#guard-layer-opt-in). |
 | `PROTON_DRIVE_REMOTE_ROOTS` | Optional | Drive folders (separated by `:`, or `;` on Windows) that every remote path argument must stay inside, e.g. `/my-files/Projects/X`. Tools that cannot be limited to a folder are refused while it is set. See [Guard layer](#guard-layer-opt-in). |
 | `PROTON_DRIVE_AUDIT_LOG` | Optional | Absolute path of an append-only, hash-chained JSONL audit log (`0600`). If it cannot be written, tools that change Drive are refused. Read it with `drive_audit_log`. See [Guard layer](#guard-layer-opt-in). |
