@@ -26,10 +26,14 @@ describe("doctor cli-version", () => {
     const r = await doctor();
     assert.equal(check(r).status, "ok");
   });
-  it("0.9.x warns with hint, exit stays 0", async () => {
-    const r = await doctor("Proton Drive CLI cli-drive@0.9.1+abc\nProton Drive SDK js@0.22.0+abc\n");
+  it("0.9.x is ok", async () => {
+    const r = await doctor("Proton Drive CLI cli-drive@0.9.0+abc\nProton Drive SDK js@0.22.2+abc\n");
+    assert.equal(check(r).status, "ok");
+  });
+  it("0.10.x warns with hint, exit stays 0", async () => {
+    const r = await doctor("Proton Drive CLI cli-drive@0.10.1+abc\nProton Drive SDK js@0.23.0+abc\n");
     assert.equal(check(r).status, "warn");
-    assert.match(check(r).hint, /Tested with 0\.8\.x/);
+    assert.match(check(r).hint, /Tested with 0\.8\.x and 0\.9\.x/);
     assert.equal(r.code, 0);
   });
   it("unparsable version warns", async () => {
@@ -61,8 +65,8 @@ describe("startup probe", () => {
     return err;
   }
   it("warns once on stderr for a different version", async () => {
-    const err = await stderrFor("Proton Drive CLI cli-drive@0.9.0+abc\n");
-    assert.equal((err.match(/Tested with 0\.8\.x/g) ?? []).length, 1);
+    const err = await stderrFor("Proton Drive CLI cli-drive@0.10.0+abc\n");
+    assert.equal((err.match(/Tested with 0\.8\.x and 0\.9\.x/g) ?? []).length, 1);
   });
   it("is silent for the tested version", async () => {
     assert.doesNotMatch(await stderrFor(), /Tested with/);

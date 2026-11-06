@@ -46,6 +46,9 @@ jobs:
           PKG=$(node -p "require('./package.json').version")
           TAG=${GITHUB_REF_NAME#v}
           [ "$PKG" = "$TAG" ] || (echo "package.json version ($PKG) does not match tag ($TAG)" && exit 1)
+          # server.json (official MCP Registry) is bumped by hand together with package.json.
+          SRV=$(node -p "const s=require('./server.json'); [s.version, ...s.packages.map((p) => p.version)].join(' ')")
+          for v in $SRV; do [ "$v" = "$TAG" ] || (echo "server.json version ($v) does not match tag ($TAG)" && exit 1); done
 
       - name: Lint and test
         run: npm run ci

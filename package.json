@@ -1,6 +1,7 @@
 {
   "name": "proton-drive-mcp",
   "version": "1.8.0",
+  "mcpName": "io.github.googlarz/proton-drive-mcp",
   "description": "MCP server and CLI that gives Claude full access to Proton Drive — upload, download, share, and manage your end-to-end encrypted files without leaving the conversation.",
   "type": "module",
   "main": "dist/index.js",
@@ -54,7 +55,7 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.2"
+    "@modelcontextprotocol/sdk": "1.32.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

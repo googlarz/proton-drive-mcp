@@ -1,6 +1,6 @@
 import { accessSync, constants, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const SERVER_KEY = "proton-drive-mcp";
@@ -73,6 +73,11 @@ export function buildEntry(cliPath: string, syncPath?: string): McpEntry {
   return { command: process.execPath, args: [entryPath], env };
 }
 
+/** Entry for the `npx -y proton-drive-mcp` form: nothing is pinned to an install or cache path, except the CLI. */
+export function buildNpxEntry(cliPath: string): McpEntry {
+  return { command: "npx", args: ["-y", "proton-drive-mcp"], env: { PROTON_DRIVE_BIN: cliPath } };
+}
+
 export function isDirectory(p: string): boolean {
   try { return statSync(p).isDirectory(); } catch { return false; }
 }
@@ -90,6 +95,84 @@ function parseConfig(file: string): Record<string, unknown> {
     throw new Error(`${file} does not contain a JSON object; refusing to modify it.`);
   }
   return parsed as Record<string, unknown>;
+}
+
+// `proton-drive-mcp` or `proton-drive-mcp@<version>` as one argument (npx form), or a package directory in a path (global install).
+const PACKAGE_SPEC = /^proton-drive-mcp(@\S+)?$/;
+const PACKAGE_DIR = /(^|[\\/])proton-drive-mcp[\\/]dist[\\/]/;
+
+/** True for a server entry that starts this package: command `proton-drive-mcp`, or an argument naming it exactly (not a substring such as `proton-drive-mcp-notes`). */
+export function looksLikeOurServer(entry: unknown): boolean {
+  const e = entry as { command?: unknown; args?: unknown } | null;
+  if (typeof e?.command === "string" && basename(e.command) === SERVER_KEY) return true;
+  return Array.isArray(e?.args) && e.args.some((x) => typeof x === "string" && (PACKAGE_SPEC.test(x) || PACKAGE_DIR.test(x)));
+}
+
+/** The key our server is registered under: "proton-drive-mcp" if present, else the first entry that looks like it. */
+export function findOwnServerKey(servers: Record<string, unknown>): string | undefined {
+  return SERVER_KEY in servers ? SERVER_KEY : Object.keys(servers).find((k) => looksLikeOurServer(servers[k]));
+}
+
+export interface NpxPlan {
+  state: "no-file" | "absent" | "same" | "different" | "other-key";
+  /** What gets written: the npx form, PROTON_DRIVE_BIN set, every other key and field of an existing entry kept. */
+  entry: McpEntry;
+  /** Names (never values) of the env keys of an existing entry that are kept. */
+  preservedEnvKeys: string[];
+  /** The existing entry is the pinned install written by setup-claude-desktop (node + this package's dist/index.js). */
+  fromPinned: boolean;
+  /** A version pin (`proton-drive-mcp@1.8.0`) in the existing args that the npx form drops in favour of the latest. */
+  droppedVersionPin?: string;
+  /** Things in the existing entry other than command, args and env that matter: `disabled: true`, a `cwd`. Values are never included. */
+  notes: string[];
+  /** Keys other than "proton-drive-mcp" under which this package is already registered. */
+  otherKeys: string[];
+  /** An entry already exists under "proton-drive-mcp". */
+  hasOwnKey: boolean;
+}
+
+/**
+ * What `init` would do to the config at `file`. An existing entry is compared on command, args and PROTON_DRIVE_BIN only
+ * (an absolute path to an existing `npx` is a valid command and is kept), and replacing it overrides just those:
+ * all other env keys (mode, roots, audit log, sync path, ...) and fields survive. Throws like writeEntry on an unusable file.
+ */
+export function planNpxEntry(file: string, cliPath: string): NpxPlan {
+  const fresh = buildNpxEntry(cliPath);
+  const base = { entry: fresh, preservedEnvKeys: [] as string[], fromPinned: false, notes: [] as string[], otherKeys: [] as string[], hasOwnKey: false };
+  if (!existsSync(file)) return { ...base, state: "no-file" };
+  const servers = parseConfig(file)["mcpServers"];
+  if (servers !== undefined && (!servers || typeof servers !== "object" || Array.isArray(servers))) {
+    throw new Error(`"mcpServers" in ${file} is not an object; refusing to modify it.`);
+  }
+  const all = (servers ?? {}) as Record<string, unknown>;
+  const otherKeys = Object.keys(all).filter((k) => k !== SERVER_KEY && looksLikeOurServer(all[k]));
+  const current = all[SERVER_KEY];
+  if (current === undefined) return { ...base, state: otherKeys.length ? "other-key" : "absent", otherKeys };
+  if (!current || typeof current !== "object" || Array.isArray(current)) {
+    throw new Error(`mcpServers["${SERVER_KEY}"] in ${file} is not an object; refusing to modify it.`);
+  }
+  const cur = current as Record<string, unknown>;
+  const curEnv = cur["env"] && typeof cur["env"] === "object" && !Array.isArray(cur["env"]) ? (cur["env"] as Record<string, unknown>) : {};
+  const curCommand = typeof cur["command"] === "string" ? cur["command"] : "";
+  const keepCommand = curCommand !== "npx" && basename(curCommand) === "npx" && resolveBinary(curCommand) !== undefined;
+  const command = keepCommand ? curCommand : fresh.command;
+  const curArgs = Array.isArray(cur["args"]) ? (cur["args"] as unknown[]) : [];
+  const entry = { ...cur, command, args: fresh.args, env: { ...curEnv, PROTON_DRIVE_BIN: cliPath } } as unknown as McpEntry;
+  const same = (keepCommand || curCommand === fresh.command) && JSON.stringify(cur["args"]) === JSON.stringify(fresh.args) && curEnv["PROTON_DRIVE_BIN"] === cliPath;
+  const pin = curArgs.find((x): x is string => typeof x === "string" && /^proton-drive-mcp@\S+$/.test(x) && x !== "proton-drive-mcp@latest");
+  const notes: string[] = [];
+  if (cur["disabled"] === true) notes.push('the existing entry has "disabled": true (kept), so Claude Desktop will not start it until you enable it');
+  if ("cwd" in cur) notes.push('the existing entry has a "cwd" field (kept); the npx form does not need one');
+  return {
+    state: otherKeys.length ? "other-key" : same ? "same" : "different",
+    entry,
+    preservedEnvKeys: Object.keys(curEnv).filter((k) => k !== "PROTON_DRIVE_BIN"),
+    fromPinned: !keepCommand && curCommand !== fresh.command && curArgs.some((x) => typeof x === "string" && /[\\/]dist[\\/]index\.js$/.test(x)),
+    ...(pin ? { droppedVersionPin: pin } : {}),
+    notes,
+    otherKeys,
+    hasOwnKey: true,
+  };
 }
 
 /**

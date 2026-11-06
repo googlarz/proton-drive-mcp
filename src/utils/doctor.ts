@@ -2,9 +2,9 @@ import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DriveService } from "../services/drive.js";
 import { runDriveRaw } from "./subprocess.js";
-import { cliCompatWarning, TESTED_CLI } from "./cliVersion.js";
+import { cliCompatWarning, TESTED_CLIS } from "./cliVersion.js";
 import { chooseEngines, ocrEnabled, ocrLanguages, resolveTool, runOcrTool } from "../services/ocr.js";
-import { defaultConfigPath, isDirectory, isExecutableFile, resolveBinary, resolveDriveCli, SERVER_KEY } from "./claudeConfig.js";
+import { defaultConfigPath, findOwnServerKey, isDirectory, isExecutableFile, resolveBinary, resolveDriveCli } from "./claudeConfig.js";
 
 export interface Check {
   id: string;
@@ -47,7 +47,7 @@ async function cliChecks(): Promise<{ checks: Check[]; cliPath?: string }> {
     const warning = cliCompatWarning(versionText);
     checks.push(warning
       ? { id: "cli-version", status: "warn", message: version, hint: warning }
-      : { id: "cli-version", status: "ok", message: `matches tested ${TESTED_CLI}.x` });
+      : { id: "cli-version", status: "ok", message: `matches tested ${TESTED_CLIS.map((v) => `${v}.x`).join(" and ")}` });
   }
 
   try {
@@ -85,10 +85,7 @@ function configCheck(configPath: string, cliPath: string | undefined): Check {
     return { id, status: "fail", message: `${configPath} is not valid JSON`, hint: "Fix the JSON syntax; Claude Desktop ignores an unparsable config." };
   }
   // Only our own entry is ever inspected or reported: other servers' entries hold secrets.
-  const key = SERVER_KEY in servers ? SERVER_KEY : Object.keys(servers).find((k) => {
-    const a = (servers[k] as { args?: unknown } | null)?.args;
-    return Array.isArray(a) && a.some((x) => typeof x === "string" && x.includes(SERVER_KEY));
-  });
+  const key = findOwnServerKey(servers);
   if (!key) {
     return { id, status: "warn", message: `No proton-drive-mcp entry in ${configPath}`, hint: SETUP_HINT };
   }
