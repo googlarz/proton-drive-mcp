@@ -3,7 +3,7 @@
   "name": "io.github.googlarz/proton-drive-mcp",
   "title": "Proton Drive",
   "description": "Unofficial MCP server for Proton Drive and Photos, driving the official Proton Drive CLI.",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "repository": {
     "url": "https://github.com/googlarz/proton-drive-mcp",
     "source": "github"
@@ -12,7 +12,7 @@
     {
       "registryType": "npm",
       "identifier": "proton-drive-mcp",
-      "version": "1.8.0",
+      "version": "1.9.0",
       "transport": {
         "type": "stdio"
       }
