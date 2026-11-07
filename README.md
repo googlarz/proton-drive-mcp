@@ -91,6 +91,8 @@ Ask: "Move all the PDFs in /Downloads into /Documents/Inbox. Show me the plan fi
 
 Each call handles up to 200 items. For a first attempt on important data, use the [guard layer](#guard-layer-opt-in) (`PROTON_DRIVE_REMOTE_ROOTS` limits the folders Claude can touch).
 
+New to this and want to stay cautious? See the [safe-use guide](docs/GUIDE.md).
+
 ---
 
 ## Why this, and not just the Proton Drive CLI?
