@@ -5,7 +5,7 @@
 //   FAKE_ARGV_LOG     file that receives one JSON line per invocation: {argv, pid}
 //   FAKE_MODE         json | shuffle | empty | undefined-literal | garbage | ansi-prefixed-json |
 //                     fail-stderr | fail-stderr-echo | fail-stdout-crash | hang |
-//                     big-stderr | auth-fail | ok-false-results | locked-then-json | transient-then-json | tree | fs | download-hang
+//                     big-stderr | size-legacy | auth-fail | ok-false-results | locked-then-json | transient-then-json | tree | fs | download-hang
 //                     download-hang: `filesystem info` prints a small text file node; `filesystem download` writes a partial file into the
 //                     target dir, then hangs like `hang`. Everything else prints "[]".
 //   FAKE_TREE         tree mode: path to a JSON file {"<folder path>": [list items]}; `filesystem list <path>` serves that entry
@@ -187,6 +187,15 @@ switch (mode) {
     process.exit(0);
     break;
   }
+  case "size-legacy":
+    // CLI 0.8.x has no `filesystem size`: unknown subcommand, usage text, exit 1.
+    if (argv[0] === "filesystem" && argv[1] === "size") {
+      process.stderr.write("error: unknown command 'size'\nUsage: proton-drive filesystem [options] [command]\n");
+      process.exit(1);
+    }
+    process.stdout.write("[]\n");
+    process.exit(0);
+    break;
   case "ok-false-results":
     process.stdout.write(JSON.stringify([{ uid: "u1", ok: false, error: { name: "NodeWithSameNameExistsValidationError", code: 2500 } }]) + "\n");
     process.exit(0);

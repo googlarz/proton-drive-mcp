@@ -14,7 +14,7 @@ import type {
   UploadResult,
 } from "../types/index.js";
 import { runDrive as defaultRunDrive, runDriveRaw as defaultRunDriveRaw } from "../utils/subprocess.js";
-import { DriveNotAuthenticatedError, DriveParseError } from "../utils/errors.js";
+import { DriveCliError, DriveNotAuthenticatedError, DriveParseError } from "../utils/errors.js";
 import { validateName } from "../utils/validation.js";
 import { invalidatePath } from "./walk.js";
 
@@ -374,6 +374,19 @@ export class DriveService {
     const trimmed = trimNode(raw);
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return trimmed;
     return { ...(trimmed as Record<string, unknown>), ...revisionMeta(raw as Record<string, unknown>) };
+  }
+
+  // `filesystem size` exists from CLI 0.9.0. Older CLIs print usage or "unknown command"
+  // for it; that is mapped to a clear message instead of leaking the usage text.
+  async size(remotePath: string): Promise<unknown> {
+    try {
+      return trimNode(await this.run(["filesystem", "size", remotePath]));
+    } catch (err) {
+      if (err instanceof DriveCliError && /unknown (sub)?command|command not found|^\s*usage:/im.test(err.message)) {
+        throw new Error("drive_size needs Proton Drive CLI 0.9.0 or newer");
+      }
+      throw err;
+    }
   }
 
   // Renames in place — does not move to a different folder. Returns the

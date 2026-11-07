@@ -139,7 +139,7 @@ const EXPECTED = {
   drive_auth_status: R,
   drive_auth_logout: { destructiveHint: true, idempotentHint: true },
   drive_version: { ...R, openWorldHint: false },
-  drive_list: R, drive_info: R, drive_share_status: R, drive_list_trash: R, drive_list_invitations: R,
+  drive_list: R, drive_info: R, drive_size: R, drive_share_status: R, drive_list_trash: R, drive_list_invitations: R,
   photos_list_albums: R, photos_list_album_photos: R, photos_list_timeline: R,
   drive_upload: { destructiveHint: false, openWorldHint: true },
   drive_download: { destructiveHint: false, openWorldHint: true },

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`drive_size` tool** (read-only, allowed in readonly mode, in the full tier only): size of one file or folder from the official CLI command `proton-drive filesystem size <path>`, which exists from CLI 0.9.0. The path honours `PROTON_DRIVE_REMOTE_ROOTS`. On CLI 0.8.x the command is unknown and the tool fails with "drive_size needs Proton Drive CLI 0.9.0 or newer". Now 55 tools; `drive_size` is MCP-only in the companion CLI. Not live-tested against a real account (output shape follows the CLI as-is, passed through the same noise trimming as `drive_info`).
+
 ## 1.9.0 — 2026-11-06
 
 ### Added

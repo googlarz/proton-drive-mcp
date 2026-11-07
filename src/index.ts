@@ -240,6 +240,23 @@ const TOOLS = [
     },
   },
   {
+    name: "drive_size",
+    description:
+      "Get the size of one Proton Drive file or folder as reported by the CLI (`filesystem size`; folders are totalled by the CLI). Read-only. Needs Proton Drive CLI 0.9.0 or newer. For per-folder breakdowns use drive_tree.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute remote path, e.g. /my-files/Projects.",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "drive_tree",
     description:
       "Folder overview with per-folder file counts and size totals, largest first. Returns {files, folders, size, complete, unexpanded?, skipped?, tree}. Totals cover opened folders only; 'unexpanded' counts folders not opened (depth limit, .git/node_modules, failures). complete=false: part of the tree failed to load. Cached 5 min; refresh=true re-reads.",
@@ -1238,7 +1255,7 @@ const TOOL_TITLES: Record<string, string> = {
   drive_find_duplicates: "Find duplicate files", drive_sharing_audit: "Audit sharing",
   drive_sync_plan: "Plan local/Drive sync", drive_bulk_move: "Move many items", drive_bulk_trash: "Trash many items",
   drive_auth_status: "Check sign-in status", drive_auth_logout: "Sign out", drive_version: "CLI version",
-  drive_list: "List folder", drive_info: "Get item info", drive_upload: "Upload to Drive", drive_download: "Download from Drive",
+  drive_list: "List folder", drive_info: "Get item info", drive_size: "Get item size", drive_upload: "Upload to Drive", drive_download: "Download from Drive",
   drive_mkdir: "Create folder", drive_rename: "Rename item", drive_move: "Move item", drive_delete: "Delete permanently",
   drive_share_status: "Show sharing status", drive_list_trash: "List trash", drive_share_invite: "Invite to share",
   drive_share_revoke: "Revoke member access", drive_trash: "Move to trash", drive_restore: "Restore from trash",
@@ -1318,7 +1335,7 @@ export const MUTATING_TOOL_NAMES = new Set([
 ]);
 /** Reads and analytics. Downloads only write to the local disk; so does the content index (an encrypted local file). */
 export const READ_TOOL_NAMES = new Set([
-  "drive_auth_status", "drive_version", "drive_list", "drive_info", "drive_tree", "drive_search", "drive_download",
+  "drive_auth_status", "drive_version", "drive_list", "drive_info", "drive_size", "drive_tree", "drive_search", "drive_download",
   "drive_list_trash", "drive_share_status", "drive_list_invitations", "drive_read_content", "drive_read_file",
   "drive_sync_plan", "drive_usage", "drive_find_duplicates", "drive_sharing_audit", "drive_audit_log",
   "drive_read_many", "drive_share_expiry_report", "drive_recent_changes", "drive_content_index", "drive_search_content", "drive_refresh_index",
@@ -1339,7 +1356,7 @@ type PathArg = { arg: string; list?: boolean; dflt?: string; strict?: boolean };
 const walkRoot: PathArg[] = [{ arg: "path", dflt: "/my-files" }];
 const sharePath: PathArg[] = [{ arg: "path" }];
 export const REMOTE_PATH_ARGS: Record<string, PathArg[]> = {
-  drive_list: [{ arg: "path" }], drive_info: [{ arg: "path" }], drive_read_content: [{ arg: "path" }],
+  drive_list: [{ arg: "path" }], drive_info: [{ arg: "path" }], drive_size: [{ arg: "path" }], drive_read_content: [{ arg: "path" }],
   drive_read_file: [{ arg: "path" }], drive_write_file: [{ arg: "path" }], drive_mkdir: [{ arg: "path" }],
   drive_tree: walkRoot, drive_search: walkRoot, drive_usage: walkRoot, drive_find_duplicates: walkRoot, drive_sharing_audit: walkRoot,
   drive_share_expiry_report: walkRoot, drive_recent_changes: walkRoot, drive_refresh_index: walkRoot, drive_read_many: [{ arg: "paths", list: true }],
@@ -1547,6 +1564,9 @@ export async function main() {
 
         case "drive_info":
           return ok(await drive.info(validateRemotePath(a.path), a.verbose === true));
+
+        case "drive_size":
+          return ok(await drive.size(validateRemotePath(a.path)));
 
         case "drive_tree":
           return ok(await driveTree(drive, a));
