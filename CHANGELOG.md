@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.10.0 — 2026-11-18
 
 ### Added
 - **`drive_size` tool** (read-only, allowed in readonly mode, in the full tier only): size of one file or folder from the official CLI command `proton-drive filesystem size <path>`, which exists from CLI 0.9.0. The path honours `PROTON_DRIVE_REMOTE_ROOTS`. On CLI 0.8.x the command is unknown and the tool fails with "drive_size needs Proton Drive CLI 0.9.0 or newer". Now 55 tools; `drive_size` is MCP-only in the companion CLI. Not live-tested against a real account (output shape follows the CLI as-is, passed through the same noise trimming as `drive_info`).
+
+### Changed
+- Documentation: new safe-use guide for non-developers (`docs/GUIDE.md`): read-only setup, what the model provider sees, copy-paste prompts, and a checklist before allowing writes.
+- Dependencies: `hono` 4.13.18, `@hono/node-server` 2.1.8; CI uses `codeql-action` 4.39.3.
 
 ## 1.9.0 — 2026-11-06
 
