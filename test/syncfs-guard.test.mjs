@@ -10,7 +10,7 @@ import {
   writeSyncFile,
   syncFileExists,
 } from "../dist/utils/syncfs.js";
-import { assertLocalPathAllowed } from "../dist/utils/localguard.js";
+import { assertLocalPathAllowed, assertApprovalDirUsable } from "../dist/utils/localguard.js";
 import { validateDownloadTarget } from "../dist/utils/validation.js";
 
 describe("syncfs hardening", () => {
@@ -297,7 +297,7 @@ describe("assertLocalPathAllowed", () => {
 });
 
 describe("local path guard: case, start-up files, nested upload entries, write targets", () => {
-  const KEYS = ["HOME", "PROTON_DRIVE_LOCAL_ROOT", "PROTON_DRIVE_ALLOW_SENSITIVE_PATHS", "PROTON_DRIVE_AUDIT_LOG", "PROTON_DRIVE_SYNC_PATH"];
+  const KEYS = ["HOME", "PROTON_DRIVE_LOCAL_ROOT", "PROTON_DRIVE_ALLOW_SENSITIVE_PATHS", "PROTON_DRIVE_AUDIT_LOG", "PROTON_DRIVE_SYNC_PATH", "PROTON_DRIVE_APPROVAL_DIR", "XDG_CACHE_HOME"];
   const saved = {};
   const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   const setPlatform = (value) => Object.defineProperty(process, "platform", { ...realPlatform, value });
@@ -313,6 +313,8 @@ describe("local path guard: case, start-up files, nested upload entries, write t
     for (const k of KEYS) saved[k] = process.env[k];
     for (const k of KEYS.slice(1)) delete process.env[k];
     process.env.HOME = fakeHome;
+    // keep the default approvals folder (under HOME) out of the way of tests that download into HOME
+    process.env.PROTON_DRIVE_APPROVAL_DIR = join(base, "default-approvals-elsewhere");
   });
   afterEach(() => {
     Object.defineProperty(process, "platform", realPlatform);
@@ -385,6 +387,77 @@ describe("local path guard: case, start-up files, nested upload entries, write t
     assert.throws(() => validateDownloadTarget(join(base, "logs"), ["/my-files/audit.jsonl"]), /audit log/);
     assertLocalPathAllowed(log, { scan: true });
     assertLocalPathAllowed(join(base, "logs", "other.txt"));
+  });
+
+  it("the approvals folder (PROTON_DRIVE_APPROVAL_DIR) cannot be written, held, or reached through a symlink", async () => {
+    const t = join(base, "appr");
+    const ap = join(t, "store", "approvals");
+    await mkdir(join(ap, "pending"), { recursive: true });
+    await mkdir(join(t, "sibling"), { recursive: true });
+    process.env.PROTON_DRIVE_APPROVAL_DIR = ap;
+    assert.throws(() => validateDownloadTarget(ap, ["/my-files/a.txt"]), /approvals folder/);
+    assert.throws(() => validateDownloadTarget(join(ap, "pending"), ["/my-files/a.txt"]), /approvals folder/);
+    assert.throws(() => validateDownloadTarget(join(t, "store"), ["/my-files/approvals"]), /approvals folder/);
+    assert.throws(() => validateDownloadTarget(t, ["/my-files/store"]), /approvals folder/);
+    assert.throws(() => validateDownloadTarget(t, ["/photos/"]), /approvals folder/);
+    assert.throws(() => assertLocalPathAllowed(join(ap, "pending", "X.json")), /approvals folder/);
+    assert.throws(() => assertLocalPathAllowed(ap), /approvals folder/);
+    // reading (scan) stays possible, and a sibling folder is fine
+    assertLocalPathAllowed(ap, { scan: true });
+    assert.equal(validateDownloadTarget(join(t, "sibling"), ["/my-files/a.txt"]), join(t, "sibling"));
+    assert.equal(validateDownloadTarget(join(t, "store"), ["/my-files/a.txt"]), join(t, "store"));
+    // symlink into the folder
+    const link = join(t, "sibling", "link");
+    await symlink(ap, link);
+    assert.throws(() => validateDownloadTarget(link, ["/my-files/a.txt"]), /approvals folder/);
+    assert.throws(() => assertLocalPathAllowed(join(link, "pending", "n.json")), /approvals folder/);
+  });
+
+  it("the default approvals folder is protected (faked through HOME, mac and linux layouts)", async () => {
+    const h = join(base, "home5");
+    await mkdir(h, { recursive: true });
+    process.env.HOME = h;
+    delete process.env.PROTON_DRIVE_APPROVAL_DIR;
+    const def = process.platform === "darwin"
+      ? join(h, "Library", "Caches", "proton-drive-mcp", "approvals")
+      : join(h, ".cache", "proton-drive-mcp", "approvals");
+    await mkdir(def, { recursive: true });
+    assert.throws(() => validateDownloadTarget(def, ["/my-files/a.txt"]), /approvals folder/);
+    assert.throws(() => validateDownloadTarget(dirname(def), ["/my-files/approvals"]), /approvals folder/);
+    assert.throws(() => validateDownloadTarget(h, ["/my-files/" + (process.platform === "darwin" ? "Library" : ".cache")]), /approvals folder/);
+    assert.equal(validateDownloadTarget(join(h, "Documents"), ["/my-files/a.txt"]), join(h, "Documents"));
+    process.env.XDG_CACHE_HOME = join(base, "xdg");
+    if (process.platform !== "darwin") {
+      assert.throws(() => assertLocalPathAllowed(join(base, "xdg", "proton-drive-mcp", "approvals", "x.json")), /approvals folder/);
+    }
+  });
+
+  it("approvals folder case variants are refused on a darwin-faked platform", async () => {
+    const t = join(base, "appr2");
+    const ap = join(t, "Approvals");
+    await mkdir(ap, { recursive: true });
+    process.env.PROTON_DRIVE_APPROVAL_DIR = ap;
+    setPlatform("darwin");
+    assert.throws(() => assertLocalPathAllowed(join(t, "APPROVALS", "x.json")), /approvals folder/);
+    assert.throws(() => assertLocalPathAllowed(join(t, "approvals")), /approvals folder/);
+    assert.throws(() => validateDownloadTarget(t, ["/my-files/APPROVALS"]), /approvals folder/);
+    setPlatform("linux");
+    // case-sensitive: a differently-cased path is a different folder, unless the real file system folds it
+    if (process.platform === "linux") assertLocalPathAllowed(join(t, "APPROVALS-other", "x.json"));
+  });
+
+  it("assertApprovalDirUsable refuses a folder inside the sync folder only", async () => {
+    const sync = join(base, "sync3");
+    await mkdir(join(sync, "in"), { recursive: true });
+    const env = { PROTON_DRIVE_SYNC_PATH: sync };
+    assert.throws(() => assertApprovalDirUsable(join(sync, "in", "approvals"), env), /outside PROTON_DRIVE_SYNC_PATH/);
+    assert.throws(() => assertApprovalDirUsable(sync, env), /outside PROTON_DRIVE_SYNC_PATH/);
+    const viaLink = join(base, "sync3-link");
+    await symlink(sync, viaLink);
+    assert.throws(() => assertApprovalDirUsable(join(viaLink, "approvals"), env), /outside PROTON_DRIVE_SYNC_PATH/);
+    assertApprovalDirUsable(join(base, "elsewhere", "approvals"), env);
+    assertApprovalDirUsable(join(base, "sync3-sibling"), env);
+    assertApprovalDirUsable(join(sync, "in", "approvals"), {});
   });
 
   it("a .versions snapshot folder inside the sync folder cannot be a write target", async () => {

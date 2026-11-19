@@ -2,6 +2,8 @@ import { realpathSync, lstatSync, readlinkSync, readdirSync, statSync } from "no
 import { homedir } from "node:os";
 import { resolve, dirname, basename, join, relative, isAbsolute, sep, delimiter } from "node:path";
 
+import { resolveApprovalDir } from "./approvalStore.js";
+
 const HOME_DENY = [
   ".ssh",
   ".aws",
@@ -189,6 +191,13 @@ function assertNotWriteProtected(lexical: string, real: string, absPath: string,
       if (contains && (isInside(real, rf) || isInside(lexical, rf))) throw new Error(`the item would be written over a folder that holds the audit log, which cannot be written: ${absPath}`);
     }
   }
+  // The approvals folder holds the human's yes/no records: no local write may reach it, equal it, or (for write targets) contain it.
+  const approvals = realResolve(resolveApprovalDir(process.env));
+  const approvalsLex = resolve(resolveApprovalDir(process.env));
+  for (const a of new Set([approvals, approvalsLex])) {
+    if (isInside(a, real) || isInside(a, lexical)) throw new Error(`local path is the approvals folder and cannot be written: ${absPath}`);
+    if (contains && (isInside(real, a) || isInside(lexical, a))) throw new Error(`the item would be written over a folder that holds the approvals folder, which cannot be written: ${absPath}`);
+  }
   const sync = process.env["PROTON_DRIVE_SYNC_PATH"];
   if (sync && isAbsolute(sync)) {
     const syncReal = realResolve(sync);
@@ -199,6 +208,17 @@ function assertNotWriteProtected(lexical: string, real: string, absPath: string,
     if (contains && ((isInside(real, syncReal) && !inSync) || (inSync && isDirectory(real) && hasVersionsDir(real)))) {
       throw new Error(`the item would be written over a folder that holds a .versions snapshot folder, which cannot be written: ${absPath}`);
     }
+  }
+}
+
+/** Startup check: the approvals folder must not sit inside the sync folder (it would sync to Drive and be editable with drive_write_file). */
+export function assertApprovalDirUsable(dir: string, env: Record<string, string | undefined> = process.env): void {
+  const sync = env["PROTON_DRIVE_SYNC_PATH"];
+  if (!sync || !isAbsolute(sync)) return;
+  const d = realResolve(dir);
+  const s = realResolve(sync);
+  if (isInside(s, d) || isInside(resolve(sync), resolve(dir))) {
+    throw new Error("The approvals folder (PROTON_DRIVE_APPROVAL_DIR) must be outside PROTON_DRIVE_SYNC_PATH (the sync folder is uploaded and can be edited with drive_write_file).");
   }
 }
 
