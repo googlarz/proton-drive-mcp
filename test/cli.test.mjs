@@ -148,7 +148,7 @@ describe("help and pass-through", () => {
   it("--help exits 0 and mentions every command group", async () => {
     const r = await runCli(["--help"]);
     assert.equal(r.code, 0, r.stderr);
-    for (const w of ["auth status", "auth logout", "version", "list ", "info ", "mkdir", "upload", "download", "rename", "move", "delete", "share status", "share invite", "share revoke", "share remove-all", "share set-url", "share remove-url", "share leave", "copy", "trash", "restore", "invitation", "album", "photo", "approvals", "approve ", "deny "]) {
+    for (const w of ["auth status", "auth logout", "version", "list ", "info ", "mkdir", "upload", "download", "rename", "move", "delete", "share status", "share invite", "share revoke", "share remove-all", "share set-url", "share remove-url", "share leave", "copy", "trash", "restore", "invitation", "album", "photo", "approvals", "approve ", "deny ", "checkup [path]", "undo [--list]"]) {
       assert.ok(r.stdout.includes(w), `usage() does not mention '${w}'`);
     }
     assert.equal(r.calls.length, 0);
