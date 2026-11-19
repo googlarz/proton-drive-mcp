@@ -31,7 +31,7 @@ import { resolve } from "node:path";
 import { driveSearch, driveTree } from "./services/find.js";
 import { readDriveContent } from "./services/content.js";
 import { driveUsage, driveFindDuplicates, driveSharingAudit } from "./services/analytics.js";
-import { validateRemotePath, validateRemotePathList, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
+import { validateRemotePath, validateRemotePathList, validateLocalPath, validateDownloadTarget, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 
 const drive = new DriveService();
 const args = process.argv.slice(2);
@@ -295,7 +295,7 @@ async function run() {
       const rawLocal = sub;
       if (!rawLocal) { console.error("Usage: upload <local> <remote> [--file-conflict X] [--folder-conflict X] [--skip-thumbnails]"); process.exit(1); }
       let local: string;
-      try { local = validateLocalPath(rawLocal, { scan: true }); }
+      try { local = validateLocalPath(rawLocal, { scan: true, upload: true }); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
       const remote = requirePath(rest[0], "upload <local> <remote>");
       const fileConflictRaw = getFlag("--file-conflict") ?? "skip";
@@ -326,7 +326,7 @@ async function run() {
       const rawLocal2 = rest[0];
       if (!rawLocal2) { console.error("Usage: download <remote> <local>"); process.exit(1); return; }
       let local: string;
-      try { local = validateLocalPath(rawLocal2); }
+      try { local = validateDownloadTarget(rawLocal2, [remote]); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
       const fileConflictRaw = getFlag("--file-conflict") ?? "skip";
       if (!["skip", "rename", "remove"].includes(fileConflictRaw)) {
@@ -649,7 +649,7 @@ async function run() {
         const localFolder = positionals[positionals.length - 1];
         const photoPaths = positionals.slice(0, -1).map((p) => requirePath(p, "photo download <photo>... <local-folder>"));
         let localFolderValidated: string;
-        try { localFolderValidated = validateLocalPath(localFolder); }
+        try { localFolderValidated = validateDownloadTarget(localFolder, photoPaths); }
         catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
         if (!["skip", "rename", "remove"].includes(conflictRaw)) {
           console.error(`Invalid --conflict value: ${conflictRaw}. Must be skip, rename, or remove.`);
@@ -664,7 +664,7 @@ async function run() {
         if (positionals.length === 0) { console.error("Usage: photo upload <local>... [--conflict X]"); process.exit(1); return; }
         const localPaths: string[] = [];
         for (const p of positionals) {
-          try { localPaths.push(validateLocalPath(p, { scan: true })); }
+          try { localPaths.push(validateLocalPath(p, { scan: true, upload: true })); }
           catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); return; }
         }
         if (!["skip", "rename"].includes(conflictRaw)) {

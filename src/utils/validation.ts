@@ -1,4 +1,4 @@
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { assertLocalPathAllowed } from "./localguard.js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -92,11 +92,31 @@ export function validateFlagValue(value: unknown, label: string): string {
 }
 
 /** `scan: true` for paths that are read recursively (upload sources, sync_plan); omit for write destinations. */
-export function validateLocalPath(path: unknown, opts: { scan?: boolean } = {}): string {
+export function validateLocalPath(path: unknown, opts: { scan?: boolean; ancestors?: boolean; upload?: boolean; writeTarget?: boolean } = {}): string {
   const p = validatePath(path);
   if (!isAbsolute(p)) throw new Error(`local path must be absolute: ${p}`);
   assertLocalPathAllowed(p, opts);
   return p;
+}
+
+/**
+ * Download destination folder. The CLI writes each item into it under its remote name, so the path the item will get
+ * (folder + remote name; `root` for a drive root, which the CLI names that way) must pass the same guard: a remote item named like a shell start-up file or a protected folder
+ * would otherwise land in a protected place through an allowed folder.
+ */
+export function validateDownloadTarget(folder: unknown, remotePaths: string[]): string {
+  const dir = validateLocalPath(folder);
+  for (const remote of remotePaths) {
+    const segments = remote.split("/").filter(Boolean);
+    const name = segments[segments.length - 1];
+    if (!name) throw new Error(`remote path has no item name to download: ${remote}`);
+    // A drive root (/my-files, /photos, ...) is written by the CLI as <folder>/root, not under its own name, and brings a
+    // whole drive tree with it, so the folder itself must not hold the audit log or a .versions folder either.
+    const names = segments.length === 1 ? ["root", name] : [name];
+    if (segments.length === 1) validateLocalPath(dir, { writeTarget: true });
+    for (const n of names) validateLocalPath(join(dir, n), { ancestors: true, writeTarget: true });
+  }
+  return dir;
 }
 
 export function validateEmail(email: unknown): string {

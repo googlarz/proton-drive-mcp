@@ -11,6 +11,7 @@ import {
   syncFileExists,
 } from "../dist/utils/syncfs.js";
 import { assertLocalPathAllowed } from "../dist/utils/localguard.js";
+import { validateDownloadTarget } from "../dist/utils/validation.js";
 
 describe("syncfs hardening", () => {
   let base, root, outside;
@@ -292,5 +293,260 @@ describe("assertLocalPathAllowed", () => {
     process.env.PROTON_DRIVE_ALLOW_SENSITIVE_PATHS = "1";
     assert.throws(() => assertLocalPathAllowed(join(home, ".ssh", "id_rsa")), /outside PROTON_DRIVE_LOCAL_ROOT/);
     assertLocalPathAllowed(join(a, "ok.txt"));
+  });
+});
+
+describe("local path guard: case, start-up files, nested upload entries, write targets", () => {
+  const KEYS = ["HOME", "PROTON_DRIVE_LOCAL_ROOT", "PROTON_DRIVE_ALLOW_SENSITIVE_PATHS", "PROTON_DRIVE_AUDIT_LOG", "PROTON_DRIVE_SYNC_PATH"];
+  const saved = {};
+  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  const setPlatform = (value) => Object.defineProperty(process, "platform", { ...realPlatform, value });
+  let base, fakeHome;
+
+  before(async () => {
+    base = await mkdtemp(join(tmpdir(), "localguard2-"));
+    fakeHome = join(base, "home");
+    await mkdir(join(fakeHome, "Documents"), { recursive: true });
+  });
+  after(() => rm(base, { recursive: true, force: true }));
+  beforeEach(() => {
+    for (const k of KEYS) saved[k] = process.env[k];
+    for (const k of KEYS.slice(1)) delete process.env[k];
+    process.env.HOME = fakeHome;
+  });
+  afterEach(() => {
+    Object.defineProperty(process, "platform", realPlatform);
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  const entries = [
+    ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".npmrc", ".netrc", ".pgpass", ".config/gcloud", ".claude", ".claude.json",
+    "Library/Keychains", "Library/Application Support/Claude", "Library/LaunchAgents", "Library/LaunchDaemons",
+    ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile", ".bash_login", ".profile", ".zlogout", ".bash_logout",
+  ];
+
+  for (const platform of ["darwin", "win32"]) {
+    it(`${platform}: every home entry is denied in any letter case, existing or not`, async () => {
+      setPlatform(platform);
+      for (const rel of entries) {
+        const upper = rel.toUpperCase();
+        assert.throws(() => assertLocalPathAllowed(join(fakeHome, upper, "x")), /protected location|secret file/, upper);
+        assert.throws(() => assertLocalPathAllowed(join(fakeHome, upper)), /protected location|secret file/, upper);
+      }
+      for (const a of ["/ETC/passwd", "/Private/Etc/hosts", "/VAR/root/x", "/library/launchagents/x.plist"]) {
+        assert.throws(() => assertLocalPathAllowed(a), /protected location/, a);
+      }
+    });
+  }
+
+  // Case folding is faked off (linux) so only realpath.native can map the typed spelling to the on-disk one.
+  // Needs a case-insensitive file system, i.e. a real macOS run.
+  it("an existing directory is matched through its on-disk spelling (realpath.native, no case folding)", { skip: realPlatform.value !== "darwin" }, async () => {
+    const h = await mkdtemp(join(base, "native-"));
+    await mkdir(join(h, ".ssh"));
+    process.env.HOME = h;
+    setPlatform("linux");
+    assert.throws(() => assertLocalPathAllowed(join(h, ".SSH", "config")), /protected location/);
+  });
+
+  it("linux: names stay case-sensitive (a home without .ssh does not deny .SSH)", async () => {
+    const h = await mkdtemp(join(base, "linux-"));
+    process.env.HOME = h;
+    setPlatform("linux");
+    assertLocalPathAllowed(join(h, ".SSH", "config"));
+    assertLocalPathAllowed(join(h, ".AWS", "credentials"));
+    assert.throws(() => assertLocalPathAllowed(join(h, ".ssh", "config")), /protected location/);
+  });
+
+  it("start-up files and autostart folders are denied in their normal case too", () => {
+    for (const rel of [".zshrc", ".bash_profile", "Library/LaunchAgents/evil.plist", "Library/LaunchDaemons"]) {
+      assert.throws(() => assertLocalPathAllowed(join(fakeHome, rel)), /protected location/, rel);
+    }
+  });
+
+  it("download target: the remote name is checked inside the destination folder", async () => {
+    await mkdir(join(fakeHome, "Library", "LaunchAgents"), { recursive: true });
+    assert.throws(() => validateDownloadTarget(fakeHome, ["/my-files/.zshrc"]), /protected location/);
+    assert.throws(() => validateDownloadTarget(fakeHome, ["/my-files/.ssh"]), /protected location/);
+    assert.throws(() => validateDownloadTarget(join(fakeHome, "Library"), ["/my-files/LaunchAgents"]), /protected location/);
+    assert.throws(() => validateDownloadTarget(fakeHome, ["/my-files/stuff/Library"]), /contains protected locations/);
+    assert.throws(() => validateDownloadTarget(join(fakeHome, "Library", "LaunchAgents"), ["/my-files/a.plist"]), /protected location/);
+    assert.equal(validateDownloadTarget(join(fakeHome, "Documents"), ["/my-files/report.pdf", "/photos/a.jpg"]), join(fakeHome, "Documents"));
+  });
+
+  it("the audit log file cannot be a write target but can still be read (scan)", async () => {
+    const log = join(base, "logs", "audit.jsonl");
+    process.env.PROTON_DRIVE_AUDIT_LOG = log;
+    assert.throws(() => assertLocalPathAllowed(log), /audit log/);
+    assert.throws(() => assertLocalPathAllowed(log + ".lock"), /audit log/);
+    assert.throws(() => validateDownloadTarget(join(base, "logs"), ["/my-files/audit.jsonl"]), /audit log/);
+    assertLocalPathAllowed(log, { scan: true });
+    assertLocalPathAllowed(join(base, "logs", "other.txt"));
+  });
+
+  it("a .versions snapshot folder inside the sync folder cannot be a write target", async () => {
+    const sync = join(base, "sync");
+    await mkdir(join(sync, "docs", ".versions"), { recursive: true });
+    process.env.PROTON_DRIVE_SYNC_PATH = sync;
+    assert.throws(() => assertLocalPathAllowed(join(sync, "docs", ".versions")), /\.versions/);
+    if (process.platform === "darwin" || process.platform === "win32") {
+      // Case-insensitive file systems: .VERSIONS is the same folder. On Linux it is a different folder and stays allowed.
+      assert.throws(() => assertLocalPathAllowed(join(sync, "docs", ".VERSIONS", "a.20261101")), /\.versions/i);
+    }
+    assertLocalPathAllowed(join(sync, "docs", "a.txt"));
+    await assert.rejects(() => writeSyncFile(sync, "/my-files/docs/.versions/a.20261101T000000.000Z", "x"), /\.versions/);
+  });
+
+  it("a download target cannot contain the audit log, its lock, or a .versions folder of the sync folder", async () => {
+    const t = join(base, "t");
+    await mkdir(join(t, "logs"), { recursive: true });
+    process.env.PROTON_DRIVE_AUDIT_LOG = join(t, "logs", "audit.jsonl");
+    assert.throws(() => validateDownloadTarget(t, ["/my-files/logs"]), /audit log/);
+    assert.throws(() => validateDownloadTarget(join(t, "logs"), ["/my-files/audit.jsonl"]), /audit log/);
+    assert.throws(() => validateDownloadTarget(join(t, "logs"), ["/my-files/audit.jsonl.lock"]), /audit log/);
+    assert.throws(() => validateDownloadTarget(base, ["/my-files/t"]), /audit log/);
+    assert.equal(validateDownloadTarget(join(base, "elsewhere"), ["/my-files/logs"]), join(base, "elsewhere"));
+    delete process.env.PROTON_DRIVE_AUDIT_LOG;
+
+    const sync = join(base, "sync2");
+    await mkdir(join(sync, "Docs", ".versions"), { recursive: true });
+    await mkdir(join(sync, "Plain"), { recursive: true });
+    process.env.PROTON_DRIVE_SYNC_PATH = sync;
+    assert.throws(() => validateDownloadTarget(sync, ["/my-files/Docs"]), /\.versions/);
+    assert.throws(() => validateDownloadTarget(base, ["/my-files/sync2"]), /\.versions/);
+    assert.throws(() => validateDownloadTarget(join(base, "sync2", "Docs"), ["/my-files/.versions"]), /\.versions/);
+    assert.equal(validateDownloadTarget(join(sync, "Plain"), ["/my-files/a.txt"]), join(sync, "Plain"));
+  });
+
+  it("an ordinary download is not refused only because the folder holds, or sits above, the log or a .versions folder", async () => {
+    const h = join(base, "home3");
+    await mkdir(join(h, "Proton", "Docs", ".versions"), { recursive: true });
+    await mkdir(join(h, "logs"), { recursive: true });
+    process.env.HOME = h;
+    process.env.PROTON_DRIVE_SYNC_PATH = join(h, "Proton");
+    process.env.PROTON_DRIVE_AUDIT_LOG = join(h, "logs", "audit.jsonl");
+    // a.txt into $HOME (the sync folder and the log are below it), into the sync root (a .versions exists below it) and into logs/
+    assert.equal(validateDownloadTarget(h, ["/my-files/a.txt"]), h);
+    assert.equal(validateDownloadTarget(join(h, "Proton"), ["/my-files/a.txt"]), join(h, "Proton"));
+    assert.equal(validateDownloadTarget(join(h, "Proton", "Docs"), ["/my-files/a.txt"]), join(h, "Proton", "Docs"));
+    assert.equal(validateDownloadTarget(join(h, "logs"), ["/my-files/other.txt"]), join(h, "logs"));
+    // but a remote folder Docs into the sync root lands on the local Docs/.versions, and a folder named like the log's folder on logs/
+    assert.throws(() => validateDownloadTarget(join(h, "Proton"), ["/my-files/Docs"]), /\.versions/);
+    assert.throws(() => validateDownloadTarget(h, ["/my-files/logs"]), /audit log/);
+    assert.throws(() => validateDownloadTarget(h, ["/my-files/Proton"]), /\.versions/);
+  });
+
+  it("a downloaded drive root is written as <folder>/root, so that name and the folder itself are checked", async () => {
+    const h = join(base, "home4");
+    await mkdir(join(h, "Proton", ".versions"), { recursive: true });
+    await mkdir(join(h, "dl"), { recursive: true });
+    await mkdir(join(h, "logs"), { recursive: true });
+    await mkdir(join(h, "root", "sub"), { recursive: true });
+    process.env.HOME = h;
+    // the local name is "root": a protected thing named root is caught (the derived name my-files would not be)
+    process.env.PROTON_DRIVE_AUDIT_LOG = join(h, "root", "audit.jsonl");
+    assert.throws(() => validateDownloadTarget(h, ["/my-files"]), /audit log/);
+    assert.throws(() => validateDownloadTarget(h, ["/photos/"]), /audit log/);
+    // a whole drive tree lands below the folder: a folder that holds the log or a .versions folder is refused
+    process.env.PROTON_DRIVE_AUDIT_LOG = join(h, "logs", "audit.jsonl");
+    assert.throws(() => validateDownloadTarget(h, ["/my-files"]), /audit log/);
+    delete process.env.PROTON_DRIVE_AUDIT_LOG;
+    process.env.PROTON_DRIVE_SYNC_PATH = join(h, "Proton");
+    assert.throws(() => validateDownloadTarget(h, ["/my-files"]), /\.versions/);
+    assert.throws(() => validateDownloadTarget(join(h, "Proton"), ["/trash"]), /\.versions/);
+    // an ordinary folder is fine, and a single file still only checks its own name
+    delete process.env.PROTON_DRIVE_SYNC_PATH;
+    assert.equal(validateDownloadTarget(join(h, "dl"), ["/my-files"]), join(h, "dl"));
+    assert.equal(validateDownloadTarget(h, ["/my-files/a.txt"]), h);
+  });
+
+  it("a remote path without an item name is refused", () => {
+    assert.throws(() => validateDownloadTarget(join(base, "any"), ["/"]), /no item name/);
+  });
+
+  describe("folder upload: credential trees and names", () => {
+    for (const rel of [".aws/credentials", ".ssh/authorized_keys", ".gnupg/pubring.kbx", ".kube/config", ".docker/config.json", ".config/gcloud/creds.db", "deep/er/.netrc", "x/.npmrc", ".pgpass", "k/id_ecdsa", "k/id_dsa.pub", ".git-credentials", "gc/credentials.db", "gc/access_tokens.db", "gc/application_default_credentials.json", "gc/legacy_credentials/x@y.com/adc.json"]) {
+      it(`rejects a copied ${rel}`, async () => {
+        const dir = join(base, "cred-" + rel.replace(/\W/g, "_"));
+        await mkdir(join(dir, rel, ".."), { recursive: true });
+        await writeFile(join(dir, rel), "x");
+        assert.throws(() => assertLocalPathAllowed(dir, { scan: true, upload: true }), /protected or secret file/);
+      });
+    }
+    it("allows ordinary project folders named .docker, .kube or gcloud, and a .config with other tools", async () => {
+      const dir = join(base, "proj-ok");
+      await mkdir(join(dir, ".docker", "php"), { recursive: true });
+      await mkdir(join(dir, ".kube"), { recursive: true });
+      await mkdir(join(dir, "deploy", "gcloud"), { recursive: true });
+      await mkdir(join(dir, ".config", "git"), { recursive: true });
+      await writeFile(join(dir, ".docker", "php", "Dockerfile"), "FROM php");
+      await writeFile(join(dir, ".kube", "kustomization.yaml"), "x");
+      await writeFile(join(dir, "deploy", "gcloud", "main.tf"), "x");
+      await writeFile(join(dir, ".config", "git", "ignore"), "x");
+      assertLocalPathAllowed(dir, { scan: true, upload: true });
+    });
+
+    it("also rejects an empty secret folder, and a hardlink named like a secret file", async () => {
+      const dir = join(base, "cred-empty");
+      await mkdir(join(dir, "x", ".ssh"), { recursive: true });
+      assert.throws(() => assertLocalPathAllowed(dir, { scan: true, upload: true }), /protected or secret file.*\.ssh/);
+      const dir2 = join(base, "cred-link");
+      await mkdir(dir2, { recursive: true });
+      await writeFile(join(base, "orig"), "x");
+      const { link } = await import("node:fs/promises");
+      await link(join(base, "orig"), join(dir2, ".netrc"));
+      assert.throws(() => assertLocalPathAllowed(dir2, { scan: true, upload: true }), /protected or secret file/);
+    });
+  });
+
+  describe("folder upload scan covers nested entries", () => {
+    it("rejects a nested secret-file name", async () => {
+      const dir = join(base, "up1");
+      await mkdir(join(dir, "a", "b"), { recursive: true });
+      await writeFile(join(dir, "a", "b", ".env"), "S=1");
+      assert.throws(() => assertLocalPathAllowed(dir, { scan: true, upload: true }), /protected or secret file.*a.b..env/);
+    });
+
+    it("rejects a symlink that leads out of the folder, to a protected folder or anywhere else", async () => {
+      const dir = join(base, "up2");
+      await mkdir(join(fakeHome, ".ssh"), { recursive: true });
+      await mkdir(join(dir, "n"), { recursive: true });
+      await writeFile(join(dir, "n", "ok.txt"), "x");
+      await symlink(join(fakeHome, ".ssh"), join(dir, "n", "keys"));
+      assert.throws(() => assertLocalPathAllowed(dir, { scan: true, upload: true }), /symlink that points outside/);
+      const dir2 = join(base, "up2b");
+      await mkdir(dir2);
+      await symlink(join(base, "up1"), join(dir2, "elsewhere"));
+      assert.throws(() => assertLocalPathAllowed(dir2, { scan: true, upload: true }), /symlink that points outside/);
+      const dir3 = join(base, "up2c");
+      await mkdir(dir3);
+      await symlink(join(base, "no-such-target"), join(dir3, "dangling"));
+      assert.throws(() => assertLocalPathAllowed(dir3, { scan: true, upload: true }), /symlink that points outside/);
+    });
+
+    it("with PROTON_DRIVE_LOCAL_ROOT a symlink out of the folder is rejected too", async () => {
+      const dir = join(base, "up3");
+      await mkdir(dir, { recursive: true });
+      await symlink(tmpdir(), join(dir, "out"));
+      process.env.PROTON_DRIVE_LOCAL_ROOT = base;
+      assert.throws(() => assertLocalPathAllowed(dir, { scan: true, upload: true }), /symlink that points outside/);
+    });
+
+    it("accepts a clean tree, including a symlink that stays inside it", async () => {
+      const dir = join(base, "up4");
+      await mkdir(join(dir, "docs"), { recursive: true });
+      await writeFile(join(dir, "docs", "a.txt"), "x");
+      await writeFile(join(dir, ".envrc-not"), "x");
+      await symlink(join(dir, "docs"), join(dir, "alias"));
+      assertLocalPathAllowed(dir, { scan: true, upload: true });
+    });
+
+    it("the opt-out switches the nested check off as well", async () => {
+      process.env.PROTON_DRIVE_ALLOW_SENSITIVE_PATHS = "1";
+      assertLocalPathAllowed(join(base, "up1"), { scan: true, upload: true });
+    });
   });
 });

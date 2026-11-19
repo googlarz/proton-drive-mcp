@@ -84,6 +84,23 @@ describe("PROTON_DRIVE_MODE=readonly", () => {
     });
   });
 
+  it("downloads cannot delete or overwrite local files: the 'remove' strategies are refused", async () => {
+    await withServer({ PROTON_DRIVE_MODE: "readonly" }, async (c, sb) => {
+      const out = join(sb.dir, "out");
+      for (const [tool, args] of [
+        ["drive_download", { remotePath: "/my-files/a.txt", localPath: out, fileConflictStrategy: "remove", confirmed: true }],
+        ["drive_download", { remotePath: "/my-files/a", localPath: out, folderConflictStrategy: "remove", confirmed: true }],
+        ["photos_download", { photoPaths: ["/photos/a.jpg"], localFolder: out, conflictStrategy: "remove", confirmed: true }],
+      ]) {
+        const r = await c.call(tool, args);
+        assert.equal(r.isError, true, tool);
+        assert.match(r.text, /readonly mode/, tool);
+      }
+      await sleep(100);
+      assert.deepEqual(nonVersionCalls(sb.argvLog), []);
+    });
+  });
+
   it("an invalid value fails closed (readonly) with one stderr warning; full still lists 55", async () => {
     await withServer({ PROTON_DRIVE_MODE: "bogus" }, async (c) => {
       assert.equal((await c.listTools()).length, 28);
@@ -144,6 +161,17 @@ describe("PROTON_DRIVE_REMOTE_ROOTS: matching", () => {
     assert.match(rootsRefusal("drive_empty_trash", {}, roots), /cannot be limited/);
     assert.equal(rootsRefusal("drive_version", {}, roots), undefined);
     assert.throws(() => rootsRefusal("drive_list", { path: "/my-files/A/../B" }, roots), /'\.\.'/);
+  });
+
+  it("rootsRefusal checks the resulting path of move/copy/rename/bulk_move, not only the folder argument", () => {
+    const roots = ["/my-files/A"];
+    // An item named like the root, moved onto the root's own path, would land in the root's parent.
+    assert.match(rootsRefusal("drive_move", { sourcePath: "/my-files/A/sub/A", destinationPath: "/my-files/A" }, roots), /root folder itself/);
+    assert.equal(rootsRefusal("drive_move", { sourcePath: "/my-files/A/sub/A", destinationPath: "/my-files/A/A" }, roots), undefined);
+    assert.equal(rootsRefusal("drive_copy", { sourcePath: "/my-files/A/sub/A", destinationPath: "/my-files/A" }, roots), undefined);
+    assert.match(rootsRefusal("drive_copy", { sourcePath: "/my-files/A/x", destinationPath: "/my-files" }, roots), /destinationPath.*outside/);
+    assert.equal(rootsRefusal("drive_rename", { path: "/my-files/A/x", newName: "y" }, roots), undefined);
+    assert.equal(rootsRefusal("drive_bulk_move", { sources: ["/my-files/A/s/A"], destinationFolder: "/my-files/A" }, roots), undefined);
   });
 });
 
