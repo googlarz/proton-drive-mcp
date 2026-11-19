@@ -28,6 +28,10 @@ import { indexStatus, deleteIndex } from "./services/walkIndex.js";
 import { deleteChangeSnapshots } from "./services/changes.js";
 import { clearContentIndex } from "./services/contentIndex.js";
 import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
+import { createApprovalStore, resolveApprovalDir, type ApprovalStore } from "./utils/approvalStore.js";
 import { driveSearch, driveTree } from "./services/find.js";
 import { readDriveContent } from "./services/content.js";
 import { driveUsage, driveFindDuplicates, driveSharingAudit } from "./services/analytics.js";
@@ -102,6 +106,11 @@ Commands:
   index status                             Persistent walk index (PROTON_DRIVE_INDEX=1): enabled?, path, size, age, entries
   index clear                              Delete the saved index file (plaintext names/paths of your drive), the change snapshots and the encrypted content index
 
+  approvals                                List pending/approved out-of-band approvals (code, tool, status, expires in, first summary line)
+  approve <code>                           Show the server's stored summary of a refused operation and approve it after you type 'yes'
+                                           (needs an interactive terminal)
+  deny <code>                              Discard a pending or approved approval
+
   doctor [--config <path>]                 Read-only diagnostics: Node, proton-drive CLI, auth, sync path, Claude Desktop config
                                            (exit 1 if any check fails)
   init [--config <path>] [--write]         First-run helper (also: npx -y proton-drive-mcp init): runs the doctor checks, prints the Claude
@@ -163,6 +172,57 @@ function numFlags(...names: string[]): Record<string, number | undefined> {
 
 function print(data: unknown) {
   console.log(jsonMode ? JSON.stringify(data) : JSON.stringify(data, null, 2));
+}
+
+export interface ApproveIO {
+  stdin: NodeJS.ReadableStream;
+  stdout: { write(s: string): unknown };
+  stderr: { write(s: string): unknown };
+  isTTY: boolean;
+}
+
+/** Interactive approval: returns the process exit code. Approves only after a typed `yes` on a real terminal. */
+export async function approveInteractive(store: ApprovalStore, codeIn: string | undefined, io: ApproveIO): Promise<number> {
+  if (!codeIn) { io.stderr.write("Usage: approve <code>\n"); return 1; }
+  if (!io.isTTY) {
+    io.stderr.write("Refusing to approve: this command needs an interactive terminal (stdin and stdout must be a TTY). Run it yourself in a terminal; nothing was approved.\n");
+    return 1;
+  }
+  let rec;
+  try { rec = store.get(codeIn); } catch (e) { io.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`); return 1; }
+  if (!rec) { io.stderr.write(`No approval ${codeIn.trim().toUpperCase()}: unknown, expired, denied or already used.\n`); return 1; }
+  if (rec.status !== "pending") { io.stderr.write(`Approval ${rec.code} is already approved; the next identical call can use it.\n`); return 1; }
+  io.stdout.write(`\nApproval ${rec.code} for ${rec.tool}\n\n${rec.summary}\n\n`);
+  io.stdout.write("Type 'yes' to approve this operation (anything else aborts): ");
+  const rl = createInterface({ input: io.stdin });
+  const answer = await new Promise<string>((res) => {
+    rl.once("line", (l) => res(l));
+    rl.once("close", () => res(""));
+  });
+  rl.close();
+  if (answer.trim() !== "yes") { io.stdout.write("\nAborted. Nothing was approved.\n"); return 1; }
+  try {
+    const done = store.approve(rec.code);
+    io.stdout.write(`\nApproved ${done.code}. It is valid for ${Math.max(1, Math.round((done.expiresAt - Date.now()) / 60000))} minutes; ask the assistant to call again with the same arguments.\n`);
+    return 0;
+  } catch (e) {
+    io.stderr.write(`${e instanceof Error ? e.message : String(e)}\n`);
+    return 1;
+  }
+}
+
+function listApprovals(store: ApprovalStore) {
+  const now = Date.now();
+  const rows = store.list().map((r) => ({
+    code: r.code,
+    tool: r.tool,
+    status: r.status,
+    expiresInSeconds: Math.max(0, Math.round((r.expiresAt - now) / 1000)),
+    summary: r.summary.split("\n")[0] ?? "",
+  }));
+  if (jsonMode) { console.log(JSON.stringify(rows)); return; }
+  if (rows.length === 0) { console.log("No pending approvals."); return; }
+  for (const r of rows) console.log(`${r.code}  ${r.status.padEnd(8)}  ${r.tool}  expires in ${Math.floor(r.expiresInSeconds / 60)}m${String(r.expiresInSeconds % 60).padStart(2, "0")}s  ${r.summary}`);
 }
 
 function setupClaudeDesktop() {
@@ -233,6 +293,23 @@ async function run() {
       print({ ...deleteIndex(), changeSnapshotsDeleted: deleteChangeSnapshots(), contentIndexDeleted: c.deleted, contentKeyRemoved: c.keyRemoved, contentIndexNote: c.note });
     }
     else { console.error("Usage: index status|clear"); process.exit(1); }
+    return;
+  }
+
+  // Local files only: no account, no CLI binary needed.
+  if (cmd === "approvals" || cmd === "approve" || cmd === "deny") {
+    const store = createApprovalStore({ dir: resolveApprovalDir() });
+    if (cmd === "approvals") listApprovals(store);
+    else if (cmd === "approve") {
+      process.exitCode = await approveInteractive(store, sub, {
+        stdin: process.stdin, stdout: process.stdout, stderr: process.stderr,
+        isTTY: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+      });
+    } else {
+      if (!sub) { console.error("Usage: deny <code>"); process.exit(1); }
+      if (store.deny(sub)) console.log(`Denied ${sub.trim().toUpperCase()}.`);
+      else { console.error(`No approval ${sub.trim().toUpperCase()}: unknown or already used.`); process.exit(1); }
+    }
     return;
   }
 
@@ -686,7 +763,16 @@ async function run() {
   }
 }
 
-run().catch((err) => {
+/** True when started as a bin (cli.js directly, or index.js delegating `init`); false when a test imports the exports. */
+function isEntryPoint(): boolean {
+  try {
+    const entry = realpathSync(process.argv[1]);
+    const self = realpathSync(fileURLToPath(import.meta.url));
+    return entry === self || entry === realpathSync(fileURLToPath(new URL("./index.js", import.meta.url)));
+  } catch { return false; }
+}
+
+if (isEntryPoint()) run().catch((err) => {
   if (err instanceof DriveCliNotFoundError || err instanceof DriveNotAuthenticatedError) {
     console.error(err.message);
   } else if (err instanceof DriveCliError) {
