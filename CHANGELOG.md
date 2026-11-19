@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.10.1 — 2026-11-19
 
 ### Security
 - Local path checks (upload, download, sync plan, photo tools) now ignore letter case on macOS and Windows and resolve existing paths with `realpath.native`, so `~/.SSH` is treated like `~/.ssh`. Linux stays case-sensitive. Windows behaviour is untested in CI.
