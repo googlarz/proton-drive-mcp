@@ -1558,21 +1558,32 @@ export async function main() {
       return "error";
     }
   };
-  // Channel 2: the out-of-band store, only for a client that cannot elicit. Created on first use so nothing touches the disk otherwise.
+  // Channel 2: the out-of-band store, for a client that cannot elicit and as the terminal route when a dialog is cancelled or fails.
+  // Created on first use so nothing touches the disk otherwise.
   let approvalStore: ApprovalStore | undefined;
   let approvalStoreTried = false;
+  let approvalStoreProblem: string | undefined;
+  if (apMode !== "model") {
+    // Tell the owner at startup, not at the first gated call.
+    try { assertApprovalDirUsable(resolveApprovalDir(process.env), process.env); }
+    catch (err) { logger.warn(`approval store unusable (${err instanceof Error ? err.message : String(err)}): operations that need approval and cannot be approved in a dialog will be refused until this is fixed.`); }
+  }
   const gate = new ApprovalGate({
     mode: apMode,
     get elicit() { return canElicit() ? elicitHuman : undefined; },
     get store() {
-      if (apMode === "model" || canElicit()) return undefined;
+      if (apMode === "model") return undefined;
       if (!approvalStoreTried) {
         approvalStoreTried = true;
         try { const dir = resolveApprovalDir(process.env); assertApprovalDirUsable(dir, process.env); approvalStore = createApprovalStore({ dir }); }
-        catch (err) { logger.warn(`approval store unavailable (${err instanceof Error ? err.message : String(err)}): gated operations will be refused.`); }
+        catch (err) {
+          approvalStoreProblem = err instanceof Error ? err.message : String(err);
+          logger.warn(`approval store unavailable (${approvalStoreProblem}): gated operations will be refused.`);
+        }
       }
       return approvalStore;
     },
+    get storeProblem() { return approvalStoreProblem; },
     onWarning: (m) => logger.warn(m),
   });
 
@@ -1620,6 +1631,23 @@ export async function main() {
     const gateNeeded = (legacy: boolean, args: Record<string, unknown>, ctx: GateContext = {}) =>
       apMode === "model" ? legacy : requiresApproval(name, args, apMode, { ...ctx, mutatingTools: MUTATING_TOOL_NAMES });
     const legacyConfirmed = a.confirmed === true;
+    // What the plan tells the model to do next (bulk tools).
+    // Operations addressed by uid alone: look the item up BEFORE the question so the human sees a name, not just an id. Display
+    // only (the uid stays in the hashed fields); a failed lookup is shown as such and never blocks or approves anything.
+    const NOT_RESOLVED = "(name not resolved)";
+    const trashedItem = async (uid: string): Promise<Record<string, FieldValue>> => {
+      try { const hit = (await drive.listTrash()).find((f) => f.uid === uid); return { item: hit ? hit.path : NOT_RESOLVED }; }
+      catch { return { item: NOT_RESOLVED }; }
+    };
+    const invitation = async (uid: string): Promise<Record<string, FieldValue>> => {
+      try {
+        const hit = (await drive.listInvitations()).find((i) => i.uid === uid);
+        return hit ? { inviter: hit.invitedByEmail || NOT_RESOLVED, invitedFolder: `${hit.nodeName} (${hit.nodeType})`, role: hit.role } : { inviter: NOT_RESOLVED, invitedFolder: NOT_RESOLVED };
+      } catch { return { inviter: NOT_RESOLVED, invitedFolder: NOT_RESOLVED }; }
+    };
+    const applyNext = apMode === "model"
+      ? "Get user approval, then confirmed=true."
+      : "Call again with confirmed=true to apply; the server will ask the user for approval itself, showing this exact list.";
     const requireApproval = async (op: Operation, need: boolean): Promise<ToolResult | undefined> => {
       if (!need) return undefined;
       const r = await gate.require(op, { legacyConfirmed, signal: callContext.getStore()?.signal });
@@ -1829,7 +1857,10 @@ export async function main() {
           }
           const deletePath = a.path === undefined ? undefined : validateRemotePath(a.path);
           const deleteUid = a.uid ? validateFlagValue(a.uid as string, "uid") : undefined;
-          const denied = await requireApproval({ tool: name, effect: "irreversible", fields: fieldsOf({ path: deletePath, uid: deleteUid }) }, true);
+          const denied = await requireApproval({
+            tool: name, effect: "irreversible", fields: fieldsOf({ path: deletePath, uid: deleteUid }),
+            ...(apMode !== "model" && deleteUid && !deletePath ? { display: await trashedItem(deleteUid) } : {}),
+          }, true);
           if (denied) return denied;
           await drive.delete(deletePath, deleteUid);
           return ok({ message: `Deleted: ${deletePath ?? `uid ${deleteUid}`}` });
@@ -1958,7 +1989,7 @@ export async function main() {
           const destFolder = validateRemotePath(a.destinationFolder);
           const movePlan = planBulkMove(sources, destFolder, await loadListing(drive, foldersToList(sources, destFolder)));
           if (a.confirmed !== true) {
-            return ok({ applied: false, ...movePlan, next: movePlan.problems.length ? "Fix problems first." : "Get user approval, then confirmed=true." });
+            return ok({ applied: false, ...movePlan, next: movePlan.problems.length ? "Fix problems first." : applyNext });
           }
           if (movePlan.problems.length) return fail(`drive_bulk_move not applied, nothing moved: ${JSON.stringify(movePlan.problems)}`);
           if (apMode === "model") {
@@ -1986,7 +2017,7 @@ export async function main() {
           const trashPaths = validateRemotePathList(a.paths, "paths");
           const trashPlan = planBulkTrash(trashPaths, await loadListing(drive, foldersToList(trashPaths)));
           if (a.confirmed !== true) {
-            return ok({ applied: false, ...trashPlan, next: trashPlan.problems.length ? "Fix problems first." : "Get user approval, then confirmed=true." });
+            return ok({ applied: false, ...trashPlan, next: trashPlan.problems.length ? "Fix problems first." : applyNext });
           }
           if (trashPlan.problems.length) return fail(`drive_bulk_trash not applied, nothing trashed: ${JSON.stringify(trashPlan.problems)}`);
           if (apMode === "model") {
@@ -2008,7 +2039,11 @@ export async function main() {
         case "drive_restore": {
           const restorePath = a.path === undefined ? undefined : validateRemotePath(a.path);
           const restoreUid = a.uid ? validateFlagValue(a.uid as string, "uid") : undefined;
-          const denied = await requireApproval({ tool: name, effect: effectFor("reversible", restorePath ? [restorePath] : []), fields: fieldsOf({ path: restorePath, uid: restoreUid }) }, gateNeeded(false, {}, { sourcePaths: restorePath ? [restorePath] : [] }));
+          const restoreNeed = gateNeeded(false, {}, { sourcePaths: restorePath ? [restorePath] : [] });
+          const denied = await requireApproval({
+            tool: name, effect: effectFor("reversible", restorePath ? [restorePath] : []), fields: fieldsOf({ path: restorePath, uid: restoreUid }),
+            ...(restoreNeed && restoreUid && !restorePath ? { display: await trashedItem(restoreUid) } : {}),
+          }, restoreNeed);
           if (denied) return denied;
           await drive.restore(restorePath, restoreUid);
           return ok({ message: `Restored from trash: ${restorePath ?? `uid ${restoreUid}`}` });
@@ -2048,7 +2083,10 @@ export async function main() {
           if (typeof a.uid !== "string" || !a.uid) return fail("uid must be a non-empty string");
           const acceptUid = validateFlagValue(a.uid, "uid");
           // Accepting is not gated in model mode (1.10.1); in human/strict it is, because it opens a folder somebody else controls.
-          const denied = await requireApproval({ tool: name, effect: "outward", fields: { uid: acceptUid } }, apMode !== "model");
+          const denied = await requireApproval({
+            tool: name, effect: "outward", fields: { uid: acceptUid },
+            ...(apMode !== "model" ? { display: await invitation(acceptUid) } : {}),
+          }, apMode !== "model");
           if (denied) return denied;
           await drive.invitationAccept(acceptUid);
           return ok({ message: "Invitation accepted." });
@@ -2058,7 +2096,10 @@ export async function main() {
           if (typeof a.uid !== "string" || !a.uid) return fail("uid must be a non-empty string");
           legacyNeed("drive_invitation_reject", "declines the invitation permanently.");
           const rejectUid = validateFlagValue(a.uid, "uid");
-          const denied = await requireApproval({ tool: name, effect: "irreversible", fields: { uid: rejectUid } }, true);
+          const denied = await requireApproval({
+            tool: name, effect: "irreversible", fields: { uid: rejectUid },
+            ...(apMode !== "model" ? { display: await invitation(rejectUid) } : {}),
+          }, true);
           if (denied) return denied;
           await drive.invitationReject(rejectUid);
           return ok({ message: "Invitation rejected." });

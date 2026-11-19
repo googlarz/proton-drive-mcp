@@ -75,7 +75,7 @@ const opts = (c, extra = {}) => ({ setup: c.setup, fakeMode: c.fakeMode, env: c.
 
 describe("A1/A2: gated operations x confirmed x human answer (client can elicit)", { concurrency: 6 }, () => {
   // 4 refusing answers x 3 confirmed values = 12 refusals per case; the gate stops asking after 5 refusals a minute, so they are split over servers.
-  const REFUSALS = [["decline", DECLINE, "approval_declined"], ["cancel", CANCEL, "approval_declined"], ["accept with approve=false", NO_APPROVE, "approval_declined"], ["client throws", THROWS, "approval_unavailable"]];
+  const REFUSALS = [["decline", DECLINE, "approval_declined"], ["cancel", CANCEL, "approval_required"], ["accept with approve=false", NO_APPROVE, "approval_declined"], ["client throws", THROWS, "approval_required"]];
   const combos = REFUSALS.flatMap((x) => CONFIRMED.map((y) => [x, y]));
   const chunks = [combos.slice(0, 4), combos.slice(4, 8), combos.slice(8)];
 
@@ -598,7 +598,7 @@ describe("audit log with approval entries", () => {
       await ctx.call("drive_empty_trash", {});
       await ctx.call("drive_empty_trash", {});
       const entries = ctx.audit();
-      assert.deepEqual(entries.map((e) => [e.outcome, e.code]), [["refused", "approval_declined"], ["ok", undefined], ["refused", "approval_unavailable"]]);
+      assert.deepEqual(entries.map((e) => [e.outcome, e.code]), [["refused", "approval_declined"], ["ok", undefined], ["refused", "approval_required"]]);
       assert.equal(entries[1].approval.channel, "elicitation");
       assert.equal(entries[0].approval, undefined);
       const v = new AuditLog(ctx.auditFile).verify();

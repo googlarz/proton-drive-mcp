@@ -71,7 +71,7 @@ export const TOOL_TITLES: Readonly<Record<string, string>> = {
 // Rendering order of fields; anything else follows alphabetically. Keys come from server code, never from the model.
 const FIELD_ORDER = [
   "path", "paths", "sources", "sourcePath", "remotePath", "destinationPath", "destinationFolder", "newName", "localPath",
-  "album", "albumName", "name", "uid", "email", "role", "expiration", "replacesExistingLink", "resetSettings", "password",
+  "album", "albumName", "name", "uid", "item", "inviter", "invitedFolder", "email", "role", "expiration", "replacesExistingLink", "resetSettings", "password",
   "message", "content", "fileConflictStrategy", "folderConflictStrategy", "conflictStrategy",
 ];
 const KEY_OK = /^[A-Za-z][A-Za-z0-9_]{0,40}$/;
@@ -98,6 +98,16 @@ function renderList(key: string, items: string[]): string[] {
 // Readable labels for a few boolean fields; every other key is shown as it is.
 const LABELS: Record<string, string> = { replacesExistingLink: "replaces an existing link", overwritesExisting: "overwrites an existing file" };
 
+// Values a human must RECOGNISE (who is invited, who invited me, which item). A look-alike letter from another alphabet
+// (Cyrillic "a" in an e-mail address) would pass as ASCII, so every non-ASCII character in them is listed by code point.
+const RECOGNISED = new Set(["email", "inviter", "item", "invitedFolder"]);
+function nonAsciiNote(v: string): string {
+  const cps = [...new Set([...v].map((c) => c.codePointAt(0)!).filter((cp) => cp > 0x7f))];
+  if (cps.length === 0) return "";
+  const shown = cps.slice(0, 12).map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`);
+  return ` (contains non-ASCII: ${shown.join(" ")}${cps.length > 12 ? ` +${cps.length - 12} more` : ""})`;
+}
+
 function renderField(key: string, v: FieldValue): string[] {
   if (key === "password") return [`password: ${v === true || (typeof v === "string" && v.length > 0) ? "set" : "not set"}`];
   if (key === "message") {
@@ -112,7 +122,7 @@ function renderField(key: string, v: FieldValue): string[] {
   if (typeof v === "boolean") return [`${LABELS[key] ?? key}: ${v ? "yes" : "no"}`];
   if (typeof v === "number") return [`${key}: ${Number.isFinite(v) ? v : "invalid"}`];
   if (Array.isArray(v)) return renderList(key, v);
-  return [`${key}: ${showValueStrict(v)}`];
+  return [`${key}: ${showValueStrict(v)}${RECOGNISED.has(key) && typeof v === "string" ? nonAsciiNote(v) : ""}`];
 }
 
 /** The text the human sees (and the store records). Every line is server-composed; values are neutralised and cannot add or reorder lines. */
@@ -235,7 +245,10 @@ export interface RequireOptions {
 export interface GateInit {
   mode: ApprovalMode;
   elicit?: Elicit;
+  /** Read when needed, not at construction (the server creates it lazily). */
   store?: ApprovalStoreLike;
+  /** Why the store cannot be used (set by the server when its folder is misconfigured); worded to the model as a server problem. */
+  storeProblem?: string;
   now?: () => number;
   /** Runtime notices for stderr (store failure, decline budget used up). */
   onWarning?: (message: string) => void;
@@ -247,8 +260,14 @@ export const MAX_DECLINES_PER_MINUTE = 5;
 const WINDOW_MS = 60_000;
 const NO_RETRY = "Do not retry this operation or a variant of it unless the user asks you to.";
 
+const TERMINAL_HOW = (code: string) => `\`proton-drive-cli approve ${code}\` (without a global install: \`npx -y -p proton-drive-mcp proton-drive-cli approve ${code}\`)`;
+
 export class ApprovalGate {
   private readonly declinedAt: number[] = [];
+  /** One elicitation at a time: a second gated call while a dialog is open is refused, never queued. */
+  private promptOpen = false;
+  /** Operations that were refused with a terminal code because the dialog was cancelled or failed; their next call looks in the store first. */
+  private readonly terminalFallback = new Set<string>();
   private readonly now: () => number;
   private readonly timeoutMs: number;
   constructor(private readonly init: GateInit) {
@@ -261,7 +280,7 @@ export class ApprovalGate {
   async require(op: Operation, opts: RequireOptions = {}): Promise<ApprovalResult> {
     const hash = opHash(op);
     const refuse = (code: "approval_required" | "approval_declined" | "approval_unavailable", message: string): ApprovalResult => ({ ok: false, code, message, opHash: hash });
-    const { mode, elicit, store } = this.init;
+    const { mode, elicit } = this.init;
 
     if (mode === "model") {
       return opts.legacyConfirmed === true
@@ -272,34 +291,68 @@ export class ApprovalGate {
     const summary = renderOperation(op);
 
     if (elicit) {
+      if (this.terminalFallback.has(hash)) {
+        // The dialog failed earlier and the user may have approved in a terminal since.
+        try {
+          const used = this.init.store?.consume({ tool: op.tool, opHash: hash });
+          if (used) { this.terminalFallback.delete(hash); return { ok: true, channel: "cli", opHash: hash, code: used.code }; }
+        } catch { /* fall through to a new dialog */ }
+      }
+      if (this.promptOpen) {
+        return refuse("approval_unavailable", `${op.tool} was not run: another approval request is already waiting for the user's answer. Only one can be open at a time and this one was not queued. Nothing was changed. Wait for the user to answer, and call again only if they ask you to.`);
+      }
       const now = this.now();
       while (this.declinedAt.length && now - this.declinedAt[0] > WINDOW_MS) this.declinedAt.shift();
       if (this.declinedAt.length >= MAX_DECLINES_PER_MINUTE) {
         this.init.onWarning?.(`approval prompts suspended: ${MAX_DECLINES_PER_MINUTE} declined or failed within a minute`);
         return refuse("approval_unavailable", `${op.tool} was not run: too many approval requests were declined or failed in the last minute, so the user is not being asked again for now. ${NO_RETRY}`);
       }
-      const result = await this.ask(elicit, summary, opts.signal);
+      this.promptOpen = true;
+      let result: ElicitResult;
+      try { result = await this.ask(elicit, summary, opts.signal); } finally { this.promptOpen = false; }
       if (result === "accept") return { ok: true, channel: "elicitation", opHash: hash };
       this.declinedAt.push(now);
-      if (result === "decline" || result === "cancel") {
+      if (result === "decline") {
         return refuse("approval_declined", `The user declined ${op.tool}. Nothing was changed. ${NO_RETRY}`);
       }
-      return refuse("approval_unavailable", `${op.tool} was not run: the approval request to the user failed or timed out. Nothing was changed. ${NO_RETRY}`);
+      // Cancelled, failed or timed out: nobody said no, so the terminal route is offered (it still needs a human at a terminal).
+      const why = result === "cancel" ? "was closed without an answer" : "failed or timed out";
+      const viaTerminal = this.requestInStore(op, hash, summary, `The approval dialog ${why}.`, refuse);
+      if (viaTerminal) { this.terminalFallback.add(hash); return viaTerminal; }
+      return result === "cancel"
+        ? refuse("approval_declined", `The user did not approve ${op.tool}: the approval dialog was closed without an answer. Nothing was changed. ${NO_RETRY}`)
+        : refuse("approval_unavailable", `${op.tool} was not run: the approval request to the user failed or timed out. Nothing was changed. ${NO_RETRY}`);
     }
 
+    const store = this.init.store;
     if (store) {
       try {
         const used = store.consume({ tool: op.tool, opHash: hash });
         if (used) return { ok: true, channel: "cli", opHash: hash, code: used.code };
-        const req = store.request({ tool: op.tool, opHash: hash, summary });
-        return refuse("approval_required", `${op.tool} needs the user's approval and this client cannot ask them. Tell the user to run \`proton-drive-cli approve ${req.code}\` in a terminal and answer yes there; then call ${op.tool} again with exactly the same arguments. The code is only an identifier. It expires in ${Math.max(1, Math.round((req.expiresAt - this.now()) / 60_000))} minute(s).`);
       } catch (err) {
         this.init.onWarning?.(`approval store failed: ${err instanceof Error ? err.message : String(err)}`);
         return refuse("approval_unavailable", `${op.tool} was not run: the approval store failed. Nothing was changed. ${NO_RETRY}`);
       }
+      return this.requestInStore(op, hash, summary, "This client cannot ask the user.", refuse) ?? refuse("approval_unavailable", `${op.tool} was not run: the approval store failed. Nothing was changed. ${NO_RETRY}`);
     }
 
+    if (this.init.storeProblem) {
+      return refuse("approval_unavailable", `${op.tool} was not run: the server is misconfigured and cannot record an approval (${this.init.storeProblem}). This is a server setting the user has to fix, not something to retry or work around. Nothing was changed. Tell the user.`);
+    }
     return refuse("approval_required", `${op.tool} needs the user's approval, but this client cannot ask them and no terminal approval is set up. Nothing was changed. Tell the user; do not retry. To knowingly allow operations the assistant confirms by itself, the user can set PROTON_DRIVE_APPROVAL=model and restart the server.`);
+  }
+
+  /** Writes (or reuses) a pending record and returns the refusal that tells the model what the user must do; undefined when there is no usable store. */
+  private requestInStore(op: Operation, hash: string, summary: string, preface: string, refuse: (c: "approval_required", m: string) => ApprovalResult): ApprovalResult | undefined {
+    const store = this.init.store;
+    if (!store) return undefined;
+    try {
+      const req = store.request({ tool: op.tool, opHash: hash, summary });
+      return refuse("approval_required", `${preface} ${op.tool} needs the user's approval. Tell the user to run ${TERMINAL_HOW(req.code)} in a terminal and answer yes there; then call ${op.tool} again with exactly the same arguments. The code is only an identifier. It expires in ${Math.max(1, Math.round((req.expiresAt - this.now()) / 60_000))} minute(s).`);
+    } catch (err) {
+      this.init.onWarning?.(`approval store failed: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
   }
 
   private async ask(elicit: Elicit, summary: string, signal?: AbortSignal): Promise<ElicitResult> {

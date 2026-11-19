@@ -221,7 +221,8 @@ describe("elicitation for gated tools", () => {
         for (const confirmed of [false, true]) {
           const r = await client.callTool({ name: "drive_delete", arguments: { path: "/trash/a.txt", confirmed } });
           assert.equal(r.isError, true);
-          assert.match(text(r), /declined/);
+          // an explicit no is final; a closed dialog (cancel) offers the terminal route instead, which still needs a human
+          assert.match(text(r), label === "cancel" ? /proton-drive-cli approve/ : /declined/);
         }
         assert.deepEqual(nonVersionCalls(sb.argvLog), []);
       });
@@ -304,7 +305,7 @@ describe("elicitation for gated tools", () => {
         await withClient({ elicitation: { form: {} } }, async () => reply, async (client, sb) => {
           const r = await client.callTool({ name: tool, arguments: args });
           assert.equal(r.isError, true);
-          assert.match(text(r), /declined/);
+          assert.match(text(r), label === "cancel" ? /proton-drive-cli approve/ : /declined/);
           assert.deepEqual(mutations(sb), []);
         }, "tree", { FAKE_TREE: BULK_TREE() });
       });

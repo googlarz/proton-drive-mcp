@@ -8,7 +8,9 @@ export function showValue(v: unknown, head = 120, tail = 60): string {
 // Characters that change how text is laid out or hide it: bidi embeddings/overrides/isolates and marks, zero-width and
 // joiner characters, the BOM, soft hyphen, line/paragraph separators and Unicode tag characters. Shown as a visible \uXXXX so
 // the human sees that something is there instead of a silently reordered or invisible name.
-const INVISIBLE = /[\u00ad\u061c\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]|[\u{e0000}-\u{e007f}]/gu;
+// Also every Unicode format character (\p{Cf}) and the default-ignorable look-alikes of a space: Hangul fillers, combining grapheme
+// joiner, variation selectors, interlinear annotation marks, musical format characters and Mongolian free variation selectors.
+const INVISIBLE = /[\p{Cf}\u00ad\u034f\u061c\u115f\u1160\u180b-\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb]|[\u{1d173}-\u{1d17a}\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu;
 // CSI (ESC [ ... final), OSC (ESC ] ... BEL or ST) and other two-byte ESC sequences.
 const ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])/g;
 

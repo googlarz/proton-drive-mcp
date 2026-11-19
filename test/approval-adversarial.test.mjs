@@ -1069,7 +1069,8 @@ describe("(b) /shared-with-me in disguise: a gated operation never runs without 
 
   for (const [group, list, strong] of [["resolves to /shared-with-me", TRULY, true], ["ambiguous spelling", AMBIGUOUS, false]]) {
     for (const dest of list) {
-      const advisory = !strong && ADVISORY.has(dest) ? { todo: "finding (UNVERIFIED impact): the gate decides on the literal string; whether the real CLI resolves this spelling to /shared-with-me is not known offline" } : {};
+      const // live check on CLI 0.9.0: the real CLI rejects this spelling, not exploitable (kept as todo: the gate still decides on the literal string)
+      const advisory = !strong && ADVISORY.has(dest) ? { todo: "live check on CLI 0.9.0: the real CLI rejects this spelling, not exploitable" } : {};
       it(`${group}: ${JSON.stringify(dest)}`, advisory, async () => {
         for (const caps of [{ elicitation: { form: {} } }, {}]) {
           await withServer({ caps, replies: always(DECLINE), setup: syncSetup }, async (ctx) => {
@@ -1129,7 +1130,8 @@ describe("(d) elicitation answers that are not a clean yes", () => {
           const r = await safe(ctx, tool, args);
           assert.equal(r.isError, true, `${tool}: ${text(r)}`);
           assert.equal(ctx.asked, asked + 1);
-          assert.match(ctx.lastAudit().code, /^approval_(declined|unavailable)$/);
+          // an explicit no is approval_declined; a closed dialog or an answer the client library rejects offers the terminal route (approval_required)
+          assert.match(ctx.lastAudit().code, /^approval_(declined|unavailable|required)$/);
         }
         assert.deepEqual(ctx.changes(), []);
         await alive(ctx);
@@ -1281,7 +1283,7 @@ describe("(f) audit log", () => {
       const entries = ctx.audit();
       const refused = entries.filter((e) => e.outcome === "refused");
       assert.ok(refused.length >= 4, JSON.stringify(entries.map((e) => [e.tool, e.outcome, e.code])));
-      assert.deepEqual(entries.slice(0, 4).map((e) => e.code), ["approval_declined", "approval_declined", "approval_declined", "approval_unavailable"]);
+      assert.deepEqual(entries.slice(0, 4).map((e) => e.code), ["approval_declined", "approval_required", "approval_declined", "approval_required"]);
       assert.equal(entries[4].outcome, "ok");
       assert.equal(entries[4].approval.channel, "elicitation");
       assert.match(entries[4].approval.op, /^[0-9a-f]{16}$/);
