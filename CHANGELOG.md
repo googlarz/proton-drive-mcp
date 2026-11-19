@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Behaviour change: human approval gate, fail closed by default
+- **Destructive and outward-facing operations now need a human yes, asked by the server.** The default (`PROTON_DRIVE_APPROVAL` unset or `human`) is fail closed.
+- With a client that can show MCP elicitation (Claude Code CLI does), you will now see a dialog on calls that used to pass silently when the assistant sent `confirmed: true`.
+- With a client that cannot (whether Claude Desktop can is not verified), gated calls are refused with `approval_required` until you approve them in a terminal (`proton-drive-cli approve <code>`, then ask the assistant to repeat the call), or until you set `PROTON_DRIVE_APPROVAL=model` knowingly.
+- `confirmed` is no longer an authorisation. It is still accepted in the schemas where it was, no longer required, and ignored in `human` and `strict`. On `drive_bulk_move` and `drive_bulk_trash` it remains the plan/apply switch. `PROTON_DRIVE_APPROVAL=model` restores the 1.10.1 behaviour (a startup warning is written to stderr).
+- Unattended or scheduled runs that change Drive must set `PROTON_DRIVE_APPROVAL=model`, ideally with `PROTON_DRIVE_REMOTE_ROOTS` and the audit log.
+- Tool descriptions no longer tell the assistant to pass `confirmed=true`; they say the server asks the user.
+
+### Security
+- The assistant can no longer approve its own destructive operation by sending `confirmed: true`. The prompt is built by the server from validated values (fixed first line per tool, one line per value; control, bidirectional and zero-width characters in names are made visible and cannot add or reorder lines; passwords and message texts are not shown), and what is shown is what is executed.
+- New in the gated set: `drive_invitation_accept`, and `drive_copy`, `drive_move`, `drive_mkdir`, `drive_rename`, `drive_upload`, `drive_write_file`, `drive_trash`, `drive_restore` and the bulk tools when a path they read from or write to is under `/shared-with-me`. This closes a chain that needed no gated tool: accept an invitation, then copy files into the inviter's folder.
+- Bulk apply is tied to the plan the user approved: the plan is computed again after approval, and nothing is applied if it differs (`approval_changed`).
+- The approvals folder cannot be written by `drive_download` or `photos_download`, and the server refuses to use one inside `PROTON_DRIVE_SYNC_PATH`.
+- `drive_write_file` creates a new file exclusively; if the file appears after the existence check, the call goes through the gate like an overwrite.
+- Documented limits: a client that gives the assistant a shell can run the official `proton-drive` CLI directly (deny rule example for Claude Code in the README); a client or hook that answers the dialog automatically switches the gate off; copies into an already shared folder under `/my-files` are not checked.
+
+### Added
+- `PROTON_DRIVE_APPROVAL=human|strict|model` and `PROTON_DRIVE_APPROVAL_DIR`.
+- `strict` mode: every tool that changes Drive or the account needs a human yes, including single trash, restore, moves and uploads.
+- Companion CLI commands `approvals`, `approve <code>` and `deny <code>` for terminal approval (`approve` needs an interactive terminal and a typed `yes`). A terminal approval is valid once, for that exact operation, for 5 minutes; a request lasts 10 minutes.
+- Audit log: refusal codes `approval_required`, `approval_declined`, `approval_unavailable`, `approval_changed`, and an `approval` field (`channel`, short operation hash, `code` for terminal approvals) on approved calls. Existing logs still verify.
+- Human approval section in the README, rewritten gate section in THREAT_MODEL.md, approval steps in the safe-use guide.
+
+### Deprecated
+- `confirmed` as an authorisation. Removal from the non-bulk tools, and a rename of the bulk switch, are planned for 2.0.
+
+### Untested
+- Whether Claude Desktop shows the approval dialog for a local server, how any client renders long prompts, and the terminal route on Windows.
+
 ## 1.10.1 — 2026-11-19
 
 ### Security
