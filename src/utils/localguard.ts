@@ -35,6 +35,8 @@ const MAX_TREE_ENTRIES = 200_000;
 const NAME_DENY = [
   /^\.env(\..*)?$/, /^id_rsa/, /^id_ed25519/, /^id_ecdsa/, /^id_dsa/, /\.pem$/, /\.p12$/, /\.pfx$/, /\.keychain/,
   /^\.netrc$/, /^\.npmrc$/, /^\.pgpass$/, /^\.git-credentials$/,
+  // gcloud credential files and folder, so a copied gcloud config is caught under any folder name
+  /^credentials\.db$/, /^access_tokens\.db$/, /^application_default_credentials\.json$/, /^legacy_credentials$/,
 ];
 // Folders that hold nothing but credentials wherever they sit: a copied ~/.ssh inside an upload folder is a credential tree.
 const SECRET_DIR_NAMES = new Set([".ssh", ".aws", ".gnupg"]);

@@ -436,12 +436,36 @@ describe("local path guard: case, start-up files, nested upload entries, write t
     assert.throws(() => validateDownloadTarget(h, ["/my-files/Proton"]), /\.versions/);
   });
 
+  it("a downloaded drive root is written as <folder>/root, so that name and the folder itself are checked", async () => {
+    const h = join(base, "home4");
+    await mkdir(join(h, "Proton", ".versions"), { recursive: true });
+    await mkdir(join(h, "dl"), { recursive: true });
+    await mkdir(join(h, "logs"), { recursive: true });
+    await mkdir(join(h, "root", "sub"), { recursive: true });
+    process.env.HOME = h;
+    // the local name is "root": a protected thing named root is caught (the derived name my-files would not be)
+    process.env.PROTON_DRIVE_AUDIT_LOG = join(h, "root", "audit.jsonl");
+    assert.throws(() => validateDownloadTarget(h, ["/my-files"]), /audit log/);
+    assert.throws(() => validateDownloadTarget(h, ["/photos/"]), /audit log/);
+    // a whole drive tree lands below the folder: a folder that holds the log or a .versions folder is refused
+    process.env.PROTON_DRIVE_AUDIT_LOG = join(h, "logs", "audit.jsonl");
+    assert.throws(() => validateDownloadTarget(h, ["/my-files"]), /audit log/);
+    delete process.env.PROTON_DRIVE_AUDIT_LOG;
+    process.env.PROTON_DRIVE_SYNC_PATH = join(h, "Proton");
+    assert.throws(() => validateDownloadTarget(h, ["/my-files"]), /\.versions/);
+    assert.throws(() => validateDownloadTarget(join(h, "Proton"), ["/trash"]), /\.versions/);
+    // an ordinary folder is fine, and a single file still only checks its own name
+    delete process.env.PROTON_DRIVE_SYNC_PATH;
+    assert.equal(validateDownloadTarget(join(h, "dl"), ["/my-files"]), join(h, "dl"));
+    assert.equal(validateDownloadTarget(h, ["/my-files/a.txt"]), h);
+  });
+
   it("a remote path without an item name is refused", () => {
     assert.throws(() => validateDownloadTarget(join(base, "any"), ["/"]), /no item name/);
   });
 
   describe("folder upload: credential trees and names", () => {
-    for (const rel of [".aws/credentials", ".ssh/authorized_keys", ".gnupg/pubring.kbx", ".kube/config", ".docker/config.json", ".config/gcloud/creds.db", "deep/er/.netrc", "x/.npmrc", ".pgpass", "k/id_ecdsa", "k/id_dsa.pub", ".git-credentials"]) {
+    for (const rel of [".aws/credentials", ".ssh/authorized_keys", ".gnupg/pubring.kbx", ".kube/config", ".docker/config.json", ".config/gcloud/creds.db", "deep/er/.netrc", "x/.npmrc", ".pgpass", "k/id_ecdsa", "k/id_dsa.pub", ".git-credentials", "gc/credentials.db", "gc/access_tokens.db", "gc/application_default_credentials.json", "gc/legacy_credentials/x@y.com/adc.json"]) {
       it(`rejects a copied ${rel}`, async () => {
         const dir = join(base, "cred-" + rel.replace(/\W/g, "_"));
         await mkdir(join(dir, rel, ".."), { recursive: true });

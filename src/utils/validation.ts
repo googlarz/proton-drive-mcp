@@ -101,15 +101,20 @@ export function validateLocalPath(path: unknown, opts: { scan?: boolean; ancesto
 
 /**
  * Download destination folder. The CLI writes each item into it under its remote name, so the path the item will get
- * (folder + remote name) must pass the same guard: a remote item named like a shell start-up file or a protected folder
+ * (folder + remote name; `root` for a drive root, which the CLI names that way) must pass the same guard: a remote item named like a shell start-up file or a protected folder
  * would otherwise land in a protected place through an allowed folder.
  */
 export function validateDownloadTarget(folder: unknown, remotePaths: string[]): string {
   const dir = validateLocalPath(folder);
   for (const remote of remotePaths) {
-    const name = remote.slice(remote.lastIndexOf("/") + 1);
+    const segments = remote.split("/").filter(Boolean);
+    const name = segments[segments.length - 1];
     if (!name) throw new Error(`remote path has no item name to download: ${remote}`);
-    validateLocalPath(join(dir, name), { ancestors: true, writeTarget: true });
+    // A drive root (/my-files, /photos, ...) is written by the CLI as <folder>/root, not under its own name, and brings a
+    // whole drive tree with it, so the folder itself must not hold the audit log or a .versions folder either.
+    const names = segments.length === 1 ? ["root", name] : [name];
+    if (segments.length === 1) validateLocalPath(dir, { writeTarget: true });
+    for (const n of names) validateLocalPath(join(dir, n), { ancestors: true, writeTarget: true });
   }
   return dir;
 }
