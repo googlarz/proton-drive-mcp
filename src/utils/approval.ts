@@ -82,12 +82,17 @@ const LIST_FULL_MAX = 50;
 const FOLDER_LINES_MAX = 50;
 
 const parentOf = (p: string) => p.slice(0, p.lastIndexOf("/")) || "/";
+/**
+ * The path a list line is about. Cleanup lines read "<path>  (keeps <other path>)" or "<path>  (empty folder)" and undo lines
+ * "<from> -> <to>": the folder counts must group by the first path, so a trailing "(keeps ...)" or "-> ..." never decides the folder.
+ */
+const leadPath = (line: string) => line.split(/ {2}\((?:keeps |empty folder\))| -> /, 1)[0];
 
 function renderList(key: string, items: string[]): string[] {
   const shown = (xs: string[]) => xs.map((x) => `  - ${showValueStrict(x)}`);
   if (items.length <= LIST_FULL_MAX) return [`${key} (${items.length}):`, ...shown(items)];
   const perFolder = new Map<string, number>();
-  for (const it of items) perFolder.set(parentOf(it), (perFolder.get(parentOf(it)) ?? 0) + 1);
+  for (const it of items) { const f = parentOf(leadPath(it)); perFolder.set(f, (perFolder.get(f) ?? 0) + 1); }
   const folders = [...perFolder].sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1));
   return [
     `${key} (${items.length}): only the first ${LIST_FULL_MAX} are listed; counts per folder first`,

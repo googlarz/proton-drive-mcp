@@ -10,7 +10,8 @@ import { canonical } from "../utils/audit.js";
 export type CleanupFix = "duplicates" | "empty-folders";
 export type CleanupKind = "duplicate" | "empty-folder";
 
-export const CLEANUP_CAP = 200;
+/** Items per call. Equal to the approval dialog's full-list maximum (LIST_FULL_MAX in utils/approval.ts), so the human sees every item and its keeper. */
+export const CLEANUP_CAP = 50;
 export const TRASH_NAME_REASON = "name already in trash (not reliably restorable)";
 
 export interface CleanupItem {
@@ -48,7 +49,7 @@ export interface CleanupInput {
   exclude?: string[];
   /** Smallest file considered for duplicates (default 1024, as drive_find_duplicates). */
   minSize?: number;
-  /** Items per call (default 200). */
+  /** Items per call (default CLEANUP_CAP). */
   cap?: number;
 }
 
@@ -248,7 +249,7 @@ export function planFingerprint(plan: CleanupPlanOk): string {
   return createHash("sha256").update(canonical(plan.items)).digest("hex");
 }
 
-/** Approval-dialog lines, one per item, raw strings (the gate escapes them). Never truncated: what is shown is what is trashed. */
+/** Approval-dialog lines, one per item, raw strings (the gate escapes them). Not truncated here; CLEANUP_CAP keeps the list within what the dialog shows in full, so every item and its keeper is visible. */
 export function summarizeForDialog(plan: CleanupPlanOk): string[] {
   return plan.items.map((i) => (i.kind === "duplicate" ? `${i.path}  (keeps ${i.keeps})` : `${i.path}  (empty folder)`));
 }

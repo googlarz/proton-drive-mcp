@@ -18,7 +18,8 @@
 //                     /trash/<name> resolves to the FIRST trashed node of that name, restore/move report per-item {uid, ok, error} with exit 0,
 //                     a missing path fails the whole call (exit 1) before anything is applied, tests may edit the state file between calls.
 //                     Optional per-node fields: sha1 (claimedDigests.sha1), mtime (claimedModificationTime), mediaType, shared / sharedByUrl (the
-//                     isShared / isSharedByUrl listing flags) and sharing (the raw `sharing status` payload, default {}).
+//                     isShared / isSharedByUrl listing flags), sharing (the raw `sharing status` payload, default {}) and noUid (listed without a uid).
+//                     A node "swm" (name shared-with-me, parentUid null) serves /shared-with-me.
 //   FAKE_FAIL_UIDS         drive mode: comma list of uids whose restore/move reports ok:false (exit 0)
 //   FAKE_FAIL_TRASH_UIDS   drive mode: comma list of uids whose trash reports ok:false (exit 0); the others are trashed
 //   FAKE_FAIL_LIST_UIDS    drive mode: comma list of folder uids whose `filesystem list` fails (exit 1), to simulate a folder the walk cannot read
@@ -221,8 +222,9 @@ switch (mode) {
     const resolve = (p) => {
       const parts = splitPath(p);
       if (parts[0] === "trash") return parts.length === 2 ? Object.values(nodes).find((n) => !live(n) && n.name === parts[1]) : undefined;
-      if (parts[0] !== "my-files") return undefined;
-      let cur = nodes.root;
+      // /my-files is the node "root"; /shared-with-me is the node "swm" when a test defines one.
+      let cur = parts[0] === "my-files" ? nodes.root : parts[0] === "shared-with-me" ? nodes.swm : undefined;
+      if (!cur) return undefined;
       for (const part of parts.slice(1)) {
         cur = kids(cur.uid).find((n) => n.name === part);
         if (!cur) return undefined;
@@ -230,7 +232,7 @@ switch (mode) {
       return cur;
     };
     const asItem = (n) => ({
-      uid: n.uid, parentUid: n.parentUid, name: { ok: true, value: n.name }, type: n.type,
+      uid: n.noUid ? undefined : n.uid, parentUid: n.parentUid, name: { ok: true, value: n.name }, type: n.type,
       activeRevision: n.type === "file"
         ? { claimedSize: n.size ?? 0, ...(n.mtime ? { claimedModificationTime: n.mtime } : {}), ...(n.sha1 ? { claimedDigests: { sha1: n.sha1 } } : {}) }
         : undefined,

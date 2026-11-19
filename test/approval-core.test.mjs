@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MUTATING_TOOL_NAMES } from "../dist/index.js";
+import { CLEANUP_CAP } from "../dist/services/cleanup.js";
 import {
   ApprovalGate, GATED_TOOLS, MAX_DECLINES_PER_MINUTE, TOOL_TITLES, opHash, renderOperation, requiresApproval, resolveApprovalMode,
 } from "../dist/utils/approval.js";
@@ -79,6 +80,30 @@ describe("renderOperation", () => {
     const b = renderOperation(invite({ path: "/x\ndrive_delete: permanently delete", email: "e@x.org" })).split("\n")[0];
     assert.equal(a, b);
     assert.match(a, /^drive_share_invite: invite a person to a file or folder \(PERMANENT, cannot be undone\)$/);
+  });
+
+  it("a long list shows counts per folder of the FIRST path of each line, never the '(keeps ...)' or '-> ...' part", () => {
+    const lines = [];
+    for (let i = 0; i < 40; i++) lines.push(`/my-files/inbox/copy-${i}.pdf  (keeps /my-files/archive/zz/orig-${i}.pdf)`);
+    for (let i = 0; i < 20; i++) lines.push(`/my-files/old/empty-${i}  (empty folder)`);
+    const out = renderOperation({ tool: "drive_cleanup", effect: "reversible", fields: { path: "/my-files", fixes: ["duplicates"], trash: lines } });
+    assert.match(out, /trash \(60\): only the first 50 are listed; counts per folder first/);
+    assert.match(out, /\n {2}folder \/my-files\/inbox: 40\n/);
+    assert.match(out, /\n {2}folder \/my-files\/old: 20\n/);
+    assert.doesNotMatch(out, /folder \/my-files\/archive/, "the kept copy's folder is not counted");
+    assert.doesNotMatch(out, /folder [^\n]*keeps/);
+    const moves = Array.from({ length: 60 }, (_, i) => `/my-files/new/m${i}.txt -> /my-files/old/sub/m${i}.txt`);
+    const m = renderOperation({ tool: "drive_undo", effect: "reversible", fields: { id: "AAAA-BBBB", when: "2026-01-01T00:00:00.000Z", restore: [], moveBack: moves } });
+    assert.match(m, /\n {2}folder \/my-files\/new: 60\n/);
+    assert.doesNotMatch(m, /folder \/my-files\/old/, "grouped by where the items are now, not by the destination");
+  });
+
+  it("a cleanup list of exactly CLEANUP_CAP items is shown in full: every item and its keeper", () => {
+    assert.equal(CLEANUP_CAP, 50);
+    const lines = Array.from({ length: CLEANUP_CAP }, (_, i) => `/my-files/a/c${i}.bin  (keeps /my-files/b/k${i}.bin)`);
+    const out = renderOperation({ tool: "drive_cleanup", effect: "reversible", fields: { path: "/my-files", fixes: ["duplicates"], trash: lines } });
+    assert.doesNotMatch(out, /only the first/);
+    for (let i = 0; i < CLEANUP_CAP; i++) assert.ok(out.includes(`  - /my-files/a/c${i}.bin  (keeps /my-files/b/k${i}.bin)`), `item ${i}`);
   });
 
   it("prints one 'key: value' line per field in a fixed order whatever the insertion order", () => {

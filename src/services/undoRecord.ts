@@ -1,6 +1,6 @@
 import type { DriveService } from "./drive.js";
-import { splitRemotePath } from "./drive.js";
-import { currentAccountKey } from "./walk.js";
+import { splitRemotePath, unescapeName } from "./drive.js";
+import { currentAccountKey, cachedNode } from "./walk.js";
 import { pool } from "./analytics.js";
 import { createUndoJournal, resolveUndoDir, undoEnabled, type UndoItem, type UndoJournal, type UndoKind } from "../utils/undoJournal.js";
 import { assertUndoDirUsable } from "../utils/localguard.js";
@@ -49,11 +49,16 @@ export const IN_TRASH_REASON = "a same-named item is already in the trash or twi
 
 export interface Found { uid: string; parentUid?: string; name: string; size?: number }
 
-/** uid, parent uid, name and size of each path, read from its parent folder's listing (one listing per folder). Paths not found are left out. */
+/**
+ * uid, parent uid, name and size of each path. A walk still in the memory cache answers first (no CLI call); otherwise the item is read
+ * from its parent folder's listing (one listing per folder). Paths not found are left out.
+ */
 async function lookup(drive: DriveService, paths: string[]): Promise<Map<string, Found>> {
   const out = new Map<string, Found>();
   const byParent = new Map<string, string[]>();
   for (const p of paths) {
+    const hit = cachedNode(p);
+    if (hit) { out.set(p, { uid: hit.uid, parentUid: hit.parentUid, name: unescapeName(splitRemotePath(p).name), size: hit.size }); continue; }
     const { parent } = splitRemotePath(p);
     byParent.set(parent, [...(byParent.get(parent) ?? []), p]);
   }
@@ -74,6 +79,11 @@ export interface BatchSpec {
   paths: string[];
   /** move / rename: the path each item ends up at. Items whose destination equals their path are not recorded. */
   to?: (from: string) => string;
+  /**
+   * trash batches: list /trash once and mark items whose name is already there as not restorable (drive_bulk_trash, drive_cleanup). Without it
+   * (single-item tools) every item is recorded restorable and the undo plan checks the name against the live /trash before it restores.
+   */
+  checkTrash?: boolean;
   /** Items the caller already read with their uid (drive_cleanup's plan): these are not looked up again. */
   known?: Map<string, Found>;
   /** Say in the result that journalling is switched off (drive_cleanup, whose answer promises an undo code); the older tools stay silent about it. */
@@ -117,7 +127,7 @@ export async function beginBatch(drive: DriveService, jo: JournalOpen, spec: Bat
     const found = await lookup(drive, sorted.filter((p) => !known.has(p)));
     for (const p of sorted) { const k = known.get(p); if (k) found.set(p, k); }
     const trashNames = new Map<string, number>();
-    if (spec.kind === "trash") for (const t of await drive.listTrash()) trashNames.set(t.name, (trashNames.get(t.name) ?? 0) + 1);
+    if (spec.kind === "trash" && spec.checkTrash) for (const t of await drive.listTrash()) trashNames.set(t.name, (trashNames.get(t.name) ?? 0) + 1);
     const batchNames = new Map<string, number>();
     for (const f of found.values()) batchNames.set(f.name, (batchNames.get(f.name) ?? 0) + 1);
 

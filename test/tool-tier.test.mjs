@@ -44,9 +44,13 @@ describe("tool tier", () => {
 
   // +100 each in 1.4.0: one sentence in drive_search explaining stale:true (persistent index).
   // drive_read_content (+~800 bytes, also in core). drive_audit_log (+~650 bytes, full only) in 1.6.0, plus drive_read_many, drive_share_expiry_report and drive_recent_changes (+~3.6 KB, full only).
-  it("tools/list stays within the size budget", () => {
-    // Raised from 49,000 to 52,000 on purpose in 1.12.0: drive_checkup, drive_cleanup and drive_undo add about 3.3 KB (measured 51,835 here in model mode, 52,918 in the default human mode, whose texts are longer).
-    assert.ok(size(full) <= 52_000, `full ${size(full)} bytes`);
+  it("tools/list stays within the size budget", async () => {
+    // The default is the human approval mode, whose tool texts are longer than model mode's: that is what users pay, so it is the main check.
+    // 1.12.0: raised from 49,000 on purpose (drive_checkup, drive_cleanup, drive_undo). Measured: human 52,927, model 51,844; limits are about 1.5% above.
+    const human = await withServer({ PROTON_DRIVE_APPROVAL: "human" }, (c) => c.listTools());
+    assert.equal(human.length, 58);
+    assert.ok(size(human) <= 53_700, `full, default (human) mode ${size(human)} bytes`);
+    assert.ok(size(full) <= 52_600, `full, model mode ${size(full)} bytes`);
     assert.ok(size(core) <= 18_000, `core ${size(core)} bytes`);
   });
 

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ACCEPT, DECLINE, withServer, writeTree, text } from "./helpers/approval-harness.mjs";
+import { readArgvLog } from "./helpers/mcp-client.mjs";
 import { driveSetup, file, folder, readNodes, patchState, trashedUids, treeShape, journalIds, readJournal, undoDir, seedJournal } from "./helpers/drive-state.mjs";
 
 const OLD = "2020-01-01T00:00:00Z";
@@ -17,6 +18,7 @@ const BASE = [
 const opts = (extra = {}, nodes = BASE, envExtra = {}) => ({ fakeMode: "drive", setup: driveSetup(nodes, envExtra), replies: () => ACCEPT, ...extra });
 const json = (r) => JSON.parse(text(r));
 const CLEANUP = { path: "/my-files", fixes: ["duplicates", "empty-folders"], confirmed: true };
+const trashListings = (ctx) => readArgvLog(ctx.sb.argvLog).filter((a) => a[0] === "filesystem" && a[1] === "list" && a[2] === "/trash").length;
 const mutations = (ctx, sub) => ctx.changes().filter((a) => a[0] === "filesystem" && a[1] === sub);
 
 describe("drive_undo: after drive_cleanup", () => {
@@ -150,21 +152,35 @@ describe("the other tools write the journal too", () => {
     });
   });
 
-  it("an item whose name is already in the trash is recorded as not restorable, and the result says how many", async () => {
+  it("bulk trash: an item whose name is already in the trash is recorded as not restorable, and the result says how many", async () => {
     const nodes = [...BASE, file("x1", "root", "unique.txt", { trashTime: "2026-01-01T00:00:00Z" })];
     await withServer(opts({}, nodes), async (ctx) => {
-      const r = json(await ctx.call("drive_trash", { path: "/my-files/docs/unique.txt" }));
+      const r = json(await ctx.call("drive_bulk_trash", { paths: ["/my-files/docs/unique.txt"], confirmed: true }));
       assert.equal(r.notUndoable, 1);
       assert.match(r.undo, /cannot be undone reliably/);
       const j = readJournal(ctx, r.undoId);
       assert.equal(j.items[0].restorable, false);
       assert.match(j.items[0].reason, /same-named item is already in the trash/);
-      const plan = json(await ctx.call("drive_undo", {}));
-      assert.equal(plan.restorable, 0);
+      assert.equal(json(await ctx.call("drive_undo", {})).restorable, 0);
       const apply = await ctx.call("drive_undo", { action: "apply" });
       assert.equal(apply.isError, true);
       assert.equal(ctx.lastAudit().code, "nothing_restorable");
       assert.equal(mutations(ctx, "restore").length, 0, "nothing arbitrary is restored");
+    });
+  });
+
+  it("drive_trash does not list /trash: the item is recorded restorable and the undo plan checks the live trash instead", async () => {
+    const nodes = [...BASE, file("x1", "root", "unique.txt", { trashTime: "2026-01-01T00:00:00Z" })];
+    await withServer(opts({}, nodes), async (ctx) => {
+      const r = json(await ctx.call("drive_trash", { path: "/my-files/docs/unique.txt" }));
+      assert.equal(r.notUndoable, undefined);
+      assert.equal(readJournal(ctx, r.undoId).items[0].restorable, true);
+      assert.equal(trashListings(ctx), 0, "no /trash listing for a single item");
+      const plan = json(await ctx.call("drive_undo", {}));
+      assert.equal(plan.restorable, 0, "the live trash holds another item of that name");
+      assert.match(plan.items[0].reason, /same name is in trash/);
+      assert.equal((await ctx.call("drive_undo", { action: "apply" })).isError, true);
+      assert.equal(mutations(ctx, "restore").length, 0);
     });
   });
 
@@ -210,6 +226,108 @@ describe("the other tools write the journal too", () => {
       assert.equal(json(await ctx.call("drive_undo", { action: "apply", id: renamed.undoId })).status, "undone");
       assert.equal(json(await ctx.call("drive_undo", { action: "apply", id: moved.undoId })).status, "undone");
       assert.deepEqual(treeShape(ctx), before);
+    });
+  });
+});
+
+describe("review fixes: original folder identity, /trash listings, dialog effect", () => {
+  it("the folder at the original path must be the folder the item came from: A renamed to B and a new A created, undo moves nothing", async () => {
+    const nodes = [folder("dA", "root", "A"), file("fx", "dA", "x.txt")];
+    await withServer(opts({}, nodes), async (ctx) => {
+      const trashed = json(await ctx.call("drive_trash", { path: "/my-files/A/x.txt" }));
+      assert.equal(readJournal(ctx, trashed.undoId).items[0].parentUid, "dA");
+      json(await ctx.call("drive_rename", { path: "/my-files/A", newName: "B" }));
+      patchState(ctx, (n) => { n.dNew = folder("dNew", "root", "A"); });
+      const before = JSON.stringify(readNodes(ctx));
+      const plan = json(await ctx.call("drive_undo", { id: trashed.undoId }));
+      assert.equal(plan.restorable, 0);
+      assert.equal(plan.items[0].reason, "original folder is not the same folder anymore");
+      const apply = await ctx.call("drive_undo", { action: "apply", id: trashed.undoId });
+      assert.equal(apply.isError, true);
+      assert.equal(ctx.lastAudit().code, "nothing_restorable");
+      assert.equal(mutations(ctx, "restore").length, 0);
+      assert.equal(JSON.stringify(readNodes(ctx)), before, "nothing moved");
+    });
+  });
+
+  it("the same holds for a moved item: the original folder was replaced by another one", async () => {
+    const nodes = [folder("dA", "root", "A"), folder("dZ", "root", "Z"), file("fx", "dA", "x.txt")];
+    await withServer(opts({}, nodes), async (ctx) => {
+      const moved = json(await ctx.call("drive_move", { sourcePath: "/my-files/A/x.txt", destinationPath: "/my-files/Z/x.txt" }));
+      patchState(ctx, (n) => { n.dA.name = "A-old"; n.dNew = folder("dNew", "root", "A"); });
+      const plan = json(await ctx.call("drive_undo", { id: moved.undoId }));
+      assert.equal(plan.restorable, 0);
+      assert.equal(plan.items[0].reason, "original folder is not the same folder anymore");
+      assert.equal(readNodes(ctx).fx.parentUid, "dZ");
+    });
+  });
+
+  it("every hook records the item's parent uid: trash, bulk trash, move, bulk move, rename and cleanup", async () => {
+    await withServer(opts(), async (ctx) => {
+      const ids = [];
+      ids.push(json(await ctx.call("drive_trash", { path: "/my-files/docs/unique.txt" })).undoId);
+      ids.push(json(await ctx.call("drive_bulk_trash", { paths: ["/my-files/docs/a.pdf"], confirmed: true })).undoId);
+      ids.push(json(await ctx.call("drive_rename", { path: "/my-files/inbox/a (1).pdf", newName: "b.pdf" })).undoId);
+      ids.push(json(await ctx.call("drive_move", { sourcePath: "/my-files/inbox/b.pdf", destinationPath: "/my-files/docs/b.pdf" })).undoId);
+      ids.push(json(await ctx.call("drive_bulk_move", { sources: ["/my-files/docs/b.pdf"], destinationFolder: "/my-files/empty", confirmed: true })).undoId);
+      ids.push(json(await ctx.call("drive_cleanup", { path: "/my-files", fixes: ["empty-folders"], confirmed: true })).undoId);
+      assert.equal(new Set(ids).size, 6);
+      const parents = { "drive_trash": "d1", "drive_bulk_trash": "d1", "drive_rename": "d2", "drive_move": "d2", "drive_bulk_move": "d1" };
+      ids.forEach((id) => {
+        const j = readJournal(ctx, id);
+        for (const it of j.items) assert.equal(typeof it.parentUid, "string", `${j.tool}: ${it.from}`);
+        if (parents[j.tool]) assert.equal(j.items[0].parentUid, parents[j.tool], j.tool);
+      });
+    });
+  });
+
+  it("one /trash listing for drive_bulk_trash, none for drive_trash, drive_move and drive_rename", async () => {
+    await withServer(opts(), async (ctx) => {
+      await ctx.call("drive_trash", { path: "/my-files/docs/unique.txt" });
+      await ctx.call("drive_rename", { path: "/my-files/inbox/a (1).pdf", newName: "b.pdf" });
+      await ctx.call("drive_move", { sourcePath: "/my-files/inbox/b.pdf", destinationPath: "/my-files/docs/b.pdf" });
+      assert.equal(trashListings(ctx), 0);
+      await ctx.call("drive_bulk_trash", { paths: ["/my-files/docs/b.pdf"], confirmed: true });
+      assert.equal(trashListings(ctx), 1);
+    });
+  });
+
+  it("an item already in the memory cache of a walk is not looked up with a folder listing", async () => {
+    await withServer(opts(), async (ctx) => {
+      await ctx.call("drive_checkup", { sharing: false });
+      const lists = () => readArgvLog(ctx.sb.argvLog).filter((a) => a[1] === "list" && a[2] === "/my-files/docs").length;
+      const before = lists();
+      const r = json(await ctx.call("drive_trash", { path: "/my-files/docs/unique.txt" }));
+      assert.equal(lists(), before, "no extra listing of the parent");
+      assert.equal(readJournal(ctx, r.undoId).items[0].parentUid, "d1");
+      assert.equal(readJournal(ctx, r.undoId).items[0].uid, "f3");
+    });
+  });
+
+  it("moving back into /shared-with-me is shown to the human as outward, plain restores as reversible", async () => {
+    const swm = [folder("swm", null, "shared-with-me"), folder("t", "swm", "t"), file("g1", "t", "a.txt", { trashTime: "2026-11-19T10:00:00Z" }), folder("d1", "root", "docs"), file("f1", "d1", "b.txt", { trashTime: "2026-11-19T10:00:00Z" })];
+    await withServer({
+      ...opts({}, swm),
+      setup: (sb) => {
+        const env = driveSetup(swm)(sb);
+        seedJournal(sb, { items: [{ uid: "g1", parentUid: "t", from: "/shared-with-me/t/a.txt", name: "a.txt", restorable: true }] });
+        seedJournal(sb, { items: [{ uid: "f1", parentUid: "d1", from: "/my-files/docs/b.txt", name: "b.txt", restorable: true }] });
+        return env;
+      },
+    }, async (ctx) => {
+      const list = json(await ctx.call("drive_undo", { action: "list" })).batches;
+      assert.equal(list.length, 2);
+      for (const b of list) {
+        const plan = json(await ctx.call("drive_undo", { id: b.id }));
+        assert.equal(plan.restorable, 1, JSON.stringify(plan));
+        await ctx.call("drive_undo", { action: "apply", id: b.id });
+      }
+      const outward = ctx.messages.filter((m) => /affects other people/.test(m));
+      const plain = ctx.messages.filter((m) => /\(can be undone\)/.test(m));
+      assert.equal(outward.length, 1);
+      assert.match(outward[0], /\/shared-with-me\/t\/a\.txt/);
+      assert.equal(plain.length, 1);
+      assert.match(plain[0], /\/my-files\/docs\/b\.txt/);
     });
   });
 });

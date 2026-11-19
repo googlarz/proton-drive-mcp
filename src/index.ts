@@ -1093,7 +1093,7 @@ const TOOLS = [
   {
     name: "drive_cleanup",
     description:
-      "Trash redundant duplicate copies and empty folders under a path; nothing is deleted and drive_undo restores them. The server lists the items from a fresh, complete scan: you name no files, and kept copies, shared items and names already in the trash are left out. Without confirmed: plan (counts, bytes, 10 samples, skipped, remaining). With confirmed=true: trashes only if the user approved. Max 200 items per call.",
+      "Trash redundant duplicate copies and empty folders under a path; nothing is deleted and drive_undo restores them. The server lists the items from a fresh, complete scan: you name no files; kept copies, shared items and names already in the trash are left out. Without confirmed: plan (counts, bytes, 10 samples, skipped, remaining). With confirmed=true: trashes only if the user approved. Max 50 per call; call again while remaining > 0.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -1109,7 +1109,7 @@ const TOOLS = [
   {
     name: "drive_undo",
     description:
-      "Undo a recorded batch (drive_cleanup, drive_bulk_trash, drive_trash, drive_bulk_move, drive_move, drive_rename): restores or moves items back, each checked by id; nothing is overwritten and changed items are skipped with a reason. action list (newest 20, no names), plan (default), apply (always asks the user first). Needs the local undo record (PROTON_DRIVE_UNDO=0 turns it off).",
+      "Undo a recorded batch (drive_cleanup, drive_bulk_trash, drive_trash, drive_bulk_move, drive_move, drive_rename): restores or moves items back, each checked by id; nothing is overwritten, changed items are skipped with a reason. action list (newest 20, no names), plan (default), apply (always asks the user first). Needs the local undo record (PROTON_DRIVE_UNDO=0 turns it off).",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -1177,7 +1177,7 @@ const TOOLS = [
   {
     name: "drive_checkup",
     description:
-      "Health report for a folder in one call: exact-duplicate candidates, empty folders, large old files, public links, outside access, sensitive-looking names in shared items, trash. Score 0-100 (scoreParts), counts and at most 3 example paths per finding (namesInResult counts them); names, sizes, dates and sharing only, no content. finding=<id> returns one page. Cached walk (up to 5 min); partial:true means call again. Changes nothing.",
+      "Health report for a folder in one call: exact-duplicate candidates, empty folders, large old files, public links, outside access, sensitive-looking names in shared items, trash. Score 0-100 (scoreParts), counts and at most 3 example paths per finding (namesInResult counts them); names, sizes, dates, sharing only, no content. finding=<id> returns one page. Cached walk (5 min); partial:true means call again. Changes nothing.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: "object",
@@ -2148,7 +2148,7 @@ export async function main() {
               return refuse("approval_changed", "drive_bulk_trash not applied, nothing trashed: Drive changed after the user approved the plan. Run the plan again and ask for approval again.");
             }
           }
-          const bulkBatch = await beginBatch(drive, await getJournal(), { tool: name, kind: "trash", paths: trashPaths });
+          const bulkBatch = await beginBatch(drive, await getJournal(), { tool: name, kind: "trash", paths: trashPaths, checkTrash: true });
           try { await drive.bulkTrash(trashPaths); }
           catch (err) { await bulkBatch.settleAfterError(); throw err; }
           finally { trashPaths.forEach(invalidatePath); }
@@ -2162,7 +2162,8 @@ export async function main() {
           const fixes = [...new Set(a.fixes as string[])].sort() as CleanupFix[];
           const verify = a.verify === true;
           // The list comes from the server's own fresh, complete scan; the model names no file.
-          const run = await computeCleanupPlan(drive, { path: cleanupPath, fixes, verify });
+          const hashMemo = new Map<string, string>();
+          const run = await computeCleanupPlan(drive, { path: cleanupPath, fixes, verify, hashMemo });
           if ("refusal" in run) return refuse("cleanup_refused", `drive_cleanup: ${run.refusal}`);
           const cleanupPlan = run.plan;
           const planView = {
@@ -2181,13 +2182,13 @@ export async function main() {
             const denied = await requireApproval({ tool: name, effect: "reversible", fields: { path: cleanupPath, fixes, trash: summarizeForDialog(cleanupPlan) } }, true);
             if (denied) return denied;
             // The human approved this exact list: apply it only if a fresh scan gives the same one.
-            const again = await computeCleanupPlan(drive, { path: cleanupPath, fixes, verify });
+            const again = await computeCleanupPlan(drive, { path: cleanupPath, fixes, verify, hashMemo }); // a fresh walk; verified files are not downloaded again
             if ("refusal" in again || planFingerprint(again.plan) !== planFingerprint(cleanupPlan)) {
               return refuse("approval_changed", "drive_cleanup not applied, nothing trashed: Drive changed after the user approved the list. Run the plan again and ask for approval again.");
             }
           }
           const cleanupKnown = new Map(cleanupPlan.items.map((i) => [i.path, { uid: i.uid, parentUid: i.parentUid, name: i.name, size: i.kind === "duplicate" ? i.size : undefined }]));
-          const cleanupBatch = await beginBatch(drive, await getJournal(), { tool: name, kind: "trash", paths: cleanupPaths, known: cleanupKnown, reportOff: true });
+          const cleanupBatch = await beginBatch(drive, await getJournal(), { tool: name, kind: "trash", paths: cleanupPaths, known: cleanupKnown, checkTrash: true, reportOff: true });
           try {
             await drive.bulkTrash(cleanupPaths);
           } catch (err) {
@@ -2236,8 +2237,10 @@ export async function main() {
                 return fail("drive_undo not applied, nothing changed: the user did not approve.");
               }
             } else {
+              // Outward when anything is restored or moved from or into /shared-with-me: every destination (the item paths) and every move source.
+              const undoPaths = [...undoPlan.items.filter((i) => i.restorable).map((i) => i.path), ...undoPlan.restore, ...undoPlan.moveBack];
               const denied = await requireApproval({
-                tool: name, effect: "reversible",
+                tool: name, effect: effectFor("reversible", undoPaths),
                 fields: { id: undoPlan.id, when: undoPlan.when, restore: undoPlan.restore, moveBack: undoPlan.moveBack },
               }, true);
               if (denied) return denied;

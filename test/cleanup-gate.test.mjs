@@ -111,19 +111,37 @@ describe("drive_cleanup: plan", () => {
     });
   });
 
-  it("caps one call at 200 items, reports what remains and the next call continues", async () => {
-    const many = Array.from({ length: 205 }, (_, i) => folder(`e${i}`, "root", `empty-${String(i).padStart(3, "0")}`));
+  it("caps one call at 50 items (what the dialog lists in full), reports what remains and the next call continues", async () => {
+    const many = Array.from({ length: 55 }, (_, i) => folder(`e${i}`, "root", `empty-${String(i).padStart(3, "0")}`));
     await withServer(opts({ replies: () => ACCEPT }, many), async (ctx) => {
       const plan = json(await ctx.call("drive_cleanup", { path: "/my-files", fixes: ["empty-folders"] }));
-      assert.equal(plan.counts.emptyFolders, 200);
+      assert.equal(plan.counts.emptyFolders, 50);
       assert.equal(plan.remaining, 5);
       assert.ok(plan.samples.length <= 10);
+      assert.match(plan.next, /5 more item\(s\)/);
       const done = json(await ctx.call("drive_cleanup", { path: "/my-files", fixes: ["empty-folders"], confirmed: true }));
-      assert.equal(done.trashed, 200);
+      assert.equal(done.trashed, 50);
       assert.equal(done.remaining, 5);
+      // the human saw every one of the 50 items, not a cut-off list with folder counts
+      assert.doesNotMatch(ctx.messages[0], /only the first/);
+      for (let i = 0; i < 50; i++) assert.ok(ctx.messages[0].includes(`/my-files/empty-${String(i).padStart(3, "0")}  (empty folder)`), `item ${i} in the dialog`);
+      assert.ok(!ctx.messages[0].includes("/my-files/empty-050"), "the item beyond the cap is not in this call");
       const next = json(await ctx.call("drive_cleanup", { path: "/my-files", fixes: ["empty-folders"] }));
       assert.equal(next.counts.emptyFolders, 5);
       assert.equal(next.remaining, 0);
+    });
+  });
+
+  it("an entry listed without a uid makes the scan incomplete: cleanup refuses, nothing is trashed", async () => {
+    const odd = [...BASE, file("ghost", "d1", "ghost.txt", { noUid: true })];
+    await withServer(opts({ replies: () => ACCEPT }, odd), async (ctx) => {
+      const r = await ctx.call("drive_cleanup", { ...ARGS, confirmed: true });
+      assert.equal(r.isError, true);
+      assert.match(text(r), /could not be listed/);
+      assert.match(text(r), /without a uid/);
+      assert.equal(ctx.lastAudit().code, "cleanup_refused");
+      assert.deepEqual(ctx.changes(), []);
+      assert.equal(ctx.asked, 0);
     });
   });
 });

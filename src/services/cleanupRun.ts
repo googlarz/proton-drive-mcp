@@ -1,7 +1,7 @@
 import type { DriveService } from "./drive.js";
 import { ROOT_PATHS, splitRemotePath } from "./drive.js";
 import { walkTree, DEFAULT_EXCLUDE, staleFields, type WalkResult } from "./walk.js";
-import { driveSharingAudit, findDuplicateCandidates, makeDriveHasher, summarizeTrash, verifyGroups, type DuplicateGroup } from "./analytics.js";
+import { driveSharingAudit, findDuplicateCandidates, makeDriveHasher, summarizeTrash, verifyGroups, type DuplicateGroup, type Hasher } from "./analytics.js";
 import { computeCheckup, checkupFindingPage, type CheckupFinding, type SharingAuditInput } from "./checkup.js";
 import { planCleanup, type CleanupFix, type CleanupPlanOk } from "./cleanup.js";
 import { callContext } from "../utils/subprocess.js";
@@ -112,11 +112,31 @@ export async function pathOrAncestorShared(drive: DriveService, path: string): P
 export type CleanupRun = { plan: CleanupPlanOk; verified: boolean } | { refusal: string };
 
 /**
+ * Remembers the sha256 of a file by what identifies its content in a listing: uid, path, size, claimed time, upload time and claimed sha1
+ * (a new revision changes the upload time). The re-plan after the human approved passes the same memo: a file whose listing entry did not
+ * change is not downloaded a second time, one that changed is hashed again and so ends up in a different list (approval_changed).
+ */
+export function memoHasher(inner: Hasher, memo: Map<string, string>): Hasher {
+  return async (n) => {
+    const key = [n.uid, n.path, n.size, n.mtime, n.uploadedAt, n.sha1].join("\0");
+    const hit = memo.get(key);
+    if (hit !== undefined) return hit;
+    const digest = await inner(n);
+    memo.set(key, digest);
+    return digest;
+  };
+}
+
+/**
  * The plan step of drive_cleanup: a fresh, complete walk (never the saved index, no time budget), the names in /trash, the share
  * state above the path and, with `verify`, sha256-confirmed duplicate groups. Anything incomplete is refused, never planned.
  */
-export async function computeCleanupPlan(drive: DriveService, o: { path: string; fixes: CleanupFix[]; verify: boolean }): Promise<CleanupRun> {
-  const walk: WalkResult = await walkTree(drive, o.path, { refresh: true, noDisk: true, budgetMs: 0, exclude: DEFAULT_EXCLUDE });
+export async function computeCleanupPlan(
+  drive: DriveService,
+  o: { path: string; fixes: CleanupFix[]; verify: boolean; /** sha256 memo shared between the plan and the re-plan (see memoHasher). */ hashMemo?: Map<string, string>; /** Tests: replaces the download-and-hash step. */ hasher?: Hasher },
+): Promise<CleanupRun> {
+  // `fresh`: this walk is always its own, never one that began earlier (a concurrent call's, or one started before the human answered).
+  const walk: WalkResult = await walkTree(drive, o.path, { refresh: true, fresh: true, noDisk: true, budgetMs: 0, exclude: DEFAULT_EXCLUDE });
   const stale = walk.stale === true || walk.partial === true;
   if (stale) return { refusal: "the drive listing is partial or stale; run the plan again for a fresh one" };
   if (!walk.complete || walk.skipped.length > 0) {
@@ -129,7 +149,7 @@ export async function computeCleanupPlan(drive: DriveService, o: { path: string;
 
   let verifiedGroups: (DuplicateGroup & { verifyNote?: string })[] | undefined;
   if (o.verify && o.fixes.includes("duplicates")) {
-    verifiedGroups = await verifyGroups(findDuplicateCandidates(walk.nodes, 1024), makeDriveHasher(drive), {
+    verifiedGroups = await verifyGroups(findDuplicateCandidates(walk.nodes, 1024), memoHasher(o.hasher ?? makeDriveHasher(drive), o.hashMemo ?? new Map()), {
       maxVerifyBytes: 50_000_000, signal: callContext.getStore()?.signal,
     });
   }

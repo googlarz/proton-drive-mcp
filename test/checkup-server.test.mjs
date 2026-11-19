@@ -111,6 +111,19 @@ describe("drive_checkup: summary", () => {
   });
 });
 
+describe("drive_checkup: entries that cannot be identified", () => {
+  it("an entry listed without a uid is reported as an incomplete scan, not dropped silently", async () => {
+    const tree = { ...TREE, "/my-files/docs": [...TREE["/my-files/docs"], { name: { ok: true, value: "ghost.txt" }, type: "file", activeRevision: { claimedSize: 5 } }] };
+    await withServer({ fakeMode: "tree", setup: (sb) => ({ FAKE_TREE: writeTree(sb.dir, tree) }) }, async (ctx) => {
+      const { r, data } = await call(ctx);
+      assert.notEqual(r.isError, true, text(r));
+      assert.equal(data.scanned.complete, false);
+      assert.ok(data.caveats.some((c) => /incomplete/i.test(c)), data.caveats.join(" | "));
+      assert.ok(!data.findings.some((f) => f.id === "empty-folders"), "no folder is called empty when something below it could not be identified");
+    });
+  });
+});
+
 describe("drive_checkup: finding pages", () => {
   it("pages one finding with total, nextOffset and an honest namesInResult", async () => {
     const tree = { ...TREE, "/my-files/docs": [], "/my-files/inbox": [] };

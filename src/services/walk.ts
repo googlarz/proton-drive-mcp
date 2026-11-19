@@ -34,6 +34,11 @@ export interface WalkOptions {
   exclude?: string[];
   /** Ignore the cache and re-walk. */
   refresh?: boolean;
+  /**
+   * Start a walk of its own even when the same walk is already running (the default is to join it). The running walk keeps serving
+   * its own callers but no longer fills the cache. For a re-check after a human approved a plan: it must not read a listing that began earlier.
+   */
+  fresh?: boolean;
   /** Never answer from the persistent index (memory cache is still used); for tools where saved data is unsafe (plans, deletion suggestions, audits). */
   noDisk?: boolean;
   /**
@@ -296,7 +301,12 @@ async function runWalk(svc: DriveService, p: WalkParams, signal: AbortSignal | u
       live.listed.set(job.path, Date.now());
       for (const entry of entries) {
         const { item, file } = entry;
-        if (typeof item.uid !== "string") continue; // "/" lists path-only roots, not nodes
+        if (typeof item.uid !== "string") {
+          if (item.name === undefined && typeof item.path === "string") continue; // "/" lists path-only roots, not nodes
+          // An entry we cannot identify is not dropped silently: the walk reports it as skipped, so a planner or audit sees an incomplete listing.
+          skipped.push({ path: file.path, reason: "listed without a uid (cannot be identified)" });
+          continue;
+        }
         const node = toNode(entry);
         nodes.push(node);
         if (file.type === "folder" && !exclude.has(file.name) && (maxDepth === undefined || job.depth + 1 < maxDepth)) {
@@ -498,6 +508,7 @@ async function runIncremental(svc: DriveService, p: WalkParams, signal: AbortSig
   const startedSeq = new Map<string, number>(); // folder -> start order of the listing of this walk that last recorded it
   let stop: "time" | "calls" | undefined;
   const failed = new Map<string, string>();
+  const noUid = new Map<string, string>();
   const more = () => head < discovered.length || next < todo.length;
   const listWithRetry = makeLister(svc, signal, live, maxCalls);
 
@@ -526,6 +537,9 @@ async function runIncremental(svc: DriveService, p: WalkParams, signal: AbortSig
           .then((entries) => {
             if (job.path !== root && t.folders.get(job.path) !== job.uid) return; // dropped or replaced while this listing was under way
             const children = entries.filter(({ item }) => typeof item.uid === "string").map(toNode);
+            for (const { item, file } of entries) {
+              if (typeof item.uid !== "string" && !(item.name === undefined && typeof item.path === "string")) noUid.set(file.path, "listed without a uid (cannot be identified)");
+            }
             for (const f of applyListing(t, job.path, children, Date.now(), seq, startedSeq)) if (listable(f.path)) discovered.push({ path: f.path, uid: f.uid });
             refreshed++;
           })
@@ -541,6 +555,7 @@ async function runIncremental(svc: DriveService, p: WalkParams, signal: AbortSig
   });
 
   const skipped: { path: string; reason: string }[] = [];
+  for (const [path, reason] of noUid) skipped.push({ path, reason });
   let oldest: number | undefined;
   for (const path of [root, ...t.folders.keys()]) {
     if (!listable(path)) continue;
@@ -860,7 +875,7 @@ export async function walkTree(svc: DriveService, rootPath: string, opts: WalkOp
     // New listings stop at 70% of the budget: listings already under way are awaited, so the call still ends near the budget.
     if (entry || opts.resumable) params.inc = { entry, maxAgeMs: listingAgeMs, track: opts.trackChanges === true, deadlineAt: budgetMs > 0 ? startedAt + budgetMs * SOFT_BUDGET_SHARE : undefined, budgetAt: budgetMs > 0 ? startedAt + budgetMs : undefined };
   }
-  const rec = joinOrStartWalk(svc, params);
+  const rec = joinOrStartWalk(svc, params, opts.fresh === true);
   // An incremental walk stops itself at its deadline (and saves its progress), so nobody takes a snapshot of it.
   const out = await waitForWalk(rec, signal, params.inc ? 0 : budgetMs);
   if (out.partial) return out.partial;
@@ -870,10 +885,13 @@ export async function walkTree(svc: DriveService, rootPath: string, opts: WalkOp
 }
 
 /** One shared walk per key: it runs on its own signal, caches itself when done, and callers only wait for it. */
-function joinOrStartWalk(svc: DriveService, p: WalkParams): WalkRec & { fg: NonNullable<WalkRec["fg"]> } {
+function joinOrStartWalk(svc: DriveService, p: WalkParams, fresh = false): WalkRec & { fg: NonNullable<WalkRec["fg"]> } {
   const fgKey = FG + p.key + (p.inc ? `\0inc\0${p.inc.maxAgeMs}` : "");
   const existing = refreshes.get(fgKey);
-  if (existing?.fg && !existing.superseded && !existing.controller.signal.aborted) return existing as WalkRec & { fg: NonNullable<WalkRec["fg"]> };
+  if (existing?.fg && !existing.superseded && !existing.controller.signal.aborted) {
+    if (!fresh) return existing as WalkRec & { fg: NonNullable<WalkRec["fg"]> };
+    existing.superseded = true; // its callers still get its result; it just does not fill the cache any more
+  }
   if (!exitHooked) { exitHooked = true; process.once("exit", abortBackgroundRefreshes); }
   const controller = new AbortController();
   const live = newLive(p.root);
@@ -968,6 +986,21 @@ function invalidateEntry(e: IndexEntry, p: string): IndexEntry | undefined {
   for (const k of Object.keys(listed)) if (isUnder(k, p)) delete listed[k];
   const written = e.nodes.find((n) => n.path === p);
   return { ...e, listed, nodes: written?.type === "file" ? e.nodes.filter((n) => n !== written) : e.nodes };
+}
+
+/**
+ * The node at `path` from a walk still in the memory cache (never a saved index), or undefined. Used to avoid a folder listing when
+ * a tool only needs an item's uid and parent uid; writes made by this server drop the cache entries they touch (invalidatePath).
+ */
+export function cachedNode(path: string): WalkNode | undefined {
+  const now = Date.now(), ttl = ttlMs();
+  let best: { node: WalkNode; at: number } | undefined;
+  for (const e of cache.values()) {
+    if (e.seeded || now - e.createdAt >= ttl || !isUnder(path, e.root)) continue;
+    const node = e.nodes.find((n) => n.path === path);
+    if (node && (!best || e.createdAt > best.at)) best = { node, at: e.createdAt };
+  }
+  return best?.node;
 }
 
 /** Called after the server itself writes at `path`: cached walks that contain it go, the saved index loses only what the write touched. */

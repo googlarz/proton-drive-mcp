@@ -62,7 +62,7 @@ Content search is off by default. Add `"PROTON_DRIVE_CONTENT_INDEX": "1"` to the
 /my-files/Documents/Inbox/2024-03 (1).pdf  (keeps /my-files/Documents/Invoices/2024-03.pdf)
 ```
 
-Read it. The part in brackets is the copy that stays. If the list is long, the question shows the first 50 lines and counts per folder. Accept only if it is what you want. Nothing is deleted: the files go to the Drive trash. One call handles up to 200 items; Claude will tell you how many are left.
+Read it. The part in brackets is the copy that stays. A cleanup handles at most 50 items per call, so the question lists every one of them with its kept copy; Claude will tell you how many are left and asks again for the next batch. (A longer list, such as undoing a big bulk trash, shows the first 50 lines and counts per folder, grouped by where the items are now.) Accept only if it is what you want. Nothing is deleted: the files go to the Drive trash. On a big folder the plan can take a while, and the cleanup refuses when a folder needs more than 300 listing calls: point it at a subfolder.
 
 **What you see afterwards.** A short result with how many items went to the trash and an undo code such as `U7K2-M9XD`. Space is not freed until you empty the trash yourself, and emptying it cannot be undone.
 

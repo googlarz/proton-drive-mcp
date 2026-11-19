@@ -48,6 +48,35 @@ const clearWalkEnv = () => { for (const k of ["PROTON_DRIVE_WALK_TTL_MS", "PROTO
 beforeEach(() => { resetWalkCacheForTests(); invalidatePath("/"); clearWalkEnv(); });
 afterEach(async () => { abortBackgroundRefreshes(); await flushWalkIndexForTests(); resetWalkCacheForTests(); clearWalkEnv(); });
 
+describe("walkTree: fresh and unidentifiable entries (1.12.0 review fixes)", () => {
+  it("two overlapping walks of the same folder share one run by default; fresh starts its own and the older one stops filling the cache", async () => {
+    const shared = makeSvc(small(), { delay: 30 });
+    const [x, y] = await Promise.all([walkTree(shared.svc, "/my-files", { refresh: true }), (async () => { await sleep(10); return walkTree(shared.svc, "/my-files", { refresh: true }); })()]);
+    assert.equal(x.nodes.length, y.nodes.length);
+    assert.equal(shared.stats.calls.length, 4, "joined: the folders were listed once");
+    resetWalkCacheForTests();
+    const own = makeSvc(small(), { delay: 30 });
+    const first = walkTree(own.svc, "/my-files", { refresh: true });
+    await sleep(10);
+    const second = walkTree(own.svc, "/my-files", { refresh: true, fresh: true });
+    const [a, b] = await Promise.all([first, second]);
+    assert.equal(a.complete && b.complete, true);
+    assert.equal(own.stats.calls.length, 8, "fresh: every folder listed again by a walk of its own");
+    assert.equal(own.stats.calls.filter((c) => c === "/my-files/a").length, 2);
+  });
+
+  it("an entry listed without a uid is reported as skipped (the walk is incomplete), not dropped silently", async () => {
+    const tree = small();
+    tree["/my-files/b"] = [file("z.txt", 7), { type: "file", name: { ok: true, value: "ghost.txt" }, activeRevision: { claimedSize: 3 } }];
+    const { svc } = makeSvc(tree);
+    const r = await walkTree(svc, "/my-files");
+    assert.equal(r.complete, false);
+    assert.deepEqual(r.skipped, [{ path: "/my-files/b/ghost.txt", reason: "listed without a uid (cannot be identified)" }]);
+    assert.ok(!r.nodes.some((n) => n.path.endsWith("ghost.txt")));
+    assert.ok(r.nodes.some((n) => n.path === "/my-files/b/z.txt"), "the identifiable entries are still there");
+  });
+});
+
 describe("walkTree", () => {
   it("collects every node with full metadata, excluding .git by default", async () => {
     const { svc, stats } = makeSvc(small());

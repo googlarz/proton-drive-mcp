@@ -379,12 +379,12 @@ describe("cap, remaining and determinism", () => {
     return nodes;
   };
 
-  it("defaults to 200 items and reports what is left", () => {
-    const r = run(many(250));
-    assert.equal(r.items.length, 200);
-    assert.equal(r.remaining, 50);
-    assert.equal(r.counts.duplicates, 200);
-    assert.equal(r.bytes, 200 * 5000);
+  it("defaults to 50 items (the approval dialog's full-list maximum) and reports what is left", () => {
+    const r = run(many(120));
+    assert.equal(r.items.length, 50);
+    assert.equal(r.remaining, 70);
+    assert.equal(r.counts.duplicates, 50);
+    assert.equal(r.bytes, 50 * 5000);
   });
 
   it("honours a smaller cap and continues once the first page is gone", () => {

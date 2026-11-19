@@ -231,7 +231,7 @@ describe("performance", () => {
     const s = run(shuffled);
     const page = checkupFindingPage(shuffled, "sensitive-exposed", { now: NOW, limit: 200 });
     const ms = performance.now() - t0;
-    assert.ok(ms < 2000, `took ${ms} ms`);
+    assert.ok(ms < 10_000, `took ${ms} ms`); // a regression guard against quadratic code, loose enough for a slow CI machine
     assert.ok(s.findings.length > 0 && page.total > 0);
   });
 });

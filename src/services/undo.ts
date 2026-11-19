@@ -98,6 +98,7 @@ interface Computed {
 }
 
 const LIST_LIMIT = 20;
+const SAME_FOLDER_REASON = "original folder is not the same folder anymore";
 const RESTORE_CHUNK = 200;
 
 function isNotFound(e: unknown): boolean {
@@ -144,6 +145,16 @@ async function compute(drive: UndoDrive, journal: UndoJournal, id: string | unde
     }
     return p;
   };
+  /**
+   * The folder now at `folder` is the one the item lived in when the batch was recorded (its uid is the journal's parentUid). A path alone
+   * is not enough: the folder may have been renamed and another created under the old name, which would put the item in the wrong place.
+   * The account roots cannot be replaced, and an item recorded without a parentUid (older record) is checked by path only.
+   */
+  const sameFolder = async (folder: string, parentUid: string | undefined): Promise<boolean> => {
+    if (parentUid === undefined || ROOT_PATHS.has(folder)) return true;
+    const at = (await listing(splitRemotePath(folder).parent))?.find((e) => e.path === folder && e.type === "folder");
+    return at?.uid === parentUid;
+  };
   const trash = batch.kind === "trash" ? await drive.listTrash() : [];
   const seen = new Set<string>();
   /** `<parent>\0<name>` slots already promised to an earlier item of this batch. */
@@ -184,6 +195,7 @@ async function compute(drive: UndoDrive, journal: UndoJournal, id: string | unde
       }
       const siblings = await listing(fromParent);
       if (!siblings) return refuse(`the original folder ${fromParent} no longer exists`);
+      if (!(await sameFolder(fromParent, it.parentUid))) return refuse(SAME_FOLDER_REASON);
       if (siblings.some((e) => e.name === fromName) || claimed.has(slot)) return refuse(`an item named "${fromName}" already exists in ${fromParent}`);
       claimed.add(slot);
       return { ...base, op: "restore", trashPath: t.path, restorable: true };
@@ -203,6 +215,7 @@ async function compute(drive: UndoDrive, journal: UndoJournal, id: string | unde
     }
     const siblings = await listing(fromParent);
     if (!siblings) return refuse(`the original folder ${fromParent} no longer exists`);
+    if (!(await sameFolder(fromParent, it.parentUid))) return refuse(SAME_FOLDER_REASON);
     if (siblings.some((e) => e.name === fromName) || claimed.has(slot)) return refuse(`an item named "${fromName}" already exists in ${fromParent}`);
     claimed.add(slot);
     const op: Op = toParent === fromParent ? "rename" : nameOf(to) === fromName ? "move" : "moveRename";
