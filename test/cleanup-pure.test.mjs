@@ -56,6 +56,56 @@ describe("planCleanup refusals", () => {
   });
 });
 
+describe("fail closed on unusable nodes", () => {
+  const noUid = (n, v) => { const c = { ...n }; if (v === undefined) delete c.uid; else c.uid = v; return c; };
+
+  it("a folder whose only child has no uid is never proposed: the whole plan is refused", () => {
+    for (const v of [undefined, "", null, 7]) {
+      const r = run([dir(`${ROOT}/a`), noUid(file(`${ROOT}/a/x.txt`, 3), v)]);
+      assert.equal(r.ok, false, String(v));
+      assert.match(r.reason, /without a usable uid/);
+    }
+  });
+
+  it("any uid-less node under the path refuses the plan, for every fix", () => {
+    const nodes = [file(`${ROOT}/a.bin`), file(`${ROOT}/b.bin`), noUid(file(`${ROOT}/c.bin`))];
+    for (const fixes of [["duplicates"], ["empty-folders"], ["duplicates", "empty-folders"]]) assert.equal(run(nodes, { fixes }).ok, false);
+  });
+
+  it("uid-less nodes outside the path are ignored", () => {
+    const nodes = [file(`${ROOT}/a.bin`), file(`${ROOT}/b.bin`), noUid(file(`/my-files-other/z.bin`)), noUid(dir(`/photos/q`), ""), dir(`${ROOT}/e`)];
+    assert.deepEqual(paths(run(nodes)), [`${ROOT}/b.bin`, `${ROOT}/e`]);
+  });
+
+  it("the same uid on two nodes under the path refuses the plan", () => {
+    const r = run([file(`${ROOT}/a.bin`), file(`${ROOT}/b.bin`, 5000, { uid: uidOf(`${ROOT}/a.bin`) })]);
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /same uid/);
+  });
+
+  it("a child whose parentUid points to a missing node still keeps its folder non-empty (found by path)", () => {
+    const x = file(`${ROOT}/a/x.txt`, 3, { parentUid: "u:missing" });
+    assert.deepEqual(paths(run([dir(`${ROOT}/a`), x])), []);
+  });
+
+  it("a parentUid that is missing from the walk makes the node's share state unknown", () => {
+    // path parent exists and is unshared, but parentUid names a node we do not have
+    const a = file(`${ROOT}/d/a.bin`, 5000, { parentUid: "u:missing" });
+    const nodes = [dir(`${ROOT}/d`), a, file(`${ROOT}/b.bin`)];
+    assert.deepEqual(paths(run(nodes)), []);
+    assert.match(run(nodes).skipped[0].reason, /needs verify/);
+    // and the same for an empty folder
+    const nested = [dir(`${ROOT}/d`), dir(`${ROOT}/d/e`, { parentUid: "u:missing-parent" }), dir(`${ROOT}/f`)];
+    assert.deepEqual(paths(run(nested)), [`${ROOT}/f`]);
+  });
+
+  it("a parentUid that disagrees with the path makes the node unknown", () => {
+    const a = file(`${ROOT}/d/a.bin`, 5000, { parentUid: uidOf(`${ROOT}/other`) });
+    const nodes = [dir(`${ROOT}/d`), dir(`${ROOT}/other`), a, file(`${ROOT}/b.bin`)];
+    assert.deepEqual(paths(run(nodes)), []);
+  });
+});
+
 describe("duplicates (no download)", () => {
   it("keeps the oldest copy and lists the others with their keeper", () => {
     const nodes = [
@@ -440,6 +490,7 @@ function makeTree(r) {
     const parent = folders[Math.floor(r() * folders.length)];
     const name = r() < 0.07 ? ".git" : `dir${n++}`;
     const p = `${parent}/${name}`;
+    if (nodes.some((x) => x.path === p)) continue; // a drive never lists two siblings with one name
     const extra = {};
     flag(extra, p);
     nodes.push(dir(p, extra));

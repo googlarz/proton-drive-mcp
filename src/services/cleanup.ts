@@ -94,7 +94,12 @@ export function planCleanup(input: CleanupInput): CleanupPlan {
 
   const root = normRoot(input.rootPath);
   const inside = (p: string) => p !== root && (root === "/" ? p.startsWith("/") : p.startsWith(root + "/"));
-  const nodes = input.nodes.filter((n) => typeof n.uid === "string" && n.uid !== "");
+  // Fail closed: a node we cannot identify under the path could be the only child of a "empty" folder or a hidden group member.
+  const usable = (n: WalkNode) => typeof n.uid === "string" && n.uid !== "";
+  const under = input.nodes.filter((n) => typeof n.path === "string" && (n.path === root || inside(n.path)));
+  if (under.some((n) => !usable(n))) return refuse("the listing has an entry without a usable uid under the path; cleanup needs every entry identified");
+  if (new Set(under.map((n) => n.uid)).size !== under.length) return refuse("the listing has two entries with the same uid under the path; cleanup needs unique entries");
+  const nodes = input.nodes.filter(usable); // only entries outside the path can be uid-less here, and they are ignored below
   const byUid = new Map<string, WalkNode>();
   const byPath = new Map<string, WalkNode>();
   for (const n of nodes) { byUid.set(n.uid, n); byPath.set(n.path, n); }
@@ -116,8 +121,10 @@ export function planCleanup(input: CleanupInput): CleanupPlan {
       return s;
     }
     const pPath = parentPath(n.path);
-    const parent = (n.parentUid ? byUid.get(n.parentUid) : undefined) ?? byPath.get(pPath);
-    const above: Share = parent ? chainShare(parent, seen) : pPath === root ? rootBase : 1;
+    // parentUid, when given, must name a node we have AND agree with the path; the walk root's own uid is not in the listing.
+    const viaUid = n.parentUid ? byUid.get(n.parentUid) : undefined;
+    const parent = n.parentUid ? (viaUid && viaUid.path === pPath ? viaUid : undefined) : byPath.get(pPath);
+    const above: Share = parent ? chainShare(parent, seen) : pPath === root && (!n.parentUid || !viaUid) ? rootBase : 1;
     const s = Math.max(ownShare(n), above) as Share;
     shareMemo.set(n.uid, s);
     return s;
