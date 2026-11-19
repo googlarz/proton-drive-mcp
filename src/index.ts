@@ -1784,12 +1784,16 @@ export async function main() {
       }
     }
 
-    // One batch that trashes, moves or restores many items runs at a time, from plan to journal: a second apply waits and then plans on
-    // the state the first one left, so the same path is never sent to the CLI twice by two overlapping calls.
+    // One batch that trashes, moves or restores many items runs at a time, from plan to journal. A second apply that arrives meanwhile is
+    // refused at once (no wait, no dialog, no journal entry), so the same path is never sent to the CLI twice by two overlapping calls
+    // and a person is never asked about several overlapping batches.
     const applying = (["drive_cleanup", "drive_bulk_trash", "drive_bulk_move"].includes(name) && a.confirmed === true) || (name === "drive_undo" && a.action === "apply");
     let releaseApply: (() => void) | undefined;
     if (applying) {
-      try { releaseApply = await applyLock.acquire(callContext.getStore()?.signal); } catch (err) { return handleError(err); }
+      releaseApply = applyLock.tryAcquire();
+      if (!releaseApply) {
+        return refuse("approval_unavailable", `${name} was not run: another bulk apply (cleanup, undo, bulk trash or bulk move) is running. Nothing was changed. Try again when it finishes.`);
+      }
     }
     try {
       switch (name) {

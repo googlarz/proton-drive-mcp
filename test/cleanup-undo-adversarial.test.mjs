@@ -973,7 +973,10 @@ describe("(g) drive_undo: refusals and skips", CONC, () => {
     for (let i = 0; i < 12; i++) nodes.push(file(`k${i}`, "a", `o${i}.bin`, { size: 3000 + i, sha1: `P${i}`, mtime: OLD }), file(`c${i}`, "b", `c${i}.bin`, { size: 3000 + i, sha1: `P${i}`, mtime: NEW }));
     await withServer(o2(nodes, { replies: barrier(2) }), async (ctx) => {
       const args = { path: "/my-files", fixes: ["duplicates"], confirmed: true };
-      await Promise.all([ctx.call("drive_cleanup", args), ctx.call("drive_cleanup", args)]);
+      const rs = await Promise.all([ctx.call("drive_cleanup", args), ctx.call("drive_cleanup", args)]);
+      // the second concurrent apply is refused at once (or, if the first had already finished, plans on the new state and finds nothing)
+      assert.ok(rs.some((r) => r.isError !== true), "one of them ran");
+      for (const r of rs) if (r.isError) assert.match(text(r), /another bulk apply \(cleanup, undo, bulk trash or bulk move\) is running\. Nothing was changed/);
       const addressed = trashCalls(ctx).flatMap(argPaths);
       assert.equal(new Set(addressed).size, addressed.length, `a path was sent to trash twice: ${addressed}`);
       for (let i = 0; i < 12; i++) assert.equal(readNodes(ctx)[`k${i}`].trashTime, undefined, `keeper ${i}`);
@@ -1344,6 +1347,7 @@ describe("(g) drive_undo: a tampered journal never restores outside the roots an
       const [r1, r2] = await Promise.all([ctx.call("drive_undo", { action: "apply", id }), ctx.call("drive_undo", { action: "apply", id })]);
       assert.equal(readNodes(ctx).f1.trashTime, undefined);
       assert.ok(r1.isError !== true || r2.isError !== true, "one of them succeeds");
+      for (const r of [r1, r2]) if (r.isError) assert.match(text(r), /another bulk apply \(cleanup, undo, bulk trash or bulk move\) is running|already undone/, "the other is refused, not run twice");
       const addressed = restoreCalls(ctx).flatMap(argPaths);
       assert.equal(new Set(addressed).size, addressed.length, `restore addressed the same path twice: ${addressed}`);
       assert.equal(readJournal(ctx, id).status, "undone");

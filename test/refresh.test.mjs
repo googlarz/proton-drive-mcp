@@ -118,7 +118,16 @@ describe("incremental refresh: an entry listed without a uid (1.12.0 review fix)
 });
 
 describe("incremental refresh: which folders are listed", () => {
-  it("saves a listing time for every folder (not the excluded ones) in a version 2 file", async () => {
+  it("the file format version is 3 (1.11.0 reads 1 and 2 only, so it ignores a file that may hold the unidentified flag); 1 and 2 are still read, others are not", async () => {
+    await seed();
+    assert.equal(INDEX_VERSION, 3);
+    const f = readIndex();
+    assert.equal(f.version, 3);
+    for (const v of [1, 2]) { writeIndex({ ...f, version: v }); assert.ok(readIndex(), `version ${v} is still read`); }
+    for (const v of [0, 4]) { writeIndex({ ...f, version: v }); assert.equal(readIndex(), undefined, `version ${v} is not`); }
+  });
+
+  it("saves a listing time for every folder (not the excluded ones) in the current version file", async () => {
     await seed();
     const f = readIndex();
     assert.equal(f.version, INDEX_VERSION);
