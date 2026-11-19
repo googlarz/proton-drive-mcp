@@ -57,9 +57,9 @@ describe("showValueStrict", () => {
     assert.doesNotMatch(out, FORBIDDEN);
     assert.doesNotMatch(out, /[\u0080-\u009f]/);
     assert.match(out, /red/);
-    // whole sequences are removed, not just the ESC byte: no leftover SGR / OSC payload
-    assert.doesNotMatch(out, /\[31m|\[0m|title/);
-    assert.doesNotMatch(showValueStrict(`x${ESC}[2K${ESC}[1Ay`), /\[2K|\[1A/);
+    // only the ESC byte is escaped; the rest of a sequence stays visible (no raw ESC reaches the human)
+    assert.match(out, /\\x1b\[31mred/);
+    assert.equal(showValueStrict(`x${ESC}[2K${ESC}[1Ay`), "x\\x1b[2K\\x1b[1Ay");
   });
   it("makes the invisible visible instead of dropping it", () => {
     assert.equal(showValueStrict(`a${ch(0x202e)}b`), "a" + String.fromCharCode(92) + "u202eb");
