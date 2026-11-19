@@ -42,7 +42,7 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
    - "What is using my Drive space?" (`drive_usage`)
    - "Find duplicate files in my Drive." (`drive_find_duplicates`)
    - "Who has access to my shared folders?" (`drive_sharing_audit`)
-   - "Tidy up /Downloads, show me a plan first." (`drive_bulk_move` / `drive_bulk_trash` preview first, nothing changes until you confirm)
+   - "Tidy up /Downloads, show me a plan first." (`drive_bulk_move` / `drive_bulk_trash` preview first, nothing changes until you approve)
 4. Sensitive files? Start read-only and confined: `PROTON_DRIVE_MODE=readonly` and `PROTON_DRIVE_REMOTE_ROOTS=/my-files/<folder>`, plus an audit log ([guard layer](#guard-layer-opt-in), [secure setup](SECURITY.md#secure-deployment-profile)).
 5. Optional: `PROTON_DRIVE_INDEX=1` keeps a plaintext local copy of file names so searches are instant after a restart ([details](#persistent-index-opt-in)); `PROTON_DRIVE_TOOL_TIER=core` exposes a smaller tool set.
 
@@ -79,14 +79,14 @@ Ask: "Who has access to my shared folders?" and then "Which public links expire 
 - `drive_sharing_audit` lists public links (role, expiry, password), invitees and pending invitations, with risk flags such as `public-link-no-expiry`, `public-link-editor` and `external-invitee`.
 - `drive_share_expiry_report` lists public links with the time left, soonest first (`withinDays` sets what counts as soon).
 
-Both only read; they change nothing, and link URLs are left out of the results. Each checks at most 100 shared items, so on a big drive point it at one folder at a time. To act on a finding, `drive_share_remove_url` or `drive_share_revoke` change sharing; they ask for confirmation.
+Both only read; they change nothing, and link URLs are left out of the results. Each checks at most 100 shared items, so on a big drive point it at one folder at a time. To act on a finding, `drive_share_remove_url` or `drive_share_revoke` change sharing; the server asks you to approve each one ([Human approval](#human-approval-on-by-default)).
 
 ### Tidy a folder safely
 
 Ask: "Move all the PDFs in /Downloads into /Documents/Inbox. Show me the plan first."
 
 1. `drive_bulk_move` (or `drive_bulk_trash` for clean-up) without `confirmed` returns a plan and any problems and changes nothing.
-2. Read the plan. If it is right, say so, and Claude repeats the call with `confirmed=true`. It applies only if there are no problems. The server does not check the second call against the plan (there is no plan token) and `confirmed=true` is set by the model, so approving each tool call in your client is the real check ([threat model](THREAT_MODEL.md)).
+2. Read the plan. If it is right, say so, and Claude repeats the call with `confirmed=true`. That argument only switches from plan to apply; it is not your approval. Before anything moves, the server shows you the exact list (every path when there are 50 or fewer, otherwise counts per folder and the first 50) and asks you to approve it. It applies only if there are no problems, and only if the plan it computes after your approval is the same as the one you saw; if Drive changed in between, nothing is applied (`approval_changed`). If your client cannot show the dialog, the call is refused until you approve it in a terminal ([Human approval](#human-approval-on-by-default), [threat model](THREAT_MODEL.md)).
 3. Trash is reversible: `drive_restore` brings an item back (`drive_list_trash` shows what is there). `drive_empty_trash` and `drive_delete` are permanent, so do not ask for those during a tidy-up.
 
 Each call handles up to 200 items. For a first attempt on important data, use the [guard layer](#guard-layer-opt-in) (`PROTON_DRIVE_REMOTE_ROOTS` limits the folders Claude can touch).
@@ -100,7 +100,7 @@ New to this and want to stay cautious? See the [safe-use guide](docs/GUIDE.md).
 For syncing, backups and cron jobs, **use the official CLI directly**: it is simpler and that is what it is for. This project does not replace it; it needs it, and wraps it so an AI assistant can drive it. It is worth using when you want to work with your Drive by conversation:
 
 - **Things the CLI does not have** (it has no search, recursive listing, usage or content-reading commands, and Drive's end-to-end encryption rules out server-side search): `drive_search`, `drive_tree`, `drive_usage`, `drive_find_duplicates` (verified by sha256), `drive_sharing_audit`, `drive_read_content`, `drive_sync_plan`. They run locally on your computer, so encryption stays intact.
-- **Safe changes by an AI:** destructive or outward-facing actions need explicit confirmation, bulk move/trash is two steps (plan first, then apply), trash is reversible, and the duplicate finder never deletes anything. A bare CLI assumes you know exactly what you are doing.
+- **Safe changes by an AI:** destructive or outward-facing actions need your own approval, asked by the server and not by the assistant (a dialog in your client, or a command you run in a terminal); bulk move/trash is two steps (plan first, then apply), trash is reversible, and the duplicate finder never deletes anything. A bare CLI assumes you know exactly what you are doing.
 - **Rough edges smoothed over:** the CLI reports some per-item failures with exit code 0, returns lists in random order, and can fail with `database is locked` under parallel calls. The server checks per-item results, sorts and paginates lists, and retries read-only calls.
 
 What to expect: search matches names, sizes and dates, not the text of every file (you read one file at a time); the first walk of a large drive takes minutes unless you enable the opt-in [persistent index](#persistent-index-opt-in); and this is an independent project, not an official Proton product.
@@ -314,6 +314,16 @@ proton-drive-cli restore /my-files/old-draft.pdf       # restore from trash
 proton-drive-cli trash empty --confirm                  # permanently delete all trashed items
 ```
 
+### Approvals
+
+Used when your MCP client cannot show an approval dialog (see [Human approval](#human-approval-on-by-default)). These commands only read and write local files; they need no Proton session.
+
+```bash
+proton-drive-cli approvals          # pending and approved requests: code, tool, status, time left, first line
+proton-drive-cli approve K7Q2-M9XD  # shows the server's record, asks you to type 'yes' (interactive terminal only)
+proton-drive-cli deny K7Q2-M9XD     # discard a request
+```
+
 ### Search, analytics and cleanup
 `drive_search` · `drive_tree` · `drive_usage` · `drive_find_duplicates` · `drive_sharing_audit` · `drive_sync_plan` · `drive_bulk_move` · `drive_bulk_trash`
 
@@ -333,7 +343,7 @@ proton-drive-cli index clear                                                    
 - The first walk of a large drive can take minutes (measured about 21 s per 1,200 files at the default concurrency (12); about 25 s at concurrency 8). `drive_search`, `drive_tree` and `drive_usage` stop waiting after 25 s (`PROTON_DRIVE_WALK_BUDGET_MS`, 0 = never) and return what was listed so far with `partial: true`, `continuing: true` (the walk is still running) and a `note`; the same walk keeps running in the background, so repeating the call returns the full result from cache. `drive_find_duplicates`, `drive_sharing_audit` and `drive_sync_plan` always wait for the complete walk. Later calls reuse a 5-minute in-memory cache; `refresh` bypasses it. With the opt-in persistent index, a saved copy up to 24 h old can answer first (marked `stale: true`).
 - Walks skip `.git` and `node_modules` by default.
 - With `PROTON_DRIVE_INDEX=1`, results may come from a saved index (`stale: true` = served from the saved index, not a walk made now) while a refresh runs; repeat the call or pass `refresh: true` for a fresh read. On a huge drive `drive_refresh_index` refreshes the index in resumable slices. Off by default, see [Persistent index](#persistent-index-opt-in).
-- Read-only tools (`drive_search`, `drive_tree`, `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_share_expiry_report`, `drive_recent_changes`, `drive_sync_plan`) change nothing. `drive_bulk_move` and `drive_bulk_trash` are two-step: call without `confirmed` for the plan, then with `confirmed: true` to apply. Bulk trash is reversible with `drive_restore`.
+- Read-only tools (`drive_search`, `drive_tree`, `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_share_expiry_report`, `drive_recent_changes`, `drive_sync_plan`) change nothing. `drive_bulk_move` and `drive_bulk_trash` are two-step: call without `confirmed` for the plan, then with `confirmed: true` to apply; applying still needs your approval of the exact list. Bulk trash is reversible with `drive_restore`.
 - Duplicate detection uses the sha1 the uploader claimed, which is unverified. `verify: true` downloads the candidates and hashes them.
 - The sharing audit flags an invitee as external when the address is outside Proton domains, so Proton users on a custom domain are over-flagged.
 - Sizes are sums of file sizes, not your account quota.
@@ -454,7 +464,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 | Tool | Description | Key parameters |
 |------|-------------|----------------|
 | `drive_auth_status` | Check if authenticated (probes `/my-files` — no native status command) | — |
-| `drive_auth_logout` | Log out (clear session) ⚠️ | `confirmed: true` |
+| `drive_auth_logout` | Log out (clear session) ⚠️ | — |
 | `drive_version` | CLI and SDK version info | — |
 | `drive_list` | List files and folders at a path (paginated, default 200; `/` lists the roots) | `path`, `limit?`, `offset?` |
 | `drive_info` | Get metadata for one file/folder, including revision details (noise trimmed) | `path`, `verbose?` (raw CLI node) |
@@ -464,12 +474,12 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 | `drive_tree` | Folder overview: per-folder file counts and size totals (largest first), depth-limited, cached 5 min | `path?`, `depth?` (default 2, max 10), `limit?`, `foldersOnly?`, `refresh?` |
 | `drive_search` | Find files/folders under a path in one cached walk: name (substring/glob; a glob containing `/` matches the path relative to `path`), type, extension, MIME prefix, size, modified date; sortable, paginated. Reports `walk.complete` — false means the walk was cut short and matches may be missing | `query?`, `glob?`, `path?`, `type?`, `mediaType?`, `extensions?`, `minSize?`, `maxSize?`, `modifiedAfter?`, `modifiedBefore?`, `sort?`, `limit?` (default 50, max 500), `offset?`, `refresh?` |
 | `drive_mkdir` | Create a new empty folder | `path` |
-| `drive_upload` | Upload local file or folder | `localPath`, `remotePath`, `fileConflictStrategy?` (skip/create-new-revision/rename/replace), `folderConflictStrategy?` (skip/merge/rename/replace), `confirmed?` (**required for `replace`** — it trashes the existing remote item) |
-| `drive_download` | Download to local path | `remotePath`, `localPath`, `fileConflictStrategy?` (skip/rename/remove), `folderConflictStrategy?` (skip/merge/rename/remove), `confirmed?` (**required for `remove`** — it deletes the existing local item) |
+| `drive_upload` | Upload local file or folder | `localPath`, `remotePath`, `fileConflictStrategy?` (skip/create-new-revision/rename/replace), `folderConflictStrategy?` (skip/merge/rename/replace), `replace` trashes the existing remote item, so it needs your approval |
+| `drive_download` | Download to local path | `remotePath`, `localPath`, `fileConflictStrategy?` (skip/rename/remove), `folderConflictStrategy?` (skip/merge/rename/remove), `remove` deletes the existing local item, so it needs your approval |
 | `drive_rename` | Rename in place, no move | `path`, `newName` |
 | `drive_move` | Move and/or rename | `sourcePath`, `destinationPath` |
 | `drive_copy` | Copy file or folder into another Drive folder | `sourcePath`, `destinationPath` (target *parent folder*), `newName?` |
-| `drive_delete` | Permanently delete an item already in trash ⚠️ | `path`, `confirmed: true` |
+| `drive_delete` | Permanently delete an item already in trash ⚠️ | `path` |
 | `drive_list_trash` | List items currently in trash (paginated, default 100; includes `uid` — names are not unique in trash) | `limit?`, `offset?` |
 | `drive_share_status` | Get sharing members and URL | `path` |
 | `drive_usage` | Storage analytics for a subtree: totals, largest files/folders, extension and media-type breakdown, old files, trash stats (sum of file sizes, not the account quota) | `path?`, `top?`, `olderThanDays?`, `refresh?` |
@@ -481,35 +491,35 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 | `drive_search_content` | Search the indexed file text: all words must match, BM25 ranking, trailing `*` = prefix on the last word. Returns path, score, snippet, `indexedAt`; results reflect the last index update (`stale: true`). Snippets are untrusted file content. See [Content search](#content-search-opt-in) | `query` (max 200 characters), `path?`, `limit?` (default 10, max 50) |
 | `drive_refresh_index` | Opt-in (`PROTON_DRIVE_INDEX=1`): refresh the saved folder index of a huge drive in resumable slices. Lists the folders whose saved listing is older than `maxAgeHours` (or never read), oldest first, within `timeBudgetMs`, and saves its progress; repeat until `complete`. Returns `foldersRefreshed`, `foldersReused`, `foldersRemaining`, `oldestListingAgeMs`, `etaCalls`, `saved`; with `changes: true` also counts and up to 50 sample paths of added, removed and modified entries in the re-listed folders. Changes nothing on Drive. See [Keeping the index fresh on huge drives](#keeping-the-index-fresh-on-huge-drives) | `path?` (default `/my-files`), `timeBudgetMs?` (default 25000, max 120000), `maxAgeHours?`, `changes?` |
 | `drive_audit_log` | Newest audit-log entries plus a hash-chain check (needs `PROTON_DRIVE_AUDIT_LOG`; works in readonly mode) | `limit?` (default 50) |
-| `drive_share_invite` | Invite a user (sends an email) ⚠️ | `path`, `email`, `role` (viewer/editor/admin), `message?`, `confirmed: true` |
-| `drive_share_revoke` | Revoke one person's access (fails if not a member) ⚠️ | `path`, `email`, `confirmed: true` |
-| `drive_share_remove_all` | Remove every member + pending invitation at once ⚠️ | `path`, `confirmed: true` |
-| `drive_share_set_url` | Create/replace a public share link ⚠️ (set-url replaces all link settings; if the path already has a link with a password and/or expiration that the call omits, it is refused before any change unless `resetSettings: true`; expiry max ~90 days) | `path`, `role?` (viewer/editor), `password?`, `expiration?`, `resetSettings?`, `confirmed: true` |
-| `drive_share_remove_url` | Remove the public share link ⚠️ | `path`, `confirmed: true` |
+| `drive_share_invite` | Invite a user (sends an email) ⚠️ | `path`, `email`, `role` (viewer/editor/admin), `message?` |
+| `drive_share_revoke` | Revoke one person's access (fails if not a member) ⚠️ | `path`, `email` |
+| `drive_share_remove_all` | Remove every member + pending invitation at once ⚠️ | `path` |
+| `drive_share_set_url` | Create/replace a public share link ⚠️ (set-url replaces all link settings; if the path already has a link with a password and/or expiration that the call omits, it is refused before any change unless `resetSettings: true`; expiry max ~90 days) | `path`, `role?` (viewer/editor), `password?`, `expiration?`, `resetSettings?` |
+| `drive_share_remove_url` | Remove the public share link ⚠️ | `path` |
 | `drive_trash` | Move to trash | `path` |
 | `drive_sync_plan` | Read-only diff of a local folder vs a Drive folder (nothing transferred) | `localPath`, `drivePath`, `direction?` (up/down/both), `ignore?`, `compare?` (size-mtime/sha1), `limit?` |
-| `drive_bulk_move` | Move up to 200 items into an existing folder; without `confirmed` returns the plan and problems only | `sources`, `destinationFolder`, `confirmed?` (**required to apply**) |
-| `drive_bulk_trash` | Trash up to 200 items (recoverable); without `confirmed` returns the plan and problems only | `paths`, `confirmed?` (**required to apply**) |
+| `drive_bulk_move` | Move up to 200 items into an existing folder; without `confirmed` returns the plan and problems only | `sources`, `destinationFolder`, `confirmed?` (plan/apply switch: `true` applies, after you approve the list) |
+| `drive_bulk_trash` | Trash up to 200 items (recoverable); without `confirmed` returns the plan and problems only | `paths`, `confirmed?` (plan/apply switch: `true` applies, after you approve the list) |
 | `drive_restore` | Restore from trash | `path` |
-| `drive_empty_trash` | Permanently delete all trash ⚠️ | `confirmed: true` |
+| `drive_empty_trash` | Permanently delete all trash ⚠️ | — |
 | `drive_read_file` | Read text file from local sync folder | `path` |
-| `drive_write_file` | Write text file to local sync folder ⚠️ (overwriting an existing file needs confirmation; max 5 MB) | `path`, `content`, `confirmed?` |
+| `drive_write_file` | Write text file to local sync folder ⚠️ (overwriting an existing file needs your approval; max 5 MB) | `path`, `content` |
 | `drive_list_invitations` | List pending sharing invitations received | — |
-| `drive_invitation_accept` | Accept a pending invitation | `uid` (from `drive_list_invitations`) |
-| `drive_invitation_reject` | Reject a pending invitation ⚠️ | `uid` (from `drive_list_invitations`), `confirmed: true` |
-| `drive_share_leave` | Leave a shared folder shared with you ⚠️ | `path`, `confirmed: true` |
+| `drive_invitation_accept` | Accept a pending invitation ⚠️ (needs your approval: it opens a folder someone else controls) | `uid` (from `drive_list_invitations`) |
+| `drive_invitation_reject` | Reject a pending invitation ⚠️ | `uid` (from `drive_list_invitations`) |
+| `drive_share_leave` | Leave a shared folder shared with you ⚠️ | `path` |
 | `photos_list_albums` | List all Proton Photos albums | — |
 | `photos_create_album` | Create a new empty album | `name` |
 | `photos_update_album` | Rename an album or change its cover photo | `albumPath`, `name?`, `coverPhotoUid?` |
-| `photos_delete_album` | Delete an album ⚠️ | `albumPath`, `confirmed: true`, `force?`, `save?` |
+| `photos_delete_album` | Delete an album ⚠️ | `albumPath`, `force?`, `save?` |
 | `photos_list_album_photos` | List photos in an album (paginated, default 100) | `albumPath`, `loadDetails?`, `limit?`, `offset?` |
 | `photos_add_to_album` | Add a photo from your library to an album | `albumPath`, `photoPath` |
-| `photos_remove_from_album` | Remove a photo from an album (keeps it in library) ⚠️ | `albumPath`, `photoPath`, `confirmed: true` |
+| `photos_remove_from_album` | Remove a photo from an album (keeps it in library) ⚠️ | `albumPath`, `photoPath` |
 | `photos_list_timeline` | List photos in your full library timeline (paginated, default 50) | `loadDetails?`, `limit?`, `offset?` |
-| `photos_download` | Download photos to a local folder | `photoPaths`, `localFolder`, `conflictStrategy?` (skip/rename/remove), `confirmed?` (**required for `remove`**) |
+| `photos_download` | Download photos to a local folder | `photoPaths`, `localFolder`, `conflictStrategy?` (skip/rename/remove), `remove` needs your approval |
 | `photos_upload` | Upload local files directly into your Photos library | `localPaths`, `conflictStrategy?` (skip/rename) |
 
-> ⚠️ **Destructive and outward-facing tools** (deleting, sharing, public links, logout, and the `replace`/`remove` conflict strategies) require `confirmed: true`, and the CLI requires `--confirm` for the destructive ones. Describe the action to the user first, then pass `confirmed: true`. Tool arguments are validated against the published schema — unknown or mistyped arguments are rejected.
+> ⚠️ **Destructive and outward-facing tools** (deleting, sharing, public links, logout, accepting or rejecting invitations, the `replace`/`remove` conflict strategies, overwriting a sync-folder file, and anything that writes into `/shared-with-me`) need a human yes that the server asks for itself: a dialog in your client, or `proton-drive-cli approve <code>` in a terminal. See [Human approval](#human-approval-on-by-default). The `confirmed` argument is **deprecated**: it is still accepted on the tools that had it, but it no longer authorises anything (except as the plan/apply switch of the two bulk tools, and in `PROTON_DRIVE_APPROVAL=model`). The companion CLI still requires `--confirm` for the destructive commands. Tool arguments are validated against the published schema — unknown or mistyped arguments are rejected.
 
 ---
 
@@ -534,7 +544,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 - Error messages come from the CLI's own output; the command line (and therefore any `--password`) is never echoed back.
 - `drive_move` accepts a full destination path (parent + new name) for a familiar interface, but the underlying CLI only has separate `move` (change parent) and `rename` (change name) commands — this MCP translates automatically, issuing one or both as needed.
 - `drive_delete` only works on items already in `/trash` or `/photos-trash` — the CLI rejects live paths. Trash an item first with `drive_trash`, or use `drive_empty_trash` to clear everything at once.
-- If the client declares MCP elicitation (form mode), a refused `confirmed` gate is put to the human instead, and `drive_bulk_move` / `drive_bulk_trash` ask before applying a `confirmed: true` call. Only an explicit approval runs the call; decline, cancel, timeout or error keep the refusal, and after 5 declined prompts in a minute the server stops prompting. This only upgrades refusals and bulk applies: a compromised model that supplies `confirmed: true` on any other tool is **not** stopped by it. Clients without elicitation behave as before. Confirmation prompts need a client that supports elicitation (Claude Code CLI today; Claude Desktop is unverified).
+- Approval prompts use MCP elicitation (form mode), so the dialog needs a client that supports it. Claude Code CLI does; whether Claude Desktop shows the dialog for a local server is **not verified**. A client that cannot elicit gets the terminal route instead (`proton-drive-cli approve <code>`). See [Human approval](#human-approval-on-by-default). With `PROTON_DRIVE_APPROVAL=model` the old 1.10.1 behaviour applies: `confirmed: true` is enough, and an eliciting client is asked only when a call would otherwise be refused.
 - Walk-based tools (`drive_tree`, `drive_search`, `drive_usage`, `drive_find_duplicates`) read from a cache up to 5 minutes old (with the opt-in persistent index, up to 24 h old and marked `stale: true`; `drive_sharing_audit`, `drive_sync_plan` and `drive_find_duplicates` never serve the saved index, they only reuse saved folder listings read less than 5 minutes ago); changes made by other clients or processes are not seen until it expires or you pass `refresh: true`. The first walk of a large drive can take minutes (measured about 21 s per 1,200 files at the default concurrency (12)); `drive_search`, `drive_tree` and `drive_usage` return a `partial: true` result after 25 s and finish the walk in the background.
 - `drive_auth_status` has no native CLI equivalent — it probes by resolving `/my-files` and reports authenticated based on whether that succeeds.
 - Paths are always Drive-absolute: `/my-files/folder/file.pdf`. Relative paths are not supported.
@@ -548,13 +558,61 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 
 Left out of `core` (use `full`): permanent deletion (`drive_delete`, `drive_empty_trash`), `drive_auth_logout`, public links, invitations and invites, album management, `photos_upload` and the sync-file tools. A call to a hidden tool returns an error asking for `PROTON_DRIVE_TOOL_TIER=full`; no CLI command runs.
 
+### Human approval (on by default)
+
+Since 1.11.0 a destructive or outward-facing operation runs only after a person says yes to that exact operation. The server asks, not the assistant. The assistant's own `confirmed: true` is no longer an authorisation.
+
+**What needs approval** (default mode, `human`): `drive_auth_logout`, `drive_delete`, `drive_empty_trash`, `drive_share_invite`, `drive_share_revoke`, `drive_share_set_url`, `drive_share_remove_url`, `drive_share_remove_all`, `drive_share_leave`, `drive_invitation_accept`, `drive_invitation_reject`, `photos_delete_album`, `photos_remove_from_album`, applying `drive_bulk_move` or `drive_bulk_trash`, `drive_upload` with a `replace` strategy, `drive_download` / `photos_download` with a `remove` strategy, and `drive_write_file` over an existing file. Also gated: `drive_copy`, `drive_move`, `drive_mkdir`, `drive_rename`, `drive_upload`, `drive_write_file`, `drive_trash` and `drive_restore` when a path they read from or write to is under `/shared-with-me`, because that puts your data into, or changes, a folder someone else controls.
+
+**What does not** (reversible changes inside your own `/my-files`): a single `drive_trash`, `drive_restore`, `drive_move` / `drive_rename` / `drive_copy` / `drive_mkdir` inside `/my-files`, an upload that does not replace anything, album create / update / add, `photos_upload`, and `drive_write_file` to a new file. A loop of single `drive_trash` calls is therefore not stopped in the default mode; use `strict` (below) if that matters to you.
+
+**Two ways you approve**
+
+1. **A dialog in your client** (MCP elicitation). Shown for every gated call, whatever `confirmed` says. It counts as a yes only if you accept it with the approve box ticked; decline, cancel, a 120 s timeout or an error all mean no. After 5 declined or failed prompts within a minute the server stops asking for a while and refuses.
+2. **A command in a terminal**, when the client cannot show the dialog. The call is refused with `approval_required` and a code such as `K7Q2-M9XD`. Run `proton-drive-cli approve K7Q2-M9XD` yourself in a terminal: it shows the server's own record of the operation, and you type `yes`. Then ask the assistant to repeat the same call with the same arguments. The approval works once, for that exact operation, and lasts 5 minutes; a pending request expires after 10 minutes, and at most 20 are kept. `proton-drive-cli approvals` lists them and `proton-drive-cli deny <code>` discards one. `approve` refuses to run without an interactive terminal. The code only identifies the request; it is not a password and does not need to stay secret. Records live in a private folder (`0700`, files `0600`) next to the index folder, or in `PROTON_DRIVE_APPROVAL_DIR`; downloads cannot write into it, and the server refuses to use it inside `PROTON_DRIVE_SYNC_PATH`.
+
+**What you will see.** Every line is written by the server from validated values, not by the assistant. For example:
+
+```
+drive_share_invite: invite a person to a file or folder (affects other people or is visible outside your Drive)
+path: /my-files/Taxes/2025
+email: someone@example.org
+role: editor
+message: none
+```
+
+Passwords and message texts are never shown, only whether a password is set and how many characters a message has. Read the paths and the effect before you approve. How each client displays a long message is not verified.
+
+**Modes** (`PROTON_DRIVE_APPROVAL`, read once at startup):
+
+| Value | Behaviour |
+|---|---|
+| unset or `human` | The gated set above needs a human yes. |
+| `strict` | Every tool that changes Drive or the account needs a human yes, including single trash, restore, moves and uploads, and `drive_write_file` to a new file. |
+| `model` | The 1.10.1 behaviour: `confirmed: true` from the assistant is enough. Only for people who knowingly want that, for example scheduled jobs with nobody present. A warning is written to stderr at startup. |
+| anything else | Treated as `strict`, with a warning. |
+
+`PROTON_DRIVE_MODE=readonly` and `PROTON_DRIVE_REMOTE_ROOTS` are checked first: you are never asked about a call that would be refused anyway. In unattended runs (no one can answer a dialog) gated calls are refused; set `model` only if you accept the risk, ideally together with `PROTON_DRIVE_REMOTE_ROOTS` and the audit log.
+
+**What this does not cover.** The gate trusts your client's dialog and your own computer. It cannot stop a client that answers the dialog itself, an auto-answer you configure (for example a Claude Code `Elicitation` hook), anything that can write your files, or what you approve without reading. **If your client gives the assistant a shell** (Claude Code's Bash tool, a terminal MCP server and similar), the assistant can run the official `proton-drive` CLI directly, and nothing in this server can prevent that. Deny it in the client. For Claude Code, an example for `.claude/settings.json` (check the rule syntax and the result with `/permissions` for your version; this is a pattern match, not a complete barrier):
+
+```json
+{
+  "permissions": {
+    "deny": ["Bash(proton-drive *)", "Bash(*/proton-drive *)"]
+  }
+}
+```
+
+Also not covered: copying files into a folder under `/my-files` that is already shared or has a public link (use `PROTON_DRIVE_REMOTE_ROOTS`), and the terminal route on Windows, which is untested (the approvals folder assumes POSIX file renames). Details: [THREAT_MODEL.md](THREAT_MODEL.md).
+
 ### Guard layer (opt-in)
 
 Four environment variables limit what a model (or a prompt-injected one) can do with your Drive. All are read once at startup and are off by default. They apply to the MCP server only: the companion CLI (`proton-drive-cli`) is a tool you run yourself and is not restricted by them.
 
 - **`PROTON_DRIVE_MODE=readonly`** hides every tool that changes Drive or the account from `tools/list` and refuses it at call time (no CLI command runs). Hidden: `drive_upload`, `drive_mkdir`, `drive_rename`, `drive_move`, `drive_copy`, `drive_trash`, `drive_restore`, `drive_delete`, `drive_empty_trash`, `drive_bulk_move`, `drive_bulk_trash`, `drive_write_file`, `drive_auth_logout`, every `drive_share_*` that changes sharing (`invite`, `revoke`, `set_url`, `remove_url`, `remove_all`, `leave`), `drive_invitation_accept`/`reject`, and `photos_create_album`, `photos_update_album`, `photos_delete_album`, `photos_add_to_album`, `photos_remove_from_album`, `photos_upload`. Reads, analytics and downloads to local disk stay, except that the `remove` conflict strategies of `drive_download` and `photos_download` (they delete existing local files) are refused. An invalid value is treated as `readonly`. Prompts that name a hidden tool are not offered.
 - **`PROTON_DRIVE_REMOTE_ROOTS`** (list separated by `:` on macOS/Linux, `;` on Windows, e.g. `/my-files/Projects/X`) confines every Drive path argument to those folders. Paths are matched by whole segment and case-sensitively (`/my-files/AB` is not inside `/my-files/A`); `..` and empty (`//`) segments are refused. Paths include sources, destinations, bulk lists, walk roots (`drive_tree`, `drive_search`, `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_share_expiry_report`, `drive_recent_changes`, `drive_refresh_index`, `drive_sync_plan`, and the optional `path` of `drive_content_index` and `drive_search_content`, whose results outside the roots are dropped; their default `/my-files` is refused, so pass a `path`) and the sync-file tools. The root folder itself cannot be renamed, moved, trashed or left (`drive_share_leave`). `drive_usage` leaves out the account-wide trash summary. An entry that is not a clean absolute path is dropped with a warning; if none is left everything is refused. **These tools cannot be limited to a folder and are refused while roots are set:** `drive_auth_logout`, `drive_delete`, `drive_restore`, `drive_empty_trash`, `drive_list_trash` (trash is account-wide and addressed by name or UID), `drive_audit_log`, `drive_list_invitations`, `drive_invitation_accept`, `drive_invitation_reject`, and all ten `photos_*` tools. `drive_audit_log` is refused too, because its entries name paths outside the roots (read the file directly). `drive_auth_status` and `drive_version` touch no Drive content and keep working.
-- **`PROTON_DRIVE_AUDIT_LOG=/absolute/path/audit.jsonl`** appends one JSON line per tool call, refused calls included: `ts`, `seq`, `tool`, redacted `args`, `outcome` (`ok`, `error` or `refused`), a short `code` (`roots`, `readonly`, `tier`, `confirm`, `audit`, `snapshot`, `invalid`, `cli_error`, ...), `durationMs`, and `prev`/`hash`, a SHA-256 chain over the previous hash and the record. The file is created `0600` (its folder `0700` if missing). Passwords and message bodies are never written; for `drive_write_file` only the byte length of the content is, and arguments a tool does not declare are recorded as present, never by value. If the log cannot be written, tools that change Drive are refused (reads continue, with a warning on stderr). `drive_audit_log` returns the newest entries (default 50, full tier only, not available while roots are set) and `verification`: `{ok: true, entries, head}` or the first broken `seq`. The chain detects edited, inserted, reordered and mid-file removed lines, not removal of the newest lines: keep `head` somewhere else if you need that. Several servers can share one file (appends are serialized with a `<log>.lock` file; if it cannot be taken within a few seconds the write counts as failed). The server refuses to start when the log lies inside `PROTON_DRIVE_SYNC_PATH`. **An entry is written after the call finishes, so a crash or kill in the middle of an operation can leave a change that was never recorded.** The hash chain is only as trustworthy as the account that can write the file.
+- **`PROTON_DRIVE_AUDIT_LOG=/absolute/path/audit.jsonl`** appends one JSON line per tool call, refused calls included: `ts`, `seq`, `tool`, redacted `args`, `outcome` (`ok`, `error` or `refused`), a short `code` (`roots`, `readonly`, `tier`, `confirm`, `approval_required`, `approval_declined`, `approval_unavailable`, `approval_changed`, `audit`, `snapshot`, `invalid`, `cli_error`, ...), for approved calls an `approval` field (`channel`: `elicitation`, `cli` or `model`, a short operation hash, and the code for `cli`), `durationMs`, and `prev`/`hash`, a SHA-256 chain over the previous hash and the record. The file is created `0600` (its folder `0700` if missing). Passwords and message bodies are never written; for `drive_write_file` only the byte length of the content is, and arguments a tool does not declare are recorded as present, never by value. If the log cannot be written, tools that change Drive are refused (reads continue, with a warning on stderr). `drive_audit_log` returns the newest entries (default 50, full tier only, not available while roots are set) and `verification`: `{ok: true, entries, head}` or the first broken `seq`. The chain detects edited, inserted, reordered and mid-file removed lines, not removal of the newest lines: keep `head` somewhere else if you need that. Several servers can share one file (appends are serialized with a `<log>.lock` file; if it cannot be taken within a few seconds the write counts as failed). The server refuses to start when the log lies inside `PROTON_DRIVE_SYNC_PATH`. **An entry is written after the call finishes, so a crash or kill in the middle of an operation can leave a change that was never recorded.** The hash chain is only as trustworthy as the account that can write the file.
 - **`PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE=1`** keeps the previous version before an overwrite (the result carries `snapshot`), as `<same folder>/.versions/<name>.<UTC timestamp>`. `drive_write_file` overwrites the local sync copy, so it copies the existing **local** file inside the sync folder (the sync client uploads the copy; unsynced local edits and files never uploaded are preserved). `drive_upload` with `fileConflictStrategy: replace` copies the existing **remote** file. If the copy fails, or the remote state cannot be determined (for example the CLI is missing), the overwrite is refused. Replacing a folder is not versioned and is refused too: `drive_upload` of a folder with a `replace` strategy, or onto a remote folder, while snapshots are on. A file that does not exist yet has nothing to preserve. Snapshots are never pruned.
 
 ### Reading file contents
@@ -682,6 +740,8 @@ Every tool group was live-tested on 2026-09-28 against a real Proton account, **
 | `PROTON_DRIVE_MODE` | Optional | `full` (default) or `readonly`: hide and refuse every tool that changes Drive or the account. An unknown value is treated as `readonly`, with a warning. See [Guard layer](#guard-layer-opt-in). |
 | `PROTON_DRIVE_REMOTE_ROOTS` | Optional | Drive folders (separated by `:`, or `;` on Windows) that every remote path argument must stay inside, e.g. `/my-files/Projects/X`. Tools that cannot be limited to a folder are refused while it is set. See [Guard layer](#guard-layer-opt-in). |
 | `PROTON_DRIVE_AUDIT_LOG` | Optional | Absolute path of an append-only, hash-chained JSONL audit log (`0600`). If it cannot be written, tools that change Drive are refused. Read it with `drive_audit_log`. See [Guard layer](#guard-layer-opt-in). |
+| `PROTON_DRIVE_APPROVAL` | Optional | `human` (default), `strict` or `model`: who may approve destructive and outward-facing operations. `strict` gates every tool that changes Drive; `model` restores the 1.10.1 behaviour where the assistant's `confirmed: true` is enough (warning at startup). An unknown value is treated as `strict`, with a warning. See [Human approval](#human-approval-on-by-default). |
+| `PROTON_DRIVE_APPROVAL_DIR` | Optional | Folder for terminal approvals (default: `approvals` next to the index folder, `~/Library/Caches/proton-drive-mcp/approvals` on macOS, `$XDG_CACHE_HOME` or `~/.cache` elsewhere). Created `0700`; the server refuses to use it inside `PROTON_DRIVE_SYNC_PATH`, and downloads cannot write into it. |
 | `PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE` | Optional | `1` to copy the existing file to `.versions/<name>.<timestamp>` in its folder before `drive_write_file` (local sync copy) or `drive_upload` (`replace`, remote copy) overwrites it; the overwrite is refused if the copy fails. Replacing a folder is refused. Off by default. See [Guard layer](#guard-layer-opt-in). |
 
 ---
