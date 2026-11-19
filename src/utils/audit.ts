@@ -12,6 +12,8 @@ export interface AuditEntry {
   args: Record<string, unknown>;
   outcome: "ok" | "error" | "refused";
   code?: string;
+  /** Present on `ok` entries of operations a human (or, in model mode, the assistant's own confirmed=true) approved. `op` is the first 16 hex of the operation hash. Entries from before 1.11.0 have none. */
+  approval?: { channel: "elicitation" | "cli" | "model"; op: string; code?: string };
   durationMs: number;
   prev: string;
   hash: string;
@@ -171,7 +173,7 @@ export class AuditLog {
   }
 
   /** The tail is re-read under a lock on every append so several server processes sharing one file keep a single chain. Throws on failure. */
-  append(rec: { tool: string; args: Record<string, unknown>; outcome: AuditEntry["outcome"]; code?: string; durationMs: number }): void {
+  append(rec: { tool: string; args: Record<string, unknown>; outcome: AuditEntry["outcome"]; code?: string; approval?: AuditEntry["approval"]; durationMs: number }): void {
     const fd = this.open();
     try {
       const release = this.lock();

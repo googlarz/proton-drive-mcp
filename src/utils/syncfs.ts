@@ -159,10 +159,20 @@ export async function readSyncFile(syncRoot: string, remotePath: string): Promis
   }
 }
 
+/** writeSyncFile with `exclusive` found the file already there; nothing was written. */
+export class SyncFileExistsError extends Error {
+  constructor(remotePath: string) {
+    super(`${remotePath} already exists`);
+    this.name = "SyncFileExistsError";
+  }
+}
+
+/** `exclusive`: create only (O_EXCL); throws SyncFileExistsError instead of overwriting a file that appeared meanwhile. */
 export async function writeSyncFile(
   syncRoot: string,
   remotePath: string,
-  content: string
+  content: string,
+  opts: { exclusive?: boolean } = {}
 ): Promise<void> {
   const bytes = Buffer.byteLength(content, "utf8");
   if (bytes > WRITE_LIMIT) {
@@ -194,11 +204,17 @@ export async function writeSyncFile(
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
 
-  const fh = await open(
-    target,
-    fsc.O_WRONLY | fsc.O_CREAT | fsc.O_TRUNC | NOFOLLOW,
-    0o644
-  );
+  let fh;
+  try {
+    fh = await open(
+      target,
+      fsc.O_WRONLY | fsc.O_CREAT | (opts.exclusive ? fsc.O_EXCL : fsc.O_TRUNC) | NOFOLLOW,
+      0o644
+    );
+  } catch (e) {
+    if (opts.exclusive && (e as NodeJS.ErrnoException).code === "EEXIST") throw new SyncFileExistsError(remotePath);
+    throw e;
+  }
   try {
     if (!(await fh.stat()).isFile()) {
       throw new Error(`${remotePath} is not a regular file.`);

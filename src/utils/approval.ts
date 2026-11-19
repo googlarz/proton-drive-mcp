@@ -12,8 +12,13 @@ export type FieldValue = string | number | boolean | string[] | null;
 export interface Operation {
   tool: string;
   effect: Effect;
-  /** Validated values with defaults applied. Never put `confirmed` here. Secrets (password, message, content) may be passed raw: they are hashed but never rendered. */
+  /**
+   * Validated values with defaults applied. Never put `confirmed` here. Secrets (password, message, content) should be passed
+   * as sha256 digests under a key ending in "Digest" (hashed, never rendered); a raw secret under its own name is still never rendered.
+   */
   fields: Record<string, FieldValue>;
+  /** What the human sees in place of the secrets: `password: true|false`, `message: <characters>`, `content: <bytes>`. NOT hashed; derived from the same validated values as `fields`. */
+  display?: Record<string, FieldValue>;
 }
 
 /** sha256 hex of the canonical (sorted-key) JSON of the operation: stable under key order, different for any changed field. */
@@ -90,15 +95,21 @@ function renderList(key: string, items: string[]): string[] {
   ];
 }
 
+// Readable labels for a few boolean fields; every other key is shown as it is.
+const LABELS: Record<string, string> = { replacesExistingLink: "replaces an existing link", overwritesExisting: "overwrites an existing file" };
+
 function renderField(key: string, v: FieldValue): string[] {
   if (key === "password") return [`password: ${v === true || (typeof v === "string" && v.length > 0) ? "set" : "not set"}`];
-  if (key === "message") return [`message: ${typeof v === "string" && v.length > 0 ? `${[...v].length} characters` : "none"}`];
+  if (key === "message") {
+    if (typeof v === "number") return [`message: ${v > 0 ? `${v} characters` : "none"}`];
+    return [`message: ${typeof v === "string" && v.length > 0 ? `${[...v].length} characters` : "none"}`];
+  }
   if (key === "content") {
     if (typeof v === "string") return [`content: ${Buffer.byteLength(v, "utf8")} bytes (sha256 ${createHash("sha256").update(v).digest("hex").slice(0, 12)})`];
     return [`content: ${typeof v === "number" ? `${v} bytes` : "none"}`];
   }
   if (v === null) return [`${key}: none`];
-  if (typeof v === "boolean") return [`${key}: ${v ? "yes" : "no"}`];
+  if (typeof v === "boolean") return [`${LABELS[key] ?? key}: ${v ? "yes" : "no"}`];
   if (typeof v === "number") return [`${key}: ${Number.isFinite(v) ? v : "invalid"}`];
   if (Array.isArray(v)) return renderList(key, v);
   return [`${key}: ${showValueStrict(v)}`];
@@ -109,11 +120,15 @@ export function renderOperation(op: Operation): string {
   const title = TOOL_TITLES[op.tool];
   if (title === undefined) throw new Error(`approval: no prompt text for tool ${showValueStrict(op.tool)}`);
   if (!(op.effect in EFFECT_LABEL)) throw new Error(`approval: unknown effect ${showValueStrict(op.effect)}`);
-  const keys = Object.keys(op.fields).filter((k) => op.fields[k] !== undefined);
+  // Digest fields are hashed but not shown; display fields are shown but not hashed. A key present in both is shown from `display`.
+  const shown: Record<string, FieldValue> = {};
+  for (const [k, v] of Object.entries(op.fields)) if (v !== undefined && !k.endsWith("Digest")) shown[k] = v;
+  for (const [k, v] of Object.entries(op.display ?? {})) if (v !== undefined) shown[k] = v;
+  const keys = Object.keys(shown);
   for (const k of keys) if (!KEY_OK.test(k)) throw new Error(`approval: invalid field name ${showValueStrict(k)}`);
   const rank = (k: string) => { const i = FIELD_ORDER.indexOf(k); return i < 0 ? FIELD_ORDER.length : i; };
   keys.sort((x, y) => rank(x) - rank(y) || (x < y ? -1 : x > y ? 1 : 0));
-  return [`${op.tool}: ${title} (${EFFECT_LABEL[op.effect]})`, ...keys.flatMap((k) => renderField(k, op.fields[k]))].join("\n");
+  return [`${op.tool}: ${title} (${EFFECT_LABEL[op.effect]})`, ...keys.flatMap((k) => renderField(k, shown[k]))].join("\n");
 }
 
 // ---- Mode -------------------------------------------------------------------------------------------------------
@@ -149,8 +164,8 @@ const ALWAYS = new Set([
   "photos_delete_album", "photos_remove_from_album",
 ]);
 const BULK = new Set(["drive_bulk_move", "drive_bulk_trash"]);
-// Outward when the resulting path is under /shared-with-me (drive_bulk_move and drive_upload are handled below as well).
-const SHARED_DEST = new Set(["drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_bulk_move", "drive_upload"]);
+// Outward when the resulting path is under /shared-with-me.
+const SHARED_DEST = new Set(["drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_bulk_move", "drive_upload", "drive_write_file"]);
 const DEST_ARGS = ["destinationPath", "destinationFolder", "remotePath", "path"];
 
 export interface GateContext {
@@ -164,7 +179,11 @@ export interface GateContext {
   mutatingTools?: ReadonlySet<string>;
 }
 
-const underShared = (p: string) => { const l = p.toLowerCase(); return l === "/shared-with-me" || l.startsWith("/shared-with-me/"); };
+/** True when the first path segment is shared-with-me after dropping empty and "." segments (so `//shared-with-me/x`, `/./Shared-With-Me/x` count) and ignoring case. */
+export function underShared(p: string): boolean {
+  const first = p.split("/").find((seg) => seg !== "" && seg !== ".");
+  return first !== undefined && first.toLowerCase() === "shared-with-me";
+}
 
 /** Whether this call must pass ApprovalGate.require. In model mode always false: the legacy confirmed=true path stays in force. */
 export function requiresApproval(tool: string, args: Record<string, unknown>, mode: ApprovalMode, ctx: GateContext = {}): boolean {

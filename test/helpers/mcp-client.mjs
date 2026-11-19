@@ -53,15 +53,19 @@ export const readPids = (file) => readJsonLines(file);
 /** Base env for a server/CLI process talking to the fake binary. */
 export function fakeEnv(mode, sandbox, extra = {}) {
   const env = { ...process.env };
-  for (const k of Object.keys(env)) if (k.startsWith("FAKE_") || k === "PROTON_DRIVE_SYNC_PATH" || k.startsWith("PROTON_DRIVE_INDEX") || k.startsWith("PROTON_DRIVE_CONTENT_INDEX") || k === "PROTON_DRIVE_KEYCHAIN_SERVICE" || k === "PROTON_DRIVE_LOCAL_ROOT" || /^PROTON_DRIVE_(MODE|REMOTE_ROOTS|AUDIT_LOG|SNAPSHOT_BEFORE_OVERWRITE)$/.test(k)) delete env[k];
-  return {
+  for (const k of Object.keys(env)) if (k.startsWith("FAKE_") || k === "PROTON_DRIVE_SYNC_PATH" || k.startsWith("PROTON_DRIVE_INDEX") || k.startsWith("PROTON_DRIVE_CONTENT_INDEX") || k === "PROTON_DRIVE_KEYCHAIN_SERVICE" || k === "PROTON_DRIVE_LOCAL_ROOT" || /^PROTON_DRIVE_(MODE|REMOTE_ROOTS|AUDIT_LOG|SNAPSHOT_BEFORE_OVERWRITE|APPROVAL|APPROVAL_DIR)$/.test(k)) delete env[k];
+  const out = {
     ...env,
     PROTON_DRIVE_BIN: FAKE_CLI,
+    // The suites written for 1.10.1 rely on confirmed=true being enough; the approval suites set the mode they test (null = leave it unset).
+    PROTON_DRIVE_APPROVAL: "model",
     FAKE_MODE: mode,
     FAKE_ARGV_LOG: sandbox.argvLog,
     FAKE_PIDFILE: sandbox.pidFile,
     ...extra,
   };
+  if (out.PROTON_DRIVE_APPROVAL === null) delete out.PROTON_DRIVE_APPROVAL;
+  return out;
 }
 
 /**
