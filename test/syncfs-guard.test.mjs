@@ -402,7 +402,8 @@ describe("local path guard: case, start-up files, nested upload entries, write t
     await mkdir(join(t, "logs"), { recursive: true });
     process.env.PROTON_DRIVE_AUDIT_LOG = join(t, "logs", "audit.jsonl");
     assert.throws(() => validateDownloadTarget(t, ["/my-files/logs"]), /audit log/);
-    assert.throws(() => validateDownloadTarget(join(t, "logs"), ["/my-files/x"]), /audit log/);
+    assert.throws(() => validateDownloadTarget(join(t, "logs"), ["/my-files/audit.jsonl"]), /audit log/);
+    assert.throws(() => validateDownloadTarget(join(t, "logs"), ["/my-files/audit.jsonl.lock"]), /audit log/);
     assert.throws(() => validateDownloadTarget(base, ["/my-files/t"]), /audit log/);
     assert.equal(validateDownloadTarget(join(base, "elsewhere"), ["/my-files/logs"]), join(base, "elsewhere"));
     delete process.env.PROTON_DRIVE_AUDIT_LOG;
@@ -412,14 +413,35 @@ describe("local path guard: case, start-up files, nested upload entries, write t
     await mkdir(join(sync, "Plain"), { recursive: true });
     process.env.PROTON_DRIVE_SYNC_PATH = sync;
     assert.throws(() => validateDownloadTarget(sync, ["/my-files/Docs"]), /\.versions/);
-    assert.throws(() => validateDownloadTarget(join(sync, "Docs"), ["/my-files/a.txt"]), /\.versions/);
     assert.throws(() => validateDownloadTarget(base, ["/my-files/sync2"]), /\.versions/);
     assert.throws(() => validateDownloadTarget(join(base, "sync2", "Docs"), ["/my-files/.versions"]), /\.versions/);
     assert.equal(validateDownloadTarget(join(sync, "Plain"), ["/my-files/a.txt"]), join(sync, "Plain"));
   });
 
+  it("an ordinary download is not refused only because the folder holds, or sits above, the log or a .versions folder", async () => {
+    const h = join(base, "home3");
+    await mkdir(join(h, "Proton", "Docs", ".versions"), { recursive: true });
+    await mkdir(join(h, "logs"), { recursive: true });
+    process.env.HOME = h;
+    process.env.PROTON_DRIVE_SYNC_PATH = join(h, "Proton");
+    process.env.PROTON_DRIVE_AUDIT_LOG = join(h, "logs", "audit.jsonl");
+    // a.txt into $HOME (the sync folder and the log are below it), into the sync root (a .versions exists below it) and into logs/
+    assert.equal(validateDownloadTarget(h, ["/my-files/a.txt"]), h);
+    assert.equal(validateDownloadTarget(join(h, "Proton"), ["/my-files/a.txt"]), join(h, "Proton"));
+    assert.equal(validateDownloadTarget(join(h, "Proton", "Docs"), ["/my-files/a.txt"]), join(h, "Proton", "Docs"));
+    assert.equal(validateDownloadTarget(join(h, "logs"), ["/my-files/other.txt"]), join(h, "logs"));
+    // but a remote folder Docs into the sync root lands on the local Docs/.versions, and a folder named like the log's folder on logs/
+    assert.throws(() => validateDownloadTarget(join(h, "Proton"), ["/my-files/Docs"]), /\.versions/);
+    assert.throws(() => validateDownloadTarget(h, ["/my-files/logs"]), /audit log/);
+    assert.throws(() => validateDownloadTarget(h, ["/my-files/Proton"]), /\.versions/);
+  });
+
+  it("a remote path without an item name is refused", () => {
+    assert.throws(() => validateDownloadTarget(join(base, "any"), ["/"]), /no item name/);
+  });
+
   describe("folder upload: credential trees and names", () => {
-    for (const rel of [".aws/credentials", ".ssh/authorized_keys", ".gnupg/pubring.kbx", ".kube/config", ".docker/config.json", "gcloud/creds.db", "deep/er/.netrc", "x/.npmrc", ".pgpass", "k/id_ecdsa", "k/id_dsa.pub", ".git-credentials"]) {
+    for (const rel of [".aws/credentials", ".ssh/authorized_keys", ".gnupg/pubring.kbx", ".kube/config", ".docker/config.json", ".config/gcloud/creds.db", "deep/er/.netrc", "x/.npmrc", ".pgpass", "k/id_ecdsa", "k/id_dsa.pub", ".git-credentials"]) {
       it(`rejects a copied ${rel}`, async () => {
         const dir = join(base, "cred-" + rel.replace(/\W/g, "_"));
         await mkdir(join(dir, rel, ".."), { recursive: true });
@@ -427,6 +449,19 @@ describe("local path guard: case, start-up files, nested upload entries, write t
         assert.throws(() => assertLocalPathAllowed(dir, { scan: true, upload: true }), /protected or secret file/);
       });
     }
+    it("allows ordinary project folders named .docker, .kube or gcloud, and a .config with other tools", async () => {
+      const dir = join(base, "proj-ok");
+      await mkdir(join(dir, ".docker", "php"), { recursive: true });
+      await mkdir(join(dir, ".kube"), { recursive: true });
+      await mkdir(join(dir, "deploy", "gcloud"), { recursive: true });
+      await mkdir(join(dir, ".config", "git"), { recursive: true });
+      await writeFile(join(dir, ".docker", "php", "Dockerfile"), "FROM php");
+      await writeFile(join(dir, ".kube", "kustomization.yaml"), "x");
+      await writeFile(join(dir, "deploy", "gcloud", "main.tf"), "x");
+      await writeFile(join(dir, ".config", "git", "ignore"), "x");
+      assertLocalPathAllowed(dir, { scan: true, upload: true });
+    });
+
     it("also rejects an empty secret folder, and a hardlink named like a secret file", async () => {
       const dir = join(base, "cred-empty");
       await mkdir(join(dir, "x", ".ssh"), { recursive: true });

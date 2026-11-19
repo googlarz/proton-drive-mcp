@@ -36,8 +36,10 @@ const NAME_DENY = [
   /^\.env(\..*)?$/, /^id_rsa/, /^id_ed25519/, /^id_ecdsa/, /^id_dsa/, /\.pem$/, /\.p12$/, /\.pfx$/, /\.keychain/,
   /^\.netrc$/, /^\.npmrc$/, /^\.pgpass$/, /^\.git-credentials$/,
 ];
-// Folders that hold credentials wherever they sit: a copied ~/.ssh or ~/.aws inside an upload folder is still a credential tree.
-const SECRET_DIR_NAMES = new Set([".ssh", ".aws", ".gnupg", ".kube", ".docker", "gcloud"]);
+// Folders that hold nothing but credentials wherever they sit: a copied ~/.ssh inside an upload folder is a credential tree.
+const SECRET_DIR_NAMES = new Set([".ssh", ".aws", ".gnupg"]);
+// Ordinary folders of tools that also keep one credential file in them: refuse that file (or folder), not the whole folder.
+const SECRET_UNDER = new Map<string, string[]>([[".docker", ["config.json"]], [".kube", ["config"]], [".config", ["gcloud"]]]);
 
 // macOS and Windows file systems are case-insensitive by default: ~/.SSH is ~/.ssh there, so the comparison must be too.
 const fold = (p: string): string => (process.platform === "darwin" || process.platform === "win32" ? p.toLowerCase() : p);
@@ -120,14 +122,17 @@ function isDeniedEntry(denied: Set<string>, name: string, real: string, lexical:
 }
 
 /**
- * Walks a folder that is about to be uploaded: no entry may be a secret-file name or sit in a protected location, and
- * no symlink may lead out of the folder (the upload tool would read through it). `realRoot` is already symlink-free.
+ * Walks a folder that is about to be uploaded: no entry may have a secret name (or be a credential file inside a tool
+ * folder such as .docker/config.json), and no symlink may lead out of the folder (the upload tool would read through
+ * it). Protected locations inside the folder were already refused by the caller, so entries are only checked by name.
+ * `realRoot` is already symlink-free.
  */
-function assertTreeAllowed(realRoot: string, denied: Set<string> | null, label: string): void {
+function assertTreeAllowed(realRoot: string, checkNames: boolean, label: string): void {
   const stack = [realRoot];
   let seen = 0;
   while (stack.length) {
     const dir = stack.pop() as string;
+    const parentName = fold(basename(dir));
     let entries;
     try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
     for (const e of entries) {
@@ -141,7 +146,8 @@ function assertTreeAllowed(realRoot: string, denied: Set<string> | null, label: 
         if (!isInside(realRoot, target)) throw new Error(`local folder contains a symlink that points outside it and cannot be uploaded: ${rel} in ${label}`);
         continue;
       }
-      if (denied && (isDeniedEntry(denied, e.name, full, full) || (e.isDirectory() && SECRET_DIR_NAMES.has(e.name.toLowerCase())))) {
+      const lower = fold(e.name);
+      if (checkNames && (nameDenied(e.name) || (e.isDirectory() && SECRET_DIR_NAMES.has(lower)) || SECRET_UNDER.get(parentName)?.includes(lower))) {
         throw new Error(`local folder contains a protected or secret file and cannot be uploaded: ${rel} in ${label} (set PROTON_DRIVE_ALLOW_SENSITIVE_PATHS=1 to disable this check)`);
       }
       if (e.isDirectory()) stack.push(full);
@@ -149,7 +155,7 @@ function assertTreeAllowed(realRoot: string, denied: Set<string> | null, label: 
   }
 }
 
-/** True when a `.versions` folder exists anywhere under `dir`; also true when the walk gets too big to finish (fail closed). */
+/** True when a `.versions` folder exists anywhere under `dir`. Throws when the folder is too big to finish checking (fail closed). */
 function hasVersionsDir(dir: string): boolean {
   const stack = [dir];
   let seen = 0;
@@ -158,7 +164,7 @@ function hasVersionsDir(dir: string): boolean {
     let entries;
     try { entries = readdirSync(d, { withFileTypes: true }); } catch { continue; }
     for (const e of entries) {
-      if (++seen > MAX_TREE_ENTRIES) return true;
+      if (++seen > MAX_TREE_ENTRIES) throw new Error(`local folder has more than ${MAX_TREE_ENTRIES} entries, too many to check for .versions snapshot folders: ${dir}`);
       if (!e.isDirectory()) continue;
       if (e.name.toLowerCase() === ".versions") return true;
       stack.push(join(d, e.name));
@@ -168,26 +174,28 @@ function hasVersionsDir(dir: string): boolean {
 }
 
 /**
- * The audit log and the sync folder's .versions snapshots must not be reachable through a local write destination.
- * `contains: true` (a download target, where the CLI writes below the path) also refuses a path that holds them.
+ * The audit log and the sync folder's .versions snapshots must not be reachable through a local write destination:
+ * the path may not be, or lie inside, one of them. `contains: true` is for the path an item will be written to
+ * (download folder + remote name): the CLI writes everything below it, so it may not hold them either.
  */
 function assertNotWriteProtected(lexical: string, real: string, absPath: string, contains: boolean): void {
   const log = process.env["PROTON_DRIVE_AUDIT_LOG"];
   if (log && isAbsolute(log)) {
     for (const f of [log, log + ".lock"]) {
       const rf = realResolve(f);
-      if (isInside(rf, real) || isInside(rf, lexical) || (contains && (isInside(real, rf) || isInside(lexical, rf)))) {
-        throw new Error(`local path is, or contains, the audit log and cannot be written: ${absPath}`);
-      }
+      if (isInside(rf, real) || isInside(rf, lexical)) throw new Error(`local path is the audit log and cannot be written: ${absPath}`);
+      if (contains && (isInside(real, rf) || isInside(lexical, rf))) throw new Error(`the item would be written over a folder that holds the audit log, which cannot be written: ${absPath}`);
     }
   }
   const sync = process.env["PROTON_DRIVE_SYNC_PATH"];
   if (sync && isAbsolute(sync)) {
     const syncReal = realResolve(sync);
     const inSync = isInside(syncReal, real);
-    if ((inSync && fold(relative(syncReal, real)).split(sep).includes(".versions")) ||
-        (contains && ((isInside(real, syncReal) && !inSync) || (inSync && isDirectory(real) && hasVersionsDir(real))))) {
-      throw new Error(`local path is, or contains, a .versions snapshot folder and cannot be written: ${absPath}`);
+    if (inSync && fold(relative(syncReal, real)).split(sep).includes(".versions")) {
+      throw new Error(`local path is inside a .versions snapshot folder and cannot be written: ${absPath}`);
+    }
+    if (contains && ((isInside(real, syncReal) && !inSync) || (inSync && isDirectory(real) && hasVersionsDir(real)))) {
+      throw new Error(`the item would be written over a folder that holds a .versions snapshot folder, which cannot be written: ${absPath}`);
     }
   }
 }
@@ -197,7 +205,7 @@ function assertNotWriteProtected(lexical: string, real: string, absPath: string,
  * not contain a protected location either. `upload: true` (with `scan`) is for a folder that is handed to the CLI
  * as a whole: it is checked entry by entry (symlinks out of it, secret-file and secret-folder names). `ancestors: true` is only
  * the "contains a protected location" part, for write targets (a downloaded folder named like a parent of a protected
- * location). `writeTarget: true` also refuses a path that holds the audit log or a `.versions` folder of the sync folder.
+ * location). `writeTarget: true` (for the path an item is written to) also refuses a path that holds the audit log or a `.versions` folder of the sync folder.
  */
 export function assertLocalPathAllowed(absPath: string, opts: { scan?: boolean; ancestors?: boolean; upload?: boolean; writeTarget?: boolean } = {}): void {
   const lexical = resolve(absPath);
@@ -212,7 +220,7 @@ export function assertLocalPathAllowed(absPath: string, opts: { scan?: boolean; 
         `local path is outside PROTON_DRIVE_LOCAL_ROOT: ${absPath}`
       );
     }
-    if (opts.upload && isDirectory(real)) assertTreeAllowed(real, null, absPath);
+    if (opts.upload && isDirectory(real)) assertTreeAllowed(real, false, absPath);
     return;
   }
 
@@ -245,7 +253,7 @@ export function assertLocalPathAllowed(absPath: string, opts: { scan?: boolean; 
       }
     }
   }
-  if (opts.upload && isDirectory(real)) assertTreeAllowed(real, denied, absPath);
+  if (opts.upload && isDirectory(real)) assertTreeAllowed(real, true, absPath);
 }
 
 function isDirectory(p: string): boolean {

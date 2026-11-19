@@ -105,10 +105,11 @@ export function validateLocalPath(path: unknown, opts: { scan?: boolean; ancesto
  * would otherwise land in a protected place through an allowed folder.
  */
 export function validateDownloadTarget(folder: unknown, remotePaths: string[]): string {
-  const dir = validateLocalPath(folder, { writeTarget: true });
+  const dir = validateLocalPath(folder);
   for (const remote of remotePaths) {
     const name = remote.slice(remote.lastIndexOf("/") + 1);
-    if (name) validateLocalPath(join(dir, name), { ancestors: true, writeTarget: true });
+    if (!name) throw new Error(`remote path has no item name to download: ${remote}`);
+    validateLocalPath(join(dir, name), { ancestors: true, writeTarget: true });
   }
   return dir;
 }
