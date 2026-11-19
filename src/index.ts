@@ -13,7 +13,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import {
   DriveService,
@@ -1584,6 +1584,13 @@ export async function main() {
       return approvalStore;
     },
     get storeProblem() { return approvalStoreProblem; },
+    // Only an existing approvals folder: cleanup after a dialog decision must not create the folder for a client whose dialog works.
+    get storeIfPresent() {
+      if (apMode === "model") return undefined;
+      if (approvalStore) return approvalStore;
+      try { if (!existsSync(resolveApprovalDir(process.env))) return undefined; } catch { return undefined; }
+      return this.store;
+    },
     onWarning: (m) => logger.warn(m),
   });
 

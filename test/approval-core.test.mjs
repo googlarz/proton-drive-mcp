@@ -531,7 +531,7 @@ describe("ApprovalGate: out-of-band store (client cannot elicit)", () => {
     assert.match(r.message, /proton-drive-cli approve K7Q2-M9XD/);
     assert.match(r.message, /same arguments/);
     assert.match(r.message, /10 minute/);
-    assert.deepEqual(store.requests, [{ tool: "drive_share_invite", opHash: opHash(op), summary: renderOperation(op) }]);
+    assert.deepEqual(store.requests, [{ tool: "drive_share_invite", opHash: opHash(op), summary: renderOperation(op), fresh: true }]);
   });
 
   it("after the human approved, the same operation passes once with channel cli and the code; a replay is refused again", async () => {

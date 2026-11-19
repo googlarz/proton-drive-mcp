@@ -57,7 +57,10 @@ export interface ApprovalStoreOptions {
 }
 
 export interface ApprovalStore {
-  request(p: { tool: string; opHash: string; summary: string }): { code: string; expiresAt: number; reused: boolean };
+  /** `fresh`: never hand out an already approved record for this operation (it is removed); a pending one is still reused. */
+  request(p: { tool: string; opHash: string; summary: string; fresh?: boolean }): { code: string; expiresAt: number; reused: boolean };
+  /** Removes every pending and approved record for this tool and operation; returns how many. */
+  discard(p: { tool: string; opHash: string }): number;
   consume(p: { tool: string; opHash: string }): { code: string } | null;
   list(): ApprovalRecord[];
   get(code: string): ApprovalRecord | null;
@@ -208,7 +211,7 @@ export function createApprovalStore(opts: ApprovalStoreOptions): ApprovalStore {
   }
 
   return {
-    request({ tool, opHash, summary }) {
+    request({ tool, opHash, summary, fresh }) {
       if (!tool || typeof tool !== "string" || !opHash || typeof opHash !== "string" || typeof summary !== "string") {
         throw new Error("approval request needs tool, opHash and summary strings");
       }
@@ -216,6 +219,9 @@ export function createApprovalStore(opts: ApprovalStoreOptions): ApprovalStore {
       ready();
       const t = now();
       purge(t);
+      if (fresh) {
+        for (const r of readAll("approved")) if (r.tool === tool && r.opHash === opHash) unlinkQuiet(file("approved", r.code));
+      }
       for (const s of ["approved", "pending"] as const) {
         const hit = readAll(s).find((r) => r.tool === tool && r.opHash === opHash && r.expiresAt > t);
         if (hit) return { code: hit.code, expiresAt: hit.expiresAt, reused: true };
@@ -273,6 +279,18 @@ export function createApprovalStore(opts: ApprovalStoreOptions): ApprovalStore {
         unlinkQuiet(claim);
       }
       return approved;
+    },
+
+    discard({ tool, opHash }) {
+      ready();
+      let n = 0;
+      for (const s of ["pending", "approved"] as const) {
+        for (const r of readAll(s)) {
+          if (r.tool !== tool || r.opHash !== opHash) continue;
+          try { unlinkSync(file(s, r.code)); n++; } catch { /* another process removed or consumed it */ }
+        }
+      }
+      return n;
     },
 
     deny(codeIn) {

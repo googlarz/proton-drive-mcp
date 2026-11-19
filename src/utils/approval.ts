@@ -228,8 +228,10 @@ export type Elicit = (summary: string, signal?: AbortSignal) => Promise<ElicitRe
 
 /** What the out-of-band store (src/utils/approvalStore.ts) provides to the gate. */
 export interface ApprovalStoreLike {
-  request(p: { tool: string; opHash: string; summary: string }): { code: string; expiresAt: number; reused: boolean };
+  request(p: { tool: string; opHash: string; summary: string; fresh?: boolean }): { code: string; expiresAt: number; reused: boolean };
   consume(p: { tool: string; opHash: string }): { code: string } | null;
+  /** Removes pending and approved records for this operation (a record must not outlive a decision). */
+  discard?(p: { tool: string; opHash: string }): number;
 }
 
 export type ApprovalResult =
@@ -249,6 +251,8 @@ export interface GateInit {
   store?: ApprovalStoreLike;
   /** Why the store cannot be used (set by the server when its folder is misconfigured); worded to the model as a server problem. */
   storeProblem?: string;
+  /** The store only if its folder already exists (never creates it); used to clean up after a dialog decision. Defaults to `store`. */
+  storeIfPresent?: ApprovalStoreLike;
   now?: () => number;
   /** Runtime notices for stderr (store failure, decline budget used up). */
   onWarning?: (message: string) => void;
@@ -310,9 +314,13 @@ export class ApprovalGate {
       this.promptOpen = true;
       let result: ElicitResult;
       try { result = await this.ask(elicit, summary, opts.signal); } finally { this.promptOpen = false; }
-      if (result === "accept") return { ok: true, channel: "elicitation", opHash: hash };
+      if (result === "accept") {
+        this.discardRecords(op, hash);
+        return { ok: true, channel: "elicitation", opHash: hash };
+      }
       this.declinedAt.push(now);
       if (result === "decline") {
+        this.discardRecords(op, hash);
         return refuse("approval_declined", `The user declined ${op.tool}. Nothing was changed. ${NO_RETRY}`);
       }
       // Cancelled, failed or timed out: nobody said no, so the terminal route is offered (it still needs a human at a terminal).
@@ -347,12 +355,20 @@ export class ApprovalGate {
     const store = this.init.store;
     if (!store) return undefined;
     try {
-      const req = store.request({ tool: op.tool, opHash: hash, summary });
+      // fresh: an approval that is already sitting in the store (given earlier, never used) must not answer a question that was just asked now
+      const req = store.request({ tool: op.tool, opHash: hash, summary, fresh: true });
       return refuse("approval_required", `${preface} ${op.tool} needs the user's approval. Tell the user to run ${TERMINAL_HOW(req.code)} in a terminal and answer yes there; then call ${op.tool} again with exactly the same arguments. The code is only an identifier. It expires in ${Math.max(1, Math.round((req.expiresAt - this.now()) / 60_000))} minute(s).`);
     } catch (err) {
       this.init.onWarning?.(`approval store failed: ${err instanceof Error ? err.message : String(err)}`);
       return undefined;
     }
+  }
+
+  /** After a dialog decision, no terminal record for the same operation may stay usable. Best effort; never creates the store. */
+  private discardRecords(op: Operation, hash: string): void {
+    try { ("storeIfPresent" in this.init ? this.init.storeIfPresent : this.init.store)?.discard?.({ tool: op.tool, opHash: hash }); }
+    catch (err) { this.init.onWarning?.(`approval store cleanup failed: ${err instanceof Error ? err.message : String(err)}`); }
+    this.terminalFallback.delete(hash);
   }
 
   private async ask(elicit: Elicit, summary: string, signal?: AbortSignal): Promise<ElicitResult> {

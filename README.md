@@ -568,7 +568,7 @@ Since 1.11.0 a destructive or outward-facing operation runs only after a person 
 
 **Two ways you approve**
 
-1. **A dialog in your client** (MCP elicitation). Shown for every gated call, whatever `confirmed` says. It counts as a yes only if you accept it with the approve box ticked; an explicit decline means no, and that is final. Only one dialog is open at a time: a gated call made while a dialog waits is turned away, not queued. If the dialog is closed without an answer (cancel), fails or times out after 120 s, nobody said no, so the call is refused with `approval_required` and a code (route 2 below) instead of a dead end; it still needs you at a terminal. After 5 declined or failed prompts within a minute the server stops asking for a while and refuses.
+1. **A dialog in your client** (MCP elicitation). Shown for every gated call, whatever `confirmed` says. It counts as a yes only if you accept it with the approve box ticked; an explicit decline means no, and that is final. Only one dialog is open at a time: a gated call made while a dialog waits is turned away, not queued. If the dialog is closed without an answer (cancel), fails or times out after 120 s, nobody said no, so the call is refused with `approval_required` and a code (route 2 below) instead of a dead end; it still needs you at a terminal. After 5 declined or failed prompts within a minute the server stops asking for a while and refuses. Whatever the dialog answers, an older terminal approval for the same operation is removed, so it cannot be used afterwards.
 2. **A command in a terminal**, when the client cannot show the dialog. The call is refused with `approval_required` and a code such as `K7Q2-M9XD`. Run `proton-drive-cli approve K7Q2-M9XD` yourself in a terminal (without a global install: `npx -y -p proton-drive-mcp proton-drive-cli approve K7Q2-M9XD`): it shows the server's own record of the operation, and you type `yes`. Then ask the assistant to repeat the same call with the same arguments. The approval works once, for that exact operation, and lasts 5 minutes; a pending request expires after 10 minutes, and at most 20 are kept. `proton-drive-cli approvals` lists them and `proton-drive-cli deny <code>` discards one. `approve` refuses to run without an interactive terminal. The code only identifies the request; it is not a password and does not need to stay secret. Records live in a private folder (`0700`, files `0600`) next to the index folder, or in `PROTON_DRIVE_APPROVAL_DIR`; downloads cannot write into it, and the server refuses to use it inside `PROTON_DRIVE_SYNC_PATH` (it warns on stderr at startup, and the assistant is told the server is misconfigured). **The command must see the same folder as the server:** the same `PROTON_DRIVE_APPROVAL_DIR`, or the same `XDG_CACHE_HOME` / `HOME` when you did not set it. A Claude Desktop extension or a service started with a different environment writes its records somewhere your terminal does not look, and `approve` then reports an unknown code; set `PROTON_DRIVE_APPROVAL_DIR` to one absolute path in both places.
 
 **What you will see.** Every line is written by the server from validated values, not by the assistant. For example:
@@ -599,10 +599,12 @@ Passwords and message texts are never shown, only whether a password is set and 
 ```json
 {
   "permissions": {
-    "deny": ["Bash(proton-drive *)", "Bash(*/proton-drive *)"]
+    "deny": ["Bash(proton-drive *)", "Bash(*/proton-drive *)", "Bash(*proton-drive-cli approve*)", "Bash(*proton-drive-cli*approve*)"]
   }
 }
 ```
+
+The two `approve` rules matter too: `proton-drive-cli approve` asks for an interactive terminal, but an assistant with a shell could run it under a fake terminal (for example through a pseudo-terminal wrapper) and type `yes` itself. Denying the command in the client is what keeps the terminal route a human step.
 
 Also not covered: copying files into a folder under `/my-files` that is already shared or has a public link (use `PROTON_DRIVE_REMOTE_ROOTS`), and the terminal route on Windows, which is untested (the approvals folder assumes POSIX file renames). Details: [THREAT_MODEL.md](THREAT_MODEL.md).
 

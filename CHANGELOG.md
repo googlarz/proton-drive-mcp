@@ -9,11 +9,14 @@
 - `confirmed` is no longer an authorisation. It is still accepted in the schemas where it was, no longer required, and ignored in `human` and `strict`. On `drive_bulk_move` and `drive_bulk_trash` it remains the plan/apply switch. `PROTON_DRIVE_APPROVAL=model` restores the 1.10.1 behaviour (a startup warning is written to stderr).
 - Unattended or scheduled runs that change Drive must set `PROTON_DRIVE_APPROVAL=model`, ideally with `PROTON_DRIVE_REMOTE_ROOTS` and the audit log.
 - Tool descriptions no longer tell the assistant to pass `confirmed=true`; they say the server asks the user.
+- The `next` field of a `drive_bulk_move` / `drive_bulk_trash` plan now says "Call again with confirmed=true to apply; the server will ask the user for approval itself" (human and strict; `model` keeps the old text).
 
 ### Security
 - The assistant can no longer approve its own destructive operation by sending `confirmed: true`. The prompt is built by the server from validated values (fixed first line per tool, one line per value; control, bidirectional and zero-width characters in names are made visible and cannot add or reorder lines; passwords and message texts are not shown), and what is shown is what is executed.
 - New in the gated set: `drive_invitation_accept`, and `drive_copy`, `drive_move`, `drive_mkdir`, `drive_rename`, `drive_upload`, `drive_write_file`, `drive_trash`, `drive_restore` and the bulk tools when a path they read from or write to is under `/shared-with-me`. This closes a chain that needed no gated tool: accept an invitation, then copy files into the inviter's folder.
 - Look-alike letters from another alphabet in an e-mail address, an inviter or an item name are listed by code point in the prompt; every Unicode format or default-ignorable character is shown as `\uXXXX`. Operations addressed by `uid` alone (`drive_delete`, invitation accept/reject) show the item, inviter and folder, looked up before the question (`(name not resolved)` when that fails).
+- A terminal approval cannot outlive a dialog decision: an accepted or declined dialog removes any pending or approved record for the same operation, and a closed or failed dialog discards an already approved record and writes a fresh pending one (an unused old approval no longer answers a question that was just asked).
+- Backslashes are doubled in prompts, so the text `\u200b` in a name differs from a real zero-width space; the Braille blank and no-break or wide spaces (U+00A0, U+2000-200A, U+202F, U+205F, U+3000) are shown as `\uXXXX` in every field.
 - Only one approval dialog is open at a time; further gated calls meanwhile are refused (`approval_unavailable`), not queued.
 - A dialog that is cancelled, fails or times out falls back to the terminal route (`approval_required` with a code) instead of refusing outright; an explicit decline stays final.
 - A misconfigured approvals folder (inside the sync folder) is reported on stderr at startup and the assistant is told it is a server setting.
@@ -23,6 +26,7 @@
 - Documented limits: a client that gives the assistant a shell can run the official `proton-drive` CLI directly (deny rule example for Claude Code in the README); a client or hook that answers the dialog automatically switches the gate off; copies into an already shared folder under `/my-files` are not checked.
 
 ### Added
+- MCPB bundle: setting **Who approves destructive operations** (`approval_mode`: `human` by default, `strict` or `model`), passed to the server as `PROTON_DRIVE_APPROVAL`.
 - `PROTON_DRIVE_APPROVAL=human|strict|model` and `PROTON_DRIVE_APPROVAL_DIR`.
 - `strict` mode: every tool that changes Drive or the account needs a human yes, including single trash, restore, moves and uploads.
 - Companion CLI commands `approvals`, `approve <code>` and `deny <code>` for terminal approval (`approve` needs an interactive terminal and a typed `yes`). A terminal approval is valid once, for that exact operation, for 5 minutes; a request lasts 10 minutes.
