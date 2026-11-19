@@ -56,6 +56,7 @@ import { snapshotBeforeOverwrite, snapshotLocalBeforeOverwrite, snapshotEnabled,
 import { AuditLog, auditLogInside, redactArgs, canonical, type AuditEntry } from "./utils/audit.js";
 import { ApprovalGate, requiresApproval, resolveApprovalMode, underShared, type ApprovalMode, type Effect, type Elicit, type FieldValue, type GateContext, type Operation } from "./utils/approval.js";
 import { createApprovalStore, resolveApprovalDir, type ApprovalStore } from "./utils/approvalStore.js";
+import { assertApprovalDirUsable } from "./utils/localguard.js";
 import { parseRemoteRoots, pathInRoots } from "./utils/remoteroots.js";
 
 const require = createRequire(import.meta.url);
@@ -1567,7 +1568,7 @@ export async function main() {
       if (apMode === "model" || canElicit()) return undefined;
       if (!approvalStoreTried) {
         approvalStoreTried = true;
-        try { approvalStore = createApprovalStore({ dir: resolveApprovalDir(process.env) }); }
+        try { const dir = resolveApprovalDir(process.env); assertApprovalDirUsable(dir, process.env); approvalStore = createApprovalStore({ dir }); }
         catch (err) { logger.warn(`approval store unavailable (${err instanceof Error ? err.message : String(err)}): gated operations will be refused.`); }
       }
       return approvalStore;
