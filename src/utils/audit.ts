@@ -20,7 +20,7 @@ export interface AuditEntry {
 export type AuditVerification = { ok: true; entries: number; head: string } | { ok: false; brokenSeq: number; reason: string };
 
 /** JSON with sorted keys at every level, so the hash does not depend on property order. */
-function canonical(v: unknown): string {
+export function canonical(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
   if (v && typeof v === "object") {
     const o = v as Record<string, unknown>;
