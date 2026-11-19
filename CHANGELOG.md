@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.12.0 — 2026-11-20
 
 ### Added
 - **`drive_checkup`** (read-only): a one-call health report for a folder. Findings: exact-duplicate candidates and wasted bytes, empty folders, large old files, public links without a known expiry, items shared with other accounts, sensitive-looking names inside shared items (a guess from file names only), and what sits in the trash. Returns a score from 0 to 100 with `scoreParts` showing every deduction (formula in the README), counts, and at most 3 example paths per finding; `namesInResult` says how many names the result carries. `finding` returns one page (up to 200 names). Allowed in readonly mode; full tool tier only. With `PROTON_DRIVE_REMOTE_ROOTS` set, the account-wide trash is left out.
