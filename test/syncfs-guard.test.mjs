@@ -392,7 +392,10 @@ describe("local path guard: case, start-up files, nested upload entries, write t
     await mkdir(join(sync, "docs", ".versions"), { recursive: true });
     process.env.PROTON_DRIVE_SYNC_PATH = sync;
     assert.throws(() => assertLocalPathAllowed(join(sync, "docs", ".versions")), /\.versions/);
-    assert.throws(() => assertLocalPathAllowed(join(sync, "docs", ".VERSIONS", "a.20261101")), /\.versions/i);
+    if (process.platform === "darwin" || process.platform === "win32") {
+      // Case-insensitive file systems: .VERSIONS is the same folder. On Linux it is a different folder and stays allowed.
+      assert.throws(() => assertLocalPathAllowed(join(sync, "docs", ".VERSIONS", "a.20261101")), /\.versions/i);
+    }
     assertLocalPathAllowed(join(sync, "docs", "a.txt"));
     await assert.rejects(() => writeSyncFile(sync, "/my-files/docs/.versions/a.20261101T000000.000Z", "x"), /\.versions/);
   });
