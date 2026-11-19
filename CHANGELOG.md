@@ -10,6 +10,9 @@
 - Folder uploads are checked entry by entry, not only at the top. A secret-looking file name or a symlink that leads out of the folder refuses the upload with a message naming the entry. Folders holding a file such as `.env.example` are refused too unless `PROTON_DRIVE_ALLOW_SENSITIVE_PATHS=1` is set.
 - The audit log file and `.versions` snapshot folders in the sync folder can no longer be a write destination of the local write tools.
 
+### Fixed
+- `PROTON_DRIVE_REMOTE_ROOTS`: the final path of `drive_move`, `drive_copy`, `drive_rename` and `drive_bulk_move` is now checked against the roots, not only the path arguments; `drive_move` can no longer target a root folder itself.
+
 ### Changed
 - THREAT_MODEL.md and the README now state that `confirmed: true` is an argument the model sets, not human approval, that bulk apply calls are not tied to a plan, and which controls do protect (readonly mode, remote roots, audit log, client tool approval, elicitation where supported). No behavior change.
 
