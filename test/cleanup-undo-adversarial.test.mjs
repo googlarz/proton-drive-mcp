@@ -41,14 +41,23 @@ const BASE = [
 const opts = (nodes = BASE, o = {}) => ({ fakeMode: "drive", setup: driveSetup(nodes, o.setupEnv ?? {}), replies: () => ACCEPT, ...o.rest, ...(o.env ? { env: o.env } : {}) });
 const o2 = (nodes, rest = {}, env) => opts(nodes, { rest, env });
 
-/** The dialog's "trash (n):" section: {n, lines}. */
+/**
+ * The dialog's "<header> (n):" section: {n, lines}. The cleanup dialog (1.12.0 R2-1) prints each item as "  - <path>" followed by
+ * "    keeps: <kept path>" or "    (empty folder)"; those two lines are joined back into "  - <path>  (keeps <kept>)" /
+ * "  - <path>  (empty folder)" so the assertions below read the same as for the older one-line format.
+ */
 function dialogList(msg, header = "trash") {
   const lines = msg.split("\n");
   const i = lines.findIndex((l) => new RegExp(`^${header} \\(\\d+\\):$`).test(l));
   assert.ok(i >= 0, `no "${header} (n):" section in\n${msg.slice(0, 500)}`);
   const n = Number(lines[i].match(/\((\d+)\)/)[1]);
   const rest = [];
-  for (let k = i + 1; k < lines.length && /^ {2}- /.test(lines[k]); k++) rest.push(lines[k]);
+  for (let k = i + 1; k < lines.length && /^ {2}- /.test(lines[k]); k++) {
+    const sub = header === "trash" ? lines[k + 1] : undefined;
+    if (sub !== undefined && /^ {4}keeps: /.test(sub)) { rest.push(`${lines[k]}  (keeps ${sub.slice(11)})`); k++; }
+    else if (sub !== undefined && sub === "    (empty folder)") { rest.push(`${lines[k]}  (empty folder)`); k++; }
+    else rest.push(lines[k]);
+  }
   return { n, lines: rest, all: lines };
 }
 
@@ -229,7 +238,24 @@ describe("case 1 and (f): drive_cleanup apply is gated", CONC, () => {
 
   it("confirmed:true as the very first call: the dialog shows the whole list (41 items) with a keeper on every duplicate line BEFORE any trash call", () => firstCallDialog(40));
 
-  it("a list of 61 items: the dialog still shows every item with its keeper (plan 1 and 3.8: the human sees the full list)", { todo: "finding F1: with more than 50 items the dialog lists only the first 50 and prints garbled per-folder counts" }, () => firstCallDialog(60));
+  it("a list of 61 eligible items: one call plans and shows at most 50 (the dialog's full-list limit), every one with its keeper; the rest is left for the next call", async () => {
+    const nodes = [folder("a", "root", "keep"), folder("b", "root", "dups"), folder("e", "root", "e0")];
+    for (let i = 0; i < 60; i++) nodes.push(file(`k${i}`, "a", `orig-${String(i).padStart(2, "0")}.bin`, { size: 4000 + i, sha1: `K${i}`, mtime: OLD }), file(`c${i}`, "b", `copy-${String(i).padStart(2, "0")}.bin`, { size: 4000 + i, sha1: `K${i}`, mtime: NEW }));
+    await withServer(o2(nodes), async (ctx) => {
+      const r = json(await ctx.call("drive_cleanup", { ...CLEAN, confirmed: true }));
+      assert.equal(r.trashed, 50);
+      assert.equal(r.remaining, 11);
+      const m = ctx.messages[0];
+      assert.doesNotMatch(m, /only the first/);
+      const { n, lines } = dialogList(m);
+      assert.equal(n, 50);
+      assert.equal(lines.length, 50, "every item of the call is in the dialog");
+      for (const l of lines) assert.match(l, /\((keeps \/my-files\/keep\/orig-\d\d\.bin|empty folder)\)$/, l);
+      assert.equal(argPaths(trashCalls(ctx)[0]).length, 50);
+      assert.deepEqual(new Set(argPaths(trashCalls(ctx)[0])), new Set(lines.map((l) => l.replace(/^ {2}- /, "").replace(/ {2}\((keeps .*|empty folder)\)$/, ""))));
+    });
+  });
+
 
   it("decline, cancel, a throwing client, accept without approve, accept with look-alike approve values: zero trash calls, no journal", async () => {
     const replies = [
@@ -609,7 +635,7 @@ describe("case 4 and (d): an unreliable walk refuses cleanup and trashes nothing
     ["a folder without uid", () => uidTree({ top: [rawNode(null, "root", "ghost", "folder")], docs: [] })],
   ];
   for (const [label, mk] of uidCases) {
-    it(`${label}: cleanup refuses (plan and apply) and trashes nothing`, { todo: "finding F2: a listing node without uid is silently dropped, the walk stays 'complete' and cleanup plans and trashes around it" }, async () => {
+    it(`${label}: cleanup refuses (plan and apply) and trashes nothing`, async () => {
       await withServer({ fakeMode: "tree", replies: () => ACCEPT, setup: (sb) => ({ FAKE_TREE: writeTree(sb.dir, mk()) }) }, async (ctx) => {
         for (const args of [CLEAN, { ...CLEAN, confirmed: true }]) {
           const r = await ctx.call("drive_cleanup", args);
@@ -621,7 +647,7 @@ describe("case 4 and (d): an unreliable walk refuses cleanup and trashes nothing
     });
   }
 
-  it("data loss guard: a folder whose only content is a node without uid (a file, or a folder holding files) is never trashed as 'empty'", { todo: "finding F2 (data loss variant): such a folder is proposed and trashed as empty" }, async () => {
+  it("data loss guard: a folder whose only content is a node without uid (a file, or a folder holding files) is never trashed as 'empty'", async () => {
     const tree = {
       "/my-files": [rawNode("d1", "root", "docs", "folder"), rawNode("d3", "root", "looks-empty", "folder"), rawNode("d4", "root", "holds-uidless-folder", "folder")],
       "/my-files/docs": [rawNode("f1", "d1", "a.pdf", "file", { size: 5000, sha1: "S1" })],
@@ -677,7 +703,7 @@ describe("case 5 and (k): the dialog survives hostile names, keeper on every lin
         assert.equal(all.filter((l) => /^fixes \(\d+\):$/.test(l)).length, 1, "one fixes header");
         assert.equal(all.filter((l) => /^path: /.test(l)).length, 1);
         for (const l of lines) assert.match(l, /^ {2}- \/my-files\/.* {2}\(keeps \/my-files\/docs\/real\.pdf\)( \[\d+ chars\])?$/, l.slice(0, 200));
-        assert.equal(all.length, all.filter((l) => l === "" || /^(drive_cleanup:|path:|fixes \(|trash \(|verify|bytes|id:)/.test(l) || /^ {2}- /.test(l)).length, "every line is a header, a field or a list entry");
+        assert.equal(all.length, all.filter((l) => l === "" || /^(drive_cleanup:|path:|fixes \(|trash \(|verify|bytes|id:)/.test(l) || /^ {2}- /.test(l) || /^ {4}(keeps: |\(empty folder\)$)/.test(l)).length, "every line is a header, a field or a list entry");
       });
     });
   }
@@ -729,43 +755,43 @@ describe("case 5 and (k): the dialog survives hostile names, keeper on every lin
 // =====================================================================================================================================
 // 5.2 case 7: the 200 cap
 // =====================================================================================================================================
-describe("case 7: more than 200 eligible items", () => {
-  it("duplicates: 205 pairs are capped at 200 per call with a correct 'remaining', the second call continues, and every group keeps exactly one member", async () => {
+describe("case 7: more than 50 eligible items (CLEANUP_CAP: the number of items the approval dialog lists in full)", () => {
+  it("duplicates: 55 pairs are capped at 50 per call with a correct 'remaining', the second call continues, and every group keeps exactly one member", async () => {
     const nodes = [folder("a", "root", "keep"), folder("b", "root", "dups")];
-    for (let i = 0; i < 205; i++) {
+    for (let i = 0; i < 55; i++) {
       const id = String(i).padStart(3, "0");
       nodes.push(file(`k${i}`, "a", `o${id}.bin`, { size: 3000 + i, sha1: `P${i}`, mtime: OLD }), file(`c${i}`, "b", `c${id}.bin`, { size: 3000 + i, sha1: `P${i}`, mtime: NEW }));
     }
     await withServer(o2(nodes), async (ctx) => {
       const plan = json(await ctx.call("drive_cleanup", { path: "/my-files", fixes: ["duplicates"] }));
-      assert.equal(plan.counts.duplicates, 200);
+      assert.equal(plan.counts.duplicates, 50);
       assert.equal(plan.remaining, 5);
       assert.ok(plan.samples.length <= 10);
       const one = json(await ctx.call("drive_cleanup", { path: "/my-files", fixes: ["duplicates"], confirmed: true }));
-      assert.equal(one.trashed, 200);
+      assert.equal(one.trashed, 50);
       assert.equal(one.remaining, 5);
       assert.equal(trashCalls(ctx).length, 1);
-      assert.equal(argPaths(trashCalls(ctx)[0]).length, 200, "never more than the cap in one CLI call");
-      assert.equal(trashedUids(ctx).length, 200);
+      assert.equal(argPaths(trashCalls(ctx)[0]).length, 50, "never more than the cap in one CLI call");
+      assert.equal(trashedUids(ctx).length, 50);
       const nextPlan = json(await ctx.call("drive_cleanup", { path: "/my-files", fixes: ["duplicates"] }));
       assert.equal(nextPlan.counts.duplicates, 5);
       assert.equal(nextPlan.remaining, 0);
       const two = json(await ctx.call("drive_cleanup", { path: "/my-files", fixes: ["duplicates"], confirmed: true }));
       assert.equal(two.trashed, 5);
-      assert.equal(trashedUids(ctx).length, 205);
-      for (let i = 0; i < 205; i++) {
+      assert.equal(trashedUids(ctx).length, 55);
+      for (let i = 0; i < 55; i++) {
         assert.equal(readNodes(ctx)[`k${i}`].trashTime, undefined, `keeper ${i}`);
         assert.notEqual(readNodes(ctx)[`c${i}`].trashTime, undefined, `copy ${i}`);
       }
       assert.equal(journalIds(ctx).length, 2);
       // undo the second batch, then the first: the tree is whole again
       assert.equal(json(await ctx.call("drive_undo", { action: "apply" })).undone, 5);
-      assert.equal(json(await ctx.call("drive_undo", { action: "apply" })).undone, 200);
+      assert.equal(json(await ctx.call("drive_undo", { action: "apply" })).undone, 50);
       assert.deepEqual(trashedUids(ctx), []);
     });
   });
 
-  it("empty folders and duplicates together: the cap is shared, the total never exceeds 200", async () => {
+  it("empty folders and duplicates together: the cap is shared, the total never exceeds 50", async () => {
     const nodes = [folder("a", "root", "keep"), folder("b", "root", "dups")];
     for (let i = 0; i < 120; i++) nodes.push(folder(`e${i}`, "root", `empty-${String(i).padStart(3, "0")}`));
     for (let i = 0; i < 120; i++) {
@@ -773,10 +799,10 @@ describe("case 7: more than 200 eligible items", () => {
     }
     await withServer(o2(nodes), async (ctx) => {
       const plan = json(await ctx.call("drive_cleanup", CLEAN));
-      assert.ok(plan.counts.duplicates + plan.counts.emptyFolders <= 200, JSON.stringify(plan.counts));
+      assert.ok(plan.counts.duplicates + plan.counts.emptyFolders <= 50, JSON.stringify(plan.counts));
       assert.equal(plan.remaining, 240 - (plan.counts.duplicates + plan.counts.emptyFolders));
       await ctx.call("drive_cleanup", { ...CLEAN, confirmed: true });
-      assert.ok(argPaths(trashCalls(ctx)[0]).length <= 200);
+      assert.ok(argPaths(trashCalls(ctx)[0]).length <= 50);
     });
   });
 });
@@ -942,7 +968,7 @@ describe("(g) drive_undo: refusals and skips", CONC, () => {
   /** A reply function that answers dialogs once n are open (so the calls are released together) or after 1.5 s: the server may refuse a second dialog. */
   const barrier = (n) => { const waiters = []; let asked = 0; return () => new Promise((resolve) => { waiters.push(() => resolve(ACCEPT)); if (++asked >= n) waiters.forEach((w) => w()); setTimeout(() => resolve(ACCEPT), 1500).unref?.(); }); };
 
-  it("two drive_cleanup applies approved at the same moment: no path is trashed twice, every journalled uid is trashed exactly once, keepers survive", { todo: "finding F4: two concurrent cleanups can both send the same paths to trash (the second re-plan does not see the first one's trash); intermittent" }, async () => {
+  it("two drive_cleanup applies approved at the same moment: no path is trashed twice, every journalled uid is trashed exactly once, keepers survive", async () => {
     const nodes = [folder("a", "root", "keep"), folder("b", "root", "dups")];
     for (let i = 0; i < 12; i++) nodes.push(file(`k${i}`, "a", `o${i}.bin`, { size: 3000 + i, sha1: `P${i}`, mtime: OLD }), file(`c${i}`, "b", `c${i}.bin`, { size: 3000 + i, sha1: `P${i}`, mtime: NEW }));
     await withServer(o2(nodes, { replies: barrier(2) }), async (ctx) => {
@@ -1310,7 +1336,7 @@ describe("(g) drive_undo: a tampered journal never restores outside the roots an
     });
   });
 
-  it("two undo applies approved at the same moment: every item is restored once, nothing is addressed twice, the batch ends 'undone'", { todo: "finding F4: concurrent undo applies race and send the same /trash/<name> to restore twice (intermittent, more likely under load)" }, async () => {
+  it("two undo applies approved at the same moment: every item is restored once, nothing is addressed twice, the batch ends 'undone'", async () => {
     let gate = null;
     await withServer(o2(NODES, { replies: () => (gate ? gate() : ACCEPT) }), async (ctx) => {
       const id = await makeBatch(ctx);
@@ -1406,7 +1432,7 @@ describe("case 13 and (g): the undo folder cannot be written through the server 
     });
   });
 
-  it("the same setup: drive_write_file is refused for the journal folder (plan 3.6: added to the local guard like the approvals folder)", { todo: "finding F3 (low): with the journal folder inside the sync root, drive_write_file still writes there; harmless only because drive_undo is then disabled" }, async () => {
+  it("the same setup: drive_write_file is refused for the journal folder (plan 3.6: added to the local guard like the approvals folder)", async () => {
     const h = {};
     await withServer({ ...o2(BASE), setup: homeSetup(BASE, h) }, async (ctx) => {
       const w = await ctx.call("drive_write_file", { path: `/my-files/${rel()}/ABCD-EFGH.json`, content: forged() });
@@ -1469,7 +1495,7 @@ describe("(h) readonly mode and (i) PROTON_DRIVE_UNDO=0", CONC, () => {
     });
   });
 
-  it("PROTON_DRIVE_UNDO=0: the approval dialog does not promise that the change can be undone", { todo: "finding (judgment, not spelled out in the plan): see report" }, async () => {
+  it("PROTON_DRIVE_UNDO=0: the approval dialog does not promise that the change can be undone", async () => {
     await withServer(o2(BASE, {}, { PROTON_DRIVE_UNDO: "0" }), async (ctx) => {
       await ctx.call("drive_cleanup", { ...CLEAN, confirmed: true });
       assert.doesNotMatch(ctx.messages[0], /can be undone/);

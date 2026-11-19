@@ -82,28 +82,41 @@ describe("renderOperation", () => {
     assert.match(a, /^drive_share_invite: invite a person to a file or folder \(PERMANENT, cannot be undone\)$/);
   });
 
-  it("a long list shows counts per folder of the FIRST path of each line, never the '(keeps ...)' or '-> ...' part", () => {
-    const lines = [];
-    for (let i = 0; i < 40; i++) lines.push(`/my-files/inbox/copy-${i}.pdf  (keeps /my-files/archive/zz/orig-${i}.pdf)`);
-    for (let i = 0; i < 20; i++) lines.push(`/my-files/old/empty-${i}  (empty folder)`);
-    const out = renderOperation({ tool: "drive_cleanup", effect: "reversible", fields: { path: "/my-files", fixes: ["duplicates"], trash: lines } });
-    assert.match(out, /trash \(60\): only the first 50 are listed; counts per folder first/);
-    assert.match(out, /\n {2}folder \/my-files\/inbox: 40\n/);
-    assert.match(out, /\n {2}folder \/my-files\/old: 20\n/);
-    assert.doesNotMatch(out, /folder \/my-files\/archive/, "the kept copy's folder is not counted");
-    assert.doesNotMatch(out, /folder [^\n]*keeps/);
+  it("a long list shows counts per folder of the first path of each line, never the destination of a '->' line", () => {
     const moves = Array.from({ length: 60 }, (_, i) => `/my-files/new/m${i}.txt -> /my-files/old/sub/m${i}.txt`);
     const m = renderOperation({ tool: "drive_undo", effect: "reversible", fields: { id: "AAAA-BBBB", when: "2026-01-01T00:00:00.000Z", restore: [], moveBack: moves } });
+    assert.match(m, /moveBack \(60\): only the first 50 are listed; counts per folder first/);
     assert.match(m, /\n {2}folder \/my-files\/new: 60\n/);
     assert.doesNotMatch(m, /folder \/my-files\/old/, "grouped by where the items are now, not by the destination");
   });
 
-  it("a cleanup list of exactly CLEANUP_CAP items is shown in full: every item and its keeper", () => {
+  it("a cleanup list of exactly CLEANUP_CAP items is shown in full: every item on its own line with its keeper under it", () => {
     assert.equal(CLEANUP_CAP, 50);
-    const lines = Array.from({ length: CLEANUP_CAP }, (_, i) => `/my-files/a/c${i}.bin  (keeps /my-files/b/k${i}.bin)`);
-    const out = renderOperation({ tool: "drive_cleanup", effect: "reversible", fields: { path: "/my-files", fixes: ["duplicates"], trash: lines } });
+    const trash = Array.from({ length: CLEANUP_CAP }, (_, i) => `/my-files/a/c${i}.bin`);
+    const keeps = Array.from({ length: CLEANUP_CAP }, (_, i) => (i === 7 ? "" : `/my-files/b/k${i}.bin`));
+    const out = renderOperation({ tool: "drive_cleanup", effect: "reversible", fields: { path: "/my-files", fixes: ["duplicates"], trash, keeps } });
     assert.doesNotMatch(out, /only the first/);
-    for (let i = 0; i < CLEANUP_CAP; i++) assert.ok(out.includes(`  - /my-files/a/c${i}.bin  (keeps /my-files/b/k${i}.bin)`), `item ${i}`);
+    assert.match(out, /\ntrash \(50\):\n/);
+    for (let i = 0; i < CLEANUP_CAP; i++) assert.ok(out.includes(`  - /my-files/a/c${i}.bin\n    ${i === 7 ? "(empty folder)" : `keeps: /my-files/b/k${i}.bin`}\n`) || out.endsWith(`  - /my-files/a/c${i}.bin\n    ${i === 7 ? "(empty folder)" : `keeps: /my-files/b/k${i}.bin`}`), `item ${i}`);
+    assert.doesNotMatch(out, /^keeps:/m, "the parallel keeps list is not printed a second time");
+  });
+
+  it("R2-1: two paths of 300 characters each are both shown in full, the kept one on its own line; names cannot add lines", () => {
+    const long = (c) => `/my-files/${c.repeat(140)}/${c.repeat(140)}.pdf`; // about 290 characters
+    assert.ok(long("a").length > 280);
+    const trash = [long("a"), `/my-files/x\nkeeps: /my-files/innocent.pdf\n  - /my-files/other`];
+    const keeps = [long("b"), long("c")];
+    const out = renderOperation({ tool: "drive_cleanup", effect: "reversible", fields: { path: "/my-files", fixes: ["duplicates"], trash, keeps } });
+    assert.ok(out.includes(`  - ${long("a")}\n    keeps: ${long("b")}\n`), "both long paths complete");
+    assert.ok(out.includes(`keeps: ${long("c")}`));
+    assert.doesNotMatch(out, /…/, "nothing elided below 600 characters");
+    const lines = out.split("\n");
+    assert.equal(lines.filter((l) => /^ {2}- \/my-files/.test(l)).length, 2, "a name with a newline stays one item");
+    assert.equal(lines.filter((l) => /^ {4}keeps: /.test(l)).length, 2);
+    assert.ok(out.includes("\\u000a"), "the newline is shown escaped");
+    // beyond 600 characters the middle is elided and the length is stated
+    const huge = renderOperation({ tool: "drive_cleanup", effect: "reversible", fields: { path: "/my-files", fixes: ["duplicates"], trash: ["/my-files/t"], keeps: [`/my-files/${"k".repeat(900)}`] } });
+    assert.match(huge, /keeps: .*… ?.*\[\d+ chars\]/);
   });
 
   it("prints one 'key: value' line per field in a fixed order whatever the insertion order", () => {

@@ -65,6 +65,23 @@ describe("walkTree: fresh and unidentifiable entries (1.12.0 review fixes)", () 
     assert.equal(own.stats.calls.filter((c) => c === "/my-files/a").length, 2);
   });
 
+  it("R2-4: a walk that nobody waits for any more (it returned partial) stops listing when a fresh walk replaces it, and never writes the cache", async () => {
+    const tree = { "/my-files": Array.from({ length: 8 }, (_, i) => folder(`f${i}`, i)) };
+    for (let i = 0; i < 8; i++) tree[`/my-files/f${i}`] = [file(`x${i}.txt`, 1)];
+    const { svc, stats } = makeSvc(tree, { delay: 30 });
+    const partial = await walkTree(svc, "/my-files", { refresh: true, concurrency: 1, budgetMs: 40 });
+    assert.equal(partial.partial, true, "the first caller got a partial result and left; its walk goes on in the background");
+    const before = stats.calls.length;
+    const full = await walkTree(svc, "/my-files", { refresh: true, fresh: true, concurrency: 1, budgetMs: 0 });
+    assert.equal(full.complete, true);
+    assert.equal(full.nodes.length, 16);
+    await sleep(400); // long enough for the abandoned walk to have finished all its listings if it had not been stopped
+    assert.ok(stats.calls.length - before <= 9 + 2, `the superseded walk kept listing: ${stats.calls.length - before} calls after it was replaced`);
+    const cached = await walkTree(svc, "/my-files");
+    assert.equal(cached.fromCache, true);
+    assert.equal(cached.complete, true);
+  });
+
   it("an entry listed without a uid is reported as skipped (the walk is incomplete), not dropped silently", async () => {
     const tree = small();
     tree["/my-files/b"] = [file("z.txt", 7), { type: "file", name: { ok: true, value: "ghost.txt" }, activeRevision: { claimedSize: 3 } }];

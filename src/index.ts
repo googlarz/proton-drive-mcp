@@ -47,6 +47,7 @@ import type { AlbumPhoto } from "./types/index.js";
 import { readDriveContent } from "./services/content.js";
 import { showValue } from "./utils/text.js";
 import { sweepStaleTempDirs } from "./utils/tempSweep.js";
+import { Semaphore } from "./utils/semaphore.js";
 import { driveUsage, driveFindDuplicates, driveSharingAudit, driveShareExpiryReport } from "./services/analytics.js";
 import { driveRecentChanges } from "./services/changes.js";
 import { driveRefreshIndex } from "./services/refreshIndex.js";
@@ -1643,6 +1644,7 @@ export async function main() {
     try { assertUndoDirUsable(resolveUndoDir(process.env), process.env); }
     catch (err) { logger.warn(`undo journal unusable (${err instanceof Error ? err.message : String(err)}): changes will run without an undo record until this is fixed.`); }
   }
+  const applyLock = new Semaphore(1);
   let journalOpen: JournalOpen | undefined;
   const getJournal = async (): Promise<JournalOpen> => {
     if (journalOpen) return journalOpen;
@@ -1782,6 +1784,13 @@ export async function main() {
       }
     }
 
+    // One batch that trashes, moves or restores many items runs at a time, from plan to journal: a second apply waits and then plans on
+    // the state the first one left, so the same path is never sent to the CLI twice by two overlapping calls.
+    const applying = (["drive_cleanup", "drive_bulk_trash", "drive_bulk_move"].includes(name) && a.confirmed === true) || (name === "drive_undo" && a.action === "apply");
+    let releaseApply: (() => void) | undefined;
+    if (applying) {
+      try { releaseApply = await applyLock.acquire(callContext.getStore()?.signal); } catch (err) { return handleError(err); }
+    }
     try {
       switch (name) {
         case "drive_auth_status":
@@ -2179,7 +2188,9 @@ export async function main() {
               return fail("drive_cleanup not applied, nothing trashed: the user did not approve.");
             }
           } else {
-            const denied = await requireApproval({ tool: name, effect: "reversible", fields: { path: cleanupPath, fixes, trash: summarizeForDialog(cleanupPlan) } }, true);
+            // Without a working undo record the dialog must not promise "can be undone".
+            const cleanupEffect = (await getJournal()).journal ? "reversible" : "reversible-no-undo";
+            const denied = await requireApproval({ tool: name, effect: cleanupEffect, fields: { path: cleanupPath, fixes, ...summarizeForDialog(cleanupPlan) } }, true);
             if (denied) return denied;
             // The human approved this exact list: apply it only if a fresh scan gives the same one.
             const again = await computeCleanupPlan(drive, { path: cleanupPath, fixes, verify, hashMemo }); // a fresh walk; verified files are not downloaded again
@@ -2592,6 +2603,8 @@ export async function main() {
     } catch (err) {
       if (err instanceof McpError) throw err;
       return handleError(err);
+    } finally {
+      releaseApply?.();
     }
   };
 

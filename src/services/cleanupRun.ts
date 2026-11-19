@@ -112,13 +112,16 @@ export async function pathOrAncestorShared(drive: DriveService, path: string): P
 export type CleanupRun = { plan: CleanupPlanOk; verified: boolean } | { refusal: string };
 
 /**
- * Remembers the sha256 of a file by what identifies its content in a listing: uid, path, size, claimed time, upload time and claimed sha1
- * (a new revision changes the upload time). The re-plan after the human approved passes the same memo: a file whose listing entry did not
- * change is not downloaded a second time, one that changed is hashed again and so ends up in a different list (approval_changed).
+ * Remembers the sha256 of a file by everything the listing says about its content: uid, path, size, claimed time, the node's modification time,
+ * the claimed sha1 and the active revision's own uid and creation time (a new upload is a new revision, even with the same size, time and
+ * claimed hash). When a listing exposes no revision identifier, the key is still all of the other fields and a memo hit needs every one of
+ * them to match; a change of content that moves none of them is invisible to any listing-based check (the same limit as the claimed hash).
+ * The re-plan after the human approved passes the same memo: a file whose entry did not change is not downloaded a second time, one that
+ * changed is hashed again and so ends up in a different list (approval_changed).
  */
 export function memoHasher(inner: Hasher, memo: Map<string, string>): Hasher {
   return async (n) => {
-    const key = [n.uid, n.path, n.size, n.mtime, n.uploadedAt, n.sha1].join("\0");
+    const key = [n.uid, n.path, n.size, n.mtime, n.uploadedAt, n.sha1, n.revisionId].join("\0");
     const hit = memo.get(key);
     if (hit !== undefined) return hit;
     const digest = await inner(n);

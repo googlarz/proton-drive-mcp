@@ -124,7 +124,7 @@ describe("drive_cleanup: plan", () => {
       assert.equal(done.remaining, 5);
       // the human saw every one of the 50 items, not a cut-off list with folder counts
       assert.doesNotMatch(ctx.messages[0], /only the first/);
-      for (let i = 0; i < 50; i++) assert.ok(ctx.messages[0].includes(`/my-files/empty-${String(i).padStart(3, "0")}  (empty folder)`), `item ${i} in the dialog`);
+      for (let i = 0; i < 50; i++) assert.ok(ctx.messages[0].includes(`  - /my-files/empty-${String(i).padStart(3, "0")}\n    (empty folder)`), `item ${i} in the dialog`);
       assert.ok(!ctx.messages[0].includes("/my-files/empty-050"), "the item beyond the cap is not in this call");
       const next = json(await ctx.call("drive_cleanup", { path: "/my-files", fixes: ["empty-folders"] }));
       assert.equal(next.counts.emptyFolders, 5);
@@ -146,6 +146,33 @@ describe("drive_cleanup: plan", () => {
   });
 });
 
+describe("drive_checkup and drive_cleanup agree on what is fixable", () => {
+  it("V1: a 700-byte duplicate pair is not fixable (cleanup ignores files under 1024 bytes), a 2000-byte pair is, and the numbers match", async () => {
+    const small = [folder("d1", "root", "docs"), folder("d2", "root", "inbox"),
+      file("s1", "d1", "tiny.txt", { size: 700, sha1: "T", mtime: OLD }), file("s2", "d2", "tiny (1).txt", { size: 700, sha1: "T", mtime: NEW })];
+    const big = [...small, file("b1", "d1", "big.bin", { size: 2000, sha1: "B", mtime: OLD }), file("b2", "d2", "big (1).bin", { size: 2000, sha1: "B", mtime: NEW })];
+    for (const [nodes, expected] of [[small, 0], [big, 1]]) {
+      await withServer(opts({}, nodes), async (ctx) => {
+        const checkup = json(await ctx.call("drive_checkup", { sharing: false }));
+        const dup = checkup.findings.find((f) => f.id === "duplicates");
+        assert.equal(dup.fixableCount, expected, "fixableCount");
+        const plan = json(await ctx.call("drive_cleanup", { path: "/my-files", fixes: ["duplicates"] }));
+        assert.equal(plan.counts.duplicates, expected, "what cleanup plans");
+        assert.equal(dup.fixableCount, plan.counts.duplicates);
+      });
+    }
+  });
+
+  it("the dialog does not say 'can be undone' when the undo record is switched off", async () => {
+    await withServer(opts({ replies: () => ACCEPT }, BASE, { PROTON_DRIVE_UNDO: "0" }), async (ctx) => {
+      const r = await ctx.call("drive_cleanup", { ...ARGS, confirmed: true });
+      assert.notEqual(r.isError, true, text(r));
+      assert.doesNotMatch(ctx.messages[0], /can be undone/);
+      assert.match(ctx.messages[0], /^drive_cleanup: move redundant copies and empty folders to the trash \(items go to the trash, nothing is deleted; undo is switched off or unavailable\)/);
+    });
+  });
+});
+
 describe("drive_cleanup: apply needs the human", () => {
   it("accept: trashes exactly the listed items in one batched call, keeps the keeper, records the batch", async () => {
     await withServer(opts({ replies: () => ACCEPT }), async (ctx) => {
@@ -163,8 +190,9 @@ describe("drive_cleanup: apply needs the human", () => {
       assert.equal(ctx.asked, 1);
       assert.match(ctx.messages[0], /^drive_cleanup: move redundant copies and empty folders to the trash \(can be undone\)/);
       assert.match(ctx.messages[0], /path: \/my-files\n/);
-      assert.match(ctx.messages[0], /\/my-files\/inbox\/a \(1\)\.pdf {2}\(keeps \/my-files\/docs\/a\.pdf\)/);
-      assert.match(ctx.messages[0], /\/my-files\/empty {2}\(empty folder\)/);
+      assert.match(ctx.messages[0], /  - \/my-files\/inbox\/a \(1\)\.pdf\n {4}keeps: \/my-files\/docs\/a\.pdf(\n|$)/);
+      assert.match(ctx.messages[0], /  - \/my-files\/empty\n {4}\(empty folder\)/);
+      assert.match(ctx.messages[0], /\(can be undone\)/);
       // what ran is what was shown: one batched trash with those two paths
       const calls = trashCalls(ctx);
       assert.equal(calls.length, 1);
@@ -280,6 +308,20 @@ describe("drive_cleanup: apply needs the human", () => {
       const j = readJournal(ctx, id);
       assert.equal(j.status, "partial");
       assert.deepEqual(j.items.map((i) => i.uid), ["d3"]);
+    });
+  });
+});
+
+describe("drive_cleanup: overlapping applies", () => {
+  it("A1-F4: two applies at the same moment run one after the other; the second plans on what the first left, so no path is trashed twice", async () => {
+    await withServer(opts({ replies: () => ACCEPT }), async (ctx) => {
+      const [x, y] = await Promise.all([ctx.call("drive_cleanup", { path: "/my-files", fixes: ["duplicates"], confirmed: true }), ctx.call("drive_cleanup", { path: "/my-files", fixes: ["duplicates"], confirmed: true })]);
+      const results = [x, y].map((r) => json(r));
+      assert.deepEqual(results.map((r) => r.applied).sort(), [false, true]);
+      assert.equal(trashCalls(ctx).length, 1, "one trash call in total");
+      assert.equal(ctx.asked, 1, "the second call found nothing left and asked nobody");
+      assert.deepEqual(trashedUids(ctx), ["f2"]);
+      assert.equal(journalIds(ctx).length, 1);
     });
   });
 });

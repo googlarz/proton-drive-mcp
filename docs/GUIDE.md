@@ -56,13 +56,14 @@ Content search is off by default. Add `"PROTON_DRIVE_CONTENT_INDEX": "1"` to the
 
 **Run a checkup.** Ask: "Give /my-files/Documents a checkup." You get a score from 0 to 100 and a short list: copies of the same file, empty folders, big old files, public links that never expire, things shared with other people, file names that look private (passport, tax, contract and similar) in shared places, and what is in the trash. The score is only a conversation starter. The "looks private" list is a guess from file names; no file is opened. If the answer says the scan is partial, ask again a minute later. On a big drive, point it at one folder.
 
-**Clean up.** If the checkup finds extra copies or empty folders, Claude can offer a cleanup. Writes must be enabled for this (section 5). Claude does not choose the files: the server builds the list itself and leaves out the copy it keeps, anything shared, and anything whose name is already in the trash. Then the server asks you a question of its own. It shows a line for every file, for example:
+**Clean up.** If the checkup finds extra copies or empty folders, Claude can offer a cleanup. Writes must be enabled for this (section 5). Claude does not choose the files: the server builds the list itself and leaves out the copy it keeps, anything shared, and anything whose name is already in the trash. Then the server asks you a question of its own. It shows two lines for every file, for example:
 
 ```
-/my-files/Documents/Inbox/2024-03 (1).pdf  (keeps /my-files/Documents/Invoices/2024-03.pdf)
+- /my-files/Documents/Inbox/2024-03 (1).pdf
+    keeps: /my-files/Documents/Invoices/2024-03.pdf
 ```
 
-Read it. The part in brackets is the copy that stays. A cleanup handles at most 50 items per call, so the question lists every one of them with its kept copy; Claude will tell you how many are left and asks again for the next batch. (A longer list, such as undoing a big bulk trash, shows the first 50 lines and counts per folder, grouped by where the items are now.) Accept only if it is what you want. Nothing is deleted: the files go to the Drive trash. On a big folder the plan can take a while, and the cleanup refuses when a folder needs more than 300 listing calls: point it at a subfolder.
+Read it. The first line is what goes to the trash, the line under it is the copy that stays; both are shown in full. A cleanup handles at most 50 items per call, so the question lists every one of them with its kept copy; Claude will tell you how many are left and asks again for the next batch. (A longer list, such as undoing a big bulk trash, shows the first 50 lines and counts per folder, grouped by where the items are now.) Accept only if it is what you want. Nothing is deleted: the files go to the Drive trash. On a big folder the plan can take a while, and the cleanup refuses when the whole scan would need more than 300 folder listings (a cap for one scan, not per folder): point it at a subfolder.
 
 **What you see afterwards.** A short result with how many items went to the trash and an undo code such as `U7K2-M9XD`. Space is not freed until you empty the trash yourself, and emptying it cannot be undone.
 

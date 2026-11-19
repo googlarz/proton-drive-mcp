@@ -20,6 +20,7 @@
 import type { WalkNode } from "./walk.js";
 import { findDuplicateCandidates } from "./analytics.js";
 import { looksSecret } from "./contentIndex.js";
+import { CLEANUP_MIN_SIZE } from "./cleanup.js";
 
 export type CheckupFinding = "duplicates" | "empty-folders" | "large-old" | "public-links" | "outside-access" | "sensitive-exposed" | "trash";
 export const CHECKUP_FINDINGS: readonly CheckupFinding[] = ["duplicates", "empty-folders", "large-old", "public-links", "outside-access", "sensitive-exposed", "trash"];
@@ -172,8 +173,9 @@ function duplicateItems(nodes: WalkNode[], rootPath: string | undefined, via: Ma
   for (const g of findDuplicateCandidates(nodes, 1)) {
     const keeper = keeperOf(g.members);
     const sizes = new Set(g.members.map(sizeOf));
-    // Conservative stand-in for plan 3.2 rule 3 (K2 owns the exact test): claimed sha1, identical size, all inside the root, nothing shared.
-    const eligible = g.kind === "claimed-sha1" && sizes.size === 1
+    // Conservative stand-in for plan 3.2 rule 3 (cleanup.ts owns the exact test): claimed sha1, identical size of at least CLEANUP_MIN_SIZE
+    // (cleanup ignores smaller files, so `fixableCount` must not count them), all inside the root, nothing shared.
+    const eligible = g.kind === "claimed-sha1" && sizes.size === 1 && [...sizes][0] >= CLEANUP_MIN_SIZE
       && g.members.every((m) => (rootPath === undefined || m.path.startsWith(rootPath.replace(/\/+$/, "") + "/")) && via.get(m) === undefined);
     bytes += g.members.reduce((s, m) => s + sizeOf(m), 0) - Math.max(...g.members.map(sizeOf));
     for (const m of g.members) {

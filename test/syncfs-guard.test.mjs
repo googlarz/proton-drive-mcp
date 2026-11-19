@@ -496,6 +496,26 @@ describe("local path guard: case, start-up files, nested upload entries, write t
     assert.equal(validateDownloadTarget(join(h, "Documents"), ["/my-files/a.txt"]), join(h, "Documents"));
   });
 
+  it("drive_write_file's target (writeSyncFile) can never be the undo journal or approvals folder, or lie inside them, whatever the sync path is", async () => {
+    const sync = join(base, "sync5");
+    const undo = join(sync, "state", "undo");
+    const appr = join(sync, "state", "approvals");
+    await mkdir(undo, { recursive: true });
+    await mkdir(appr, { recursive: true });
+    process.env.PROTON_DRIVE_UNDO_DIR = undo;
+    process.env.PROTON_DRIVE_APPROVAL_DIR = appr;
+    await assert.rejects(() => writeSyncFile(sync, "/my-files/state/undo/ABCD-EFGH.json", "{}"), /undo journal folder/);
+    await assert.rejects(() => writeSyncFile(sync, "/my-files/state/undo/tmp/x.json", "{}"), /undo journal folder/);
+    await assert.rejects(() => writeSyncFile(sync, "/my-files/state/approvals/pending/X.json", "{}"), /approvals folder/);
+    await assert.rejects(() => stat(join(undo, "ABCD-EFGH.json")), /ENOENT/);
+    // a symlinked folder that leads into the journal folder is caught on the resolved location
+    await symlink(undo, join(sync, "state", "link"));
+    await assert.rejects(() => writeSyncFile(sync, "/my-files/state/link/ABCD-EFGH.json", "{}"), /undo journal folder/);
+    // ordinary files in the sync folder, even next to them, are still written
+    await writeSyncFile(sync, "/my-files/state/notes.txt", "hello");
+    assert.equal(await readFile(join(sync, "state", "notes.txt"), "utf8"), "hello");
+  });
+
   it("assertUndoDirUsable refuses a folder inside the sync folder only", async () => {
     const sync = join(base, "sync4");
     await mkdir(join(sync, "in"), { recursive: true });

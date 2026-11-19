@@ -28,6 +28,11 @@ export interface IndexEntry {
    * so every folder counts as listed at completedAt.
    */
   listed?: Record<string, number>;
+  /**
+   * Folder path -> paths of the entries its last listing returned without a uid. They are not nodes, so the folder is not a complete listing: a
+   * resumed or cached walk that reuses the folder's listing must still report them as skipped (1.12.0).
+   */
+  unidentified?: Record<string, string[]>;
 }
 export interface IndexFile { version: number; accountKey: string; savedAt: number; entries: IndexEntry[] }
 
@@ -83,6 +88,9 @@ export function readPrivateJson(fileName: string, maxBytes = MAX_BYTES): unknown
 const validListed = (l: unknown): boolean =>
   l === undefined || (typeof l === "object" && l !== null && !Array.isArray(l) && Object.values(l).every((t) => typeof t === "number" && Number.isFinite(t)));
 
+const validUnidentified = (u: unknown): boolean =>
+  u === undefined || (typeof u === "object" && u !== null && !Array.isArray(u) && Object.values(u).every((v) => Array.isArray(v) && v.every((x) => typeof x === "string")));
+
 /** Reads and validates the index; anything wrong (missing, symlink, loose mode, foreign owner, oversize, corrupt, other version) is "no index". */
 export function readIndex(o: { requireWritable?: boolean } = {}): IndexFile | undefined {
   if (o.requireWritable) {
@@ -93,7 +101,7 @@ export function readIndex(o: { requireWritable?: boolean } = {}): IndexFile | un
   const j = readPrivateJson(FILE_NAME) as Partial<IndexFile> | null | undefined;
   if (!j || (j.version !== INDEX_VERSION && j.version !== 1) || typeof j.accountKey !== "string" || !Array.isArray(j.entries)) return undefined;
   const horizon = Date.now() + FUTURE_SKEW_MS;
-  const ok = j.entries.every((e) => e && typeof e.key === "string" && typeof e.root === "string" && Number.isFinite(e.completedAt) && e.completedAt <= horizon && Array.isArray(e.nodes) && e.opts && Array.isArray(e.opts.exclude) && validListed(e.listed));
+  const ok = j.entries.every((e) => e && typeof e.key === "string" && typeof e.root === "string" && Number.isFinite(e.completedAt) && e.completedAt <= horizon && Array.isArray(e.nodes) && e.opts && Array.isArray(e.opts.exclude) && validListed(e.listed) && validUnidentified(e.unidentified));
   if (!ok) return undefined;
   // A listing time ahead of the clock (it moved back) cannot be trusted: it counts as old.
   for (const e of j.entries) if (e.listed) for (const k of Object.keys(e.listed)) if (e.listed[k]! > horizon) e.listed[k] = 0;

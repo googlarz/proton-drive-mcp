@@ -460,8 +460,8 @@ describe("fingerprint and dialog lines", () => {
 
   it("dialog lines are raw and show the kept copy on every duplicate line", () => {
     const evil = [file(`${ROOT}/a\n(keeps \\/x).bin`, 5000, { mtime: "2020-01-01T00:00:00.000Z" }), file(`${ROOT}/b‮.bin`), dir(`${ROOT}/e`)];
-    const lines = summarizeForDialog(run(evil));
-    assert.deepEqual(lines, [`${ROOT}/b‮.bin  (keeps ${ROOT}/a\n(keeps \\/x).bin)`, `${ROOT}/e  (empty folder)`]);
+    const d = summarizeForDialog(run(evil));
+    assert.deepEqual(d, { trash: [`${ROOT}/b‮.bin`, `${ROOT}/e`], keeps: [`${ROOT}/a\n(keeps \\/x).bin`, ""] });
   });
 
   it("samples are capped at 10", () => {
@@ -470,7 +470,8 @@ describe("fingerprint and dialog lines", () => {
     const plan = run(nodes2);
     assert.equal(planSamples(plan).length, 10);
     assert.equal(planSamples(plan)[0], `trash ${ROOT}/c00.bin (keeps ${ROOT}/keep.bin)`);
-    assert.equal(summarizeForDialog(plan).length, 25);
+    assert.equal(summarizeForDialog(plan).trash.length, 25);
+    assert.equal(summarizeForDialog(plan).keeps.length, 25);
   });
 });
 

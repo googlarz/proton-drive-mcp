@@ -112,13 +112,14 @@ describe("computeCheckup findings", () => {
 
   it("fixableCount excludes shared and differing-size groups", () => {
     const nodes = [
-      f("/my-files/a1", 5, { sha1: "x" }), f("/my-files/a2", 5, { sha1: "x" }),
-      d("/my-files/sh", { isShared: true }), f("/my-files/sh/b1", 7, { sha1: "y" }), f("/my-files/b2", 7, { sha1: "y" }),
+      f("/my-files/a1", 2000, { sha1: "x" }), f("/my-files/a2", 2000, { sha1: "x" }),
+      d("/my-files/sh", { isShared: true }), f("/my-files/sh/b1", 3000, { sha1: "y" }), f("/my-files/b2", 3000, { sha1: "y" }),
       f("/my-files/c1", 9), f("/my-files/c2", 9),
+      f("/my-files/t1", 700, { sha1: "z" }), f("/my-files/t2", 700, { sha1: "z" }), // under cleanup's 1024-byte minimum
     ];
     const g = get(run(nodes), "duplicates");
-    assert.equal(g.count, 3);
-    assert.equal(g.fixableCount, 1);
+    assert.equal(g.count, 4);
+    assert.equal(g.fixableCount, 1, "only the 2000-byte pair: cleanup ignores files under 1024 bytes");
   });
 
   it("trash finding and sharingCapped", () => {

@@ -221,6 +221,16 @@ function assertOutsideSyncFolder(dir: string, env: Record<string, string | undef
   if (isInside(s, d) || isInside(resolve(sync), resolve(dir))) throw new Error(message);
 }
 
+/**
+ * For a file that a tool is about to write (drive_write_file): refuses the audit log, a .versions snapshot folder, the approvals folder and
+ * the undo journal folder, whether or not they sit inside the sync folder (the startup check only covers a configured sync path; this
+ * covers every write, so a journal can never be planted through the sync folder, for example when the sync folder is $HOME).
+ */
+export function assertWriteTargetAllowed(absPath: string): void {
+  const lexical = resolve(absPath);
+  assertNotWriteProtected(lexical, realResolve(lexical), absPath, false);
+}
+
 /** Startup check: the approvals folder must not sit inside the sync folder (it would sync to Drive and be editable with drive_write_file). */
 export function assertApprovalDirUsable(dir: string, env: Record<string, string | undefined> = process.env): void {
   assertOutsideSyncFolder(dir, env, "The approvals folder (PROTON_DRIVE_APPROVAL_DIR) must be outside PROTON_DRIVE_SYNC_PATH (the sync folder is uploaded and can be edited with drive_write_file).");
