@@ -61,7 +61,7 @@ test/                     Unit tests (injected runner) + real-process tests (fak
 - **Trash:** `drive_list_trash`, `drive_trash`, `drive_restore`, `drive_delete`, `drive_empty_trash`
 - **Sharing:** `drive_share_status`, `drive_share_invite`, `drive_share_revoke`, `drive_share_remove_all`, `drive_share_set_url`, `drive_share_remove_url`, `drive_share_leave`
 - **Invitations:** `drive_list_invitations`, `drive_invitation_accept`, `drive_invitation_reject`
-- **Plan & bulk:** `drive_sync_plan` (plan only), `drive_bulk_move`, `drive_bulk_trash` (plan first, `confirmed` to apply)
+- **Plan & bulk:** `drive_sync_plan` (plan only), `drive_bulk_move`, `drive_bulk_trash` (plan first, `confirmed` to apply; applying needs human approval of the exact list)
 - **Analytics:** `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_share_expiry_report`, `drive_recent_changes`
 - **Photos:** `photos_list_albums`, `photos_create_album`, `photos_update_album`, `photos_delete_album`, `photos_list_album_photos`, `photos_add_to_album`, `photos_remove_from_album`, `photos_list_timeline`, `photos_download`, `photos_upload`
 - **Local sync folder (needs `PROTON_DRIVE_SYNC_PATH`):** `drive_read_file`, `drive_write_file`
@@ -86,7 +86,8 @@ Tested against Proton Drive CLI 0.8.x (`TESTED_CLI = "0.8"` in `src/utils/cliVer
 ## Safety model
 
 - All argv built as arrays for `spawn` (no shell); flag injection blocked by validators.
-- `confirmed: true` required for destructive or outward-facing tools (delete, empty trash, remove-all, album delete, invite, revoke, public links, leave, reject, logout, remove-from-album) and for the `replace` / `remove` conflict strategies and overwriting a sync-folder file. The CLI requires `--confirm` for the destructive ones.
+- Human approval gate (`PROTON_DRIVE_APPROVAL`, default `human`; module `src/utils/approval.ts`, store `src/utils/approvalStore.ts`): destructive or outward-facing tools (delete, empty trash, remove-all, album delete, invite, revoke, public links, leave, accept and reject invitation, logout, remove-from-album), the `replace` / `remove` conflict strategies, overwriting a sync-folder file, applying a bulk move or trash, and anything that reads from or writes to `/shared-with-me` need a human yes for that exact operation. Channel 1: MCP elicitation, for every gated call. Channel 2, when the client cannot elicit: refusal with a code, then `proton-drive-cli approve <code>` in an interactive terminal, then the same call again (single use; pending 10 min, approved 5 min). Otherwise the call is refused. `strict` gates every mutating tool; `model` restores 1.10.1 (`confirmed: true` suffices).
+- `confirmed` is deprecated (removal planned for 2.0): still accepted, no longer an authorisation in `human` / `strict`, and still the plan/apply switch of `drive_bulk_move` / `drive_bulk_trash`. The CLI requires `--confirm` for the destructive ones. CLI commands `approvals`, `approve`, `deny` manage terminal approvals.
 - Local paths: credential-location denylist (or `PROTON_DRIVE_LOCAL_ROOT` allowlist), symlinks resolved first.
 - Errors never echo the command line; output is truncated.
 - CLI children run in their own process group and are killed on timeout, cancellation, disconnect and SIGTERM/SIGINT.
@@ -102,4 +103,4 @@ Tested against Proton Drive CLI 0.8.x (`TESTED_CLI = "0.8"` in `src/utils/cliVer
 
 - **Always:** validate every argument, check `{ok:false}` results, keep responses bounded (pagination), test against the real CLI before claiming a behaviour.
 - **Ask first:** new tools, changing a tool's response shape, dependency majors, changing CI/publish.
-- **Never:** log or echo secrets, bypass a confirmation gate, run destructive tools against a real account in automated tests.
+- **Never:** log or echo secrets, bypass the approval gate, run destructive tools against a real account in automated tests.

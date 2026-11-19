@@ -42,7 +42,7 @@ const TEXTS: Record<string, (a: Record<string, string>) => string> = {
 1. Survey it with drive_tree and drive_usage. Do not change anything yet.
 2. Propose a clearer folder structure and explain the reasoning briefly.
 3. Show the concrete plan by calling drive_bulk_move WITHOUT confirmed, so it is a dry run, and present the result to me.
-4. Wait for my explicit OK before running anything with confirmed=true. Apply only what I approved.
+4. Wait for my explicit OK, then apply only what I approved. The server asks me again to approve the exact list; if I decline, stop and do not retry.
 Never permanently delete anything; use drive_trash (reversible) if something must go, and ask first.`;
   },
   "find-files": (a) => {

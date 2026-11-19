@@ -15,7 +15,7 @@ npm run lint    # tsc --noEmit
 npm test        # builds first, then runs test/*.test.mjs with node --test
 ```
 
-The tests do not need a Proton account or the official `proton-drive` CLI: they run the built server against a fake CLI (`test/helpers/fake-cli.mjs`). The one exception is `test/live.test.mjs`, a read-only smoke test against the real CLI that is skipped unless `PROTON_DRIVE_LIVE=1`.
+The tests do not need a Proton account or the official `proton-drive` CLI: they run the built server against a fake CLI (`test/helpers/fake-cli.mjs`). The shared test client (`test/helpers/mcp-client.mjs`) starts the server with `PROTON_DRIVE_APPROVAL=model`, so suites that predate the approval gate keep working; tests of the gate itself (`test/approval-*.test.mjs`) set the mode explicitly. The one exception to the fake CLI is `test/live.test.mjs`, a read-only smoke test against the real CLI that is skipped unless `PROTON_DRIVE_LIVE=1`.
 
 CI (`.github/workflows/ci.yml`) runs `npm run lint`, `npm test` and `node scripts/pack-smoke.mjs` on Ubuntu and macOS with Node 22 and 24. `npm run ci` runs lint and tests locally.
 
@@ -27,7 +27,7 @@ PROTON_DRIVE_BIN="$(which proton-drive)" node dist/index.js   # MCP server on st
 npm run cli -- doctor                                         # companion CLI (builds first)
 ```
 
-To try your build in an MCP client, point the client at `node /absolute/path/to/dist/index.js`. This needs the official Proton Drive CLI installed and signed in (`proton-drive auth login`). Set `PROTON_DRIVE_MODE=readonly` while experimenting if you do not want a model to change your Drive.
+To try your build in an MCP client, point the client at `node /absolute/path/to/dist/index.js`. This needs the official Proton Drive CLI installed and signed in (`proton-drive auth login`). Set `PROTON_DRIVE_MODE=readonly` while experimenting if you do not want a model to change your Drive. Destructive operations need a human approval by default (dialog in your client, or `proton-drive-cli approve <code>`); see the README, and ARCHITECTURE.md for how to add a gated tool.
 
 ## Pull requests
 

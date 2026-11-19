@@ -12,7 +12,8 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createRequire } from "node:module";
-import { statSync } from "node:fs";
+import { createHash, scryptSync } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import {
   DriveService,
@@ -41,7 +42,7 @@ import { driveSearch, driveTree } from "./services/find.js";
 import { syncPlan, planBulkMove, planBulkTrash, loadListing, foldersToList, type Direction, type Compare } from "./services/plan.js";
 import { invalidatePath, abortBackgroundRefreshes } from "./services/walk.js";
 import { ocrEnabled, warmUpOcr } from "./services/ocr.js";
-import { getSyncRoot, readSyncFile, writeSyncFile, syncFileExists } from "./utils/syncfs.js";
+import { getSyncRoot, readSyncFile, writeSyncFile, syncFileExists, SyncFileExistsError } from "./utils/syncfs.js";
 import type { AlbumPhoto } from "./types/index.js";
 import { readDriveContent } from "./services/content.js";
 import { showValue } from "./utils/text.js";
@@ -52,7 +53,10 @@ import { driveRefreshIndex } from "./services/refreshIndex.js";
 import { driveReadMany } from "./services/readMany.js";
 import { driveContentIndex, driveSearchContent } from "./services/contentIndex.js";
 import { snapshotBeforeOverwrite, snapshotLocalBeforeOverwrite, snapshotEnabled, type Snapshot } from "./services/snapshot.js";
-import { AuditLog, auditLogInside, redactArgs } from "./utils/audit.js";
+import { AuditLog, auditLogInside, redactArgs, canonical, type AuditEntry } from "./utils/audit.js";
+import { ApprovalGate, requiresApproval, resolveApprovalMode, underShared, type ApprovalMode, type Effect, type Elicit, type FieldValue, type GateContext, type Operation } from "./utils/approval.js";
+import { createApprovalStore, resolveApprovalDir, type ApprovalStore } from "./utils/approvalStore.js";
+import { assertApprovalDirUsable } from "./utils/localguard.js";
 import { parseRemoteRoots, pathInRoots } from "./utils/remoteroots.js";
 
 const require = createRequire(import.meta.url);
@@ -118,6 +122,21 @@ function needConfirm(a: Record<string, unknown>, tool: string, action: string): 
   if (a.confirmed === true) return;
   throw new NeedsConfirmationError(`${tool} ${action} Describe this to the user, get their explicit OK, then call again with confirmed=true.`);
 }
+
+// ---- Approval gate helpers (1.11.0) ----
+/** Secrets are hashed into the operation but never shown: only this digest (hex prefix) goes into Operation.fields. */
+const digest = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 32);
+/**
+ * Same idea for the public-link password, which is low-entropy and whose digest ends up inside the operation hash stored in the
+ * approvals folder: a deterministic but deliberately slow key derivation (fixed salt, because the hash must match again on the next call
+ * and after a restart), so the stored hash is not a cheap offline guessing oracle for the password.
+ */
+const passwordDigest = (s: string) => scryptSync(s, "proton-drive-mcp approval v1: link password", 16).toString("hex");
+/** Drops undefined entries so optional validated values simply do not appear in the operation. */
+const fieldsOf = (o: Record<string, FieldValue | undefined>): Record<string, FieldValue> =>
+  Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Record<string, FieldValue>;
+/** "outward" when something ends up in /shared-with-me, else the given default. */
+const effectFor = (dflt: Effect, paths: string[]): Effect => (paths.some(underShared) ? "outward" : dflt);
 
 function paginate<T>(all: T[], a: Record<string, unknown>, defaultLimit: number) {
   const limit = typeof a.limit === "number" ? a.limit : defaultLimit;
@@ -1274,7 +1293,22 @@ const TOOL_TITLES: Record<string, string> = {
 // Hint for clients that cap tool-result size: these tools can legitimately return large payloads.
 const LARGE_RESULT_TOOLS = new Set(["drive_list", "drive_read_file", "drive_read_content", "drive_read_many"]);
 
-const TOOL_DEFS: ToolDef[] = TOOLS.map((t) => {
+// Human/strict approval (1.11.0): the server asks the user itself, so descriptions stop telling the model to pass confirmed=true
+// and `confirmed` is no longer required. Each edit must match the base text exactly (checked when the defs are built), so a
+// reworded description cannot silently keep the old instruction. The bulk tools keep their plan/apply switch wording.
+const HUMAN_DESCRIPTION_EDITS: Record<string, [from: string, to: string]> = {
+  drive_delete: [" Requires confirmed=true; show the exact path to the user first.", " The server asks the user to approve this itself and shows them the exact path."],
+  drive_empty_trash: [" Requires confirmed=true. Call drive_list_trash first, show the user exactly what will go, and get explicit confirmation.", " The server asks the user to approve this itself. Call drive_list_trash first so you can tell the user what will go."],
+  drive_share_remove_all: [" Requires confirmed=true; run drive_share_status first to show who loses access.", " The server asks the user to approve this itself; run drive_share_status first so you can tell them who loses access."],
+  photos_delete_album: [" Requires confirmed=true. Refuses", " The server asks the user to approve this itself. Refuses"],
+  drive_write_file: ["Refuses to overwrite an existing file unless confirmed=true — ask the user first.", "Overwriting an existing file needs the user's approval, which the server asks for itself."],
+  drive_bulk_move: ["moves only if no problems.", "moves only if no problems. With confirmed=true the server first asks the user to approve the exact list, and moves nothing if the plan changed meanwhile."],
+  drive_bulk_trash: ["trashes only if no problems.", "trashes only if no problems. With confirmed=true the server first asks the user to approve the exact list, and trashes nothing if the plan changed meanwhile."],
+};
+const BULK_TOOLS = new Set(["drive_bulk_move", "drive_bulk_trash"]);
+
+function buildToolDefs(humanApproval: boolean): ToolDef[] {
+  return TOOLS.map((t) => {
   const base = t as unknown as ToolDef;
   const properties: Record<string, JsonSchemaProp & { description?: string }> = { ...base.inputSchema.properties, ...(EXTRA_PROPS[base.name] ?? {}) };
   let description = base.description;
@@ -1282,22 +1316,39 @@ const TOOL_DEFS: ToolDef[] = TOOLS.map((t) => {
     properties.limit = { type: "integer", minimum: 1, maximum: 1000, description: `Max items to return (default ${PAGE_DEFAULTS[base.name]}).` };
     properties.offset = { type: "integer", minimum: 0, description: "Number of items to skip (default 0)." };
   }
-  const confirmedProp = { type: "boolean", description: "Must be true; only after the user approved this exact action." };
-  if (CONFIRM_ALWAYS.has(base.name)) {
-    properties.confirmed = confirmedProp;
-    description += " Requires confirmed=true after explicit user approval.";
-  } else if (CONFIRM_CONDITIONAL[base.name]) {
-    properties.confirmed = confirmedProp;
-    description += ` Requires confirmed=true ${CONFIRM_CONDITIONAL[base.name]}.`;
+  let required = base.inputSchema.required;
+  if (humanApproval) {
+    const edit = HUMAN_DESCRIPTION_EDITS[base.name];
+    if (edit) {
+      if (!description.includes(edit[0])) throw new Error(`HUMAN_DESCRIPTION_EDITS: text not found in ${base.name}`);
+      description = description.replace(edit[0], edit[1]);
+    }
+    const confirmedProp = BULK_TOOLS.has(base.name)
+      ? { type: "boolean", description: "Plan/apply switch: false or absent returns the plan only and changes nothing; true applies it after the server has asked the user to approve the exact list." }
+      : { type: "boolean", description: "Optional and ignored: the server asks the user to approve this itself. You do not need to send it." };
+    if (CONFIRM_ALWAYS.has(base.name) || CONFIRM_CONDITIONAL[base.name] || "confirmed" in properties) properties.confirmed = confirmedProp;
+    if (CONFIRM_ALWAYS.has(base.name) && !BULK_TOOLS.has(base.name)) description += " The server asks the user to approve this itself.";
+    else if (CONFIRM_CONDITIONAL[base.name]) description += ` The server asks the user to approve this itself ${CONFIRM_CONDITIONAL[base.name]}.`;
+    required = required?.filter((k) => k !== "confirmed" || BULK_TOOLS.has(base.name));
+  } else {
+    const confirmedProp = { type: "boolean", description: "Must be true; only after the user approved this exact action." };
+    if (CONFIRM_ALWAYS.has(base.name)) {
+      properties.confirmed = confirmedProp;
+      description += " Requires confirmed=true after explicit user approval.";
+    } else if (CONFIRM_CONDITIONAL[base.name]) {
+      properties.confirmed = confirmedProp;
+      description += ` Requires confirmed=true ${CONFIRM_CONDITIONAL[base.name]}.`;
+    }
   }
   return {
     ...base,
     ...(TOOL_TITLES[base.name] ? { title: TOOL_TITLES[base.name] } : {}),
     description,
-    inputSchema: { ...base.inputSchema, properties },
+    inputSchema: { ...base.inputSchema, properties, ...(required ? { required } : {}) },
     annotations: { ...(base.annotations ?? {}), ...(ANNOTATION_OVERRIDES[base.name] ?? {}) },
   };
-});
+  });
+}
 
 // Core tier (PROTON_DRIVE_TOOL_TIER=core): everyday tools only, to cut the tools/list
 // payload every session pays for. Excluded on purpose: permanent deletion
@@ -1468,6 +1519,11 @@ export async function main() {
   }
   const auditProblem = audit?.checkWritable();
   if (auditProblem) logger.warn(`PROTON_DRIVE_AUDIT_LOG cannot be written (${auditProblem}): tools that change Drive are refused until it can.`);
+  // PROTON_DRIVE_APPROVAL: who may approve destructive and outward-facing operations (human by default; see utils/approval.ts).
+  const { mode: apMode, warning: approvalWarning } = resolveApprovalMode(process.env);
+  if (approvalWarning) logger.warn(approvalWarning);
+  // Tool texts follow the mode: model mode keeps the 1.10.1 wording and schemas, human/strict stop telling the model to pass confirmed.
+  const TOOL_DEFS = buildToolDefs(apMode !== "model");
   const tierDefs = tier === "core" ? TOOL_DEFS.filter((t) => CORE_TOOL_NAMES.has(t.name)) : TOOL_DEFS;
   const activeDefs = mode === "readonly" ? tierDefs.filter((t) => !MUTATING_TOOL_NAMES.has(t.name)) : tierDefs;
   const withinRoots = (path: string) => !remoteRoots || pathInRoots(path, remoteRoots);
@@ -1491,6 +1547,58 @@ export async function main() {
     { name: "proton-drive-mcp", version: VERSION },
     { capabilities: { tools: {}, prompts: {} } }
   );
+
+  // Channel 1: the client's own dialog. Approved only on accept AND approve=true; any failure is "error", never an approval.
+  const elicitHuman: Elicit = async (summary, signal) => {
+    try {
+      const res = await server.elicitInput(
+        {
+          message: summary,
+          requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Approve this action", default: false } }, required: ["approve"] },
+        },
+        { timeout: 120_000, signal },
+      );
+      if (res.action === "accept") return res.content?.approve === true ? "accept" : "decline";
+      return res.action === "decline" ? "decline" : "cancel";
+    } catch {
+      return "error";
+    }
+  };
+  // Channel 2: the out-of-band store, for a client that cannot elicit and as the terminal route when a dialog is cancelled or fails.
+  // Created on first use so nothing touches the disk otherwise.
+  let approvalStore: ApprovalStore | undefined;
+  let approvalStoreTried = false;
+  let approvalStoreProblem: string | undefined;
+  if (apMode !== "model") {
+    // Tell the owner at startup, not at the first gated call.
+    try { assertApprovalDirUsable(resolveApprovalDir(process.env), process.env); }
+    catch (err) { logger.warn(`approval store unusable (${err instanceof Error ? err.message : String(err)}): operations that need approval and cannot be approved in a dialog will be refused until this is fixed.`); }
+  }
+  const gate = new ApprovalGate({
+    mode: apMode,
+    get elicit() { return canElicit() ? elicitHuman : undefined; },
+    get store() {
+      if (apMode === "model") return undefined;
+      if (!approvalStoreTried) {
+        approvalStoreTried = true;
+        try { const dir = resolveApprovalDir(process.env); assertApprovalDirUsable(dir, process.env); approvalStore = createApprovalStore({ dir }); }
+        catch (err) {
+          approvalStoreProblem = err instanceof Error ? err.message : String(err);
+          logger.warn(`approval store unavailable (${approvalStoreProblem}): gated operations will be refused.`);
+        }
+      }
+      return approvalStore;
+    },
+    get storeProblem() { return approvalStoreProblem; },
+    // Only an existing approvals folder: cleanup after a dialog decision must not create the folder for a client whose dialog works.
+    get storeIfPresent() {
+      if (apMode === "model") return undefined;
+      if (approvalStore) return approvalStore;
+      try { if (!existsSync(resolveApprovalDir(process.env))) return undefined; } catch { return undefined; }
+      return this.store;
+    },
+    onWarning: (m) => logger.warn(m),
+  });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: activeDefs.map((t) => ({
@@ -1524,9 +1632,44 @@ export async function main() {
     return { description: def?.description, messages: [{ role: "user" as const, content: { type: "text" as const, text } }] };
   });
 
-  const callTool = async (req: { params: { name: string; arguments?: Record<string, unknown> } }): Promise<ToolResult> => {
+  const callTool = async (req: { params: { name: string; arguments?: Record<string, unknown> } }, note: { approval?: AuditEntry["approval"] } = {}): Promise<ToolResult> => {
     const { name, arguments: args = {} } = req.params;
     let a = args as Record<string, unknown>;
+
+    // Approval (1.11.0). `need` = this call is in the gated set. Always call it with a VALIDATED operation, after the roots,
+    // readonly and audit checks, and never read the raw `a` after it: what is shown = what is hashed = what runs.
+    // Model mode keeps the 1.10.1 checks at their original place (legacyNeed / NeedsConfirmationError), so there `a.confirmed`
+    // has been checked already and the gate only records channel "model".
+    const legacyNeed = (tool: string, action: string) => { if (apMode === "model") needConfirm(a, tool, action); };
+    const gateNeeded = (legacy: boolean, args: Record<string, unknown>, ctx: GateContext = {}) =>
+      apMode === "model" ? legacy : requiresApproval(name, args, apMode, { ...ctx, mutatingTools: MUTATING_TOOL_NAMES });
+    const legacyConfirmed = a.confirmed === true;
+    // What the plan tells the model to do next (bulk tools).
+    // Operations addressed by uid alone: look the item up BEFORE the question so the human sees a name, not just an id. Display
+    // only (the uid stays in the hashed fields); a failed lookup is shown as such and never blocks or approves anything.
+    const NOT_RESOLVED = "(name not resolved)";
+    const trashedItem = async (uid: string): Promise<Record<string, FieldValue>> => {
+      try { const hit = (await drive.listTrash()).find((f) => f.uid === uid); return { item: hit ? hit.path : NOT_RESOLVED }; }
+      catch { return { item: NOT_RESOLVED }; }
+    };
+    const invitation = async (uid: string): Promise<Record<string, FieldValue>> => {
+      try {
+        const hit = (await drive.listInvitations()).find((i) => i.uid === uid);
+        return hit ? { inviter: hit.invitedByEmail || NOT_RESOLVED, invitedFolder: `${hit.nodeName} (${hit.nodeType})`, role: hit.role } : { inviter: NOT_RESOLVED, invitedFolder: NOT_RESOLVED };
+      } catch { return { inviter: NOT_RESOLVED, invitedFolder: NOT_RESOLVED }; }
+    };
+    const applyNext = apMode === "model"
+      ? "Get user approval, then confirmed=true."
+      : "Call again with confirmed=true to apply; the server will ask the user for approval itself, showing this exact list.";
+    const requireApproval = async (op: Operation, need: boolean): Promise<ToolResult | undefined> => {
+      if (!need) return undefined;
+      const r = await gate.require(op, { legacyConfirmed, signal: callContext.getStore()?.signal });
+      if (r.ok) {
+        note.approval = { channel: r.channel, op: r.opHash.slice(0, 16), ...(r.code ? { code: r.code } : {}) };
+        return undefined;
+      }
+      return refuse(r.code, r.message);
+    };
 
     const def = TOOL_DEFS.find((t) => t.name === name);
     // A client may remember a name from a fuller tools/list; refuse before any CLI call.
@@ -1542,7 +1685,7 @@ export async function main() {
         // `confirmed` is schema-required on the destructive tools. For a client that can ask the human, a missing
         // `confirmed` must still reach the gate (which prompts); any other validation failure stays an error.
         const asConfirmFalse = { ...a, confirmed: false };
-        if (a.confirmed !== undefined && a.confirmed !== null || !canElicit() || checkArgs(def, asConfirmFalse)) return fail(problem);
+        if (apMode !== "model" || a.confirmed !== undefined && a.confirmed !== null || !canElicit() || checkArgs(def, asConfirmFalse)) return fail(problem);
         a = asConfirmFalse;
       }
       if (remoteRoots) {
@@ -1569,7 +1712,9 @@ export async function main() {
           return ok(await drive.authStatus());
 
         case "drive_auth_logout": {
-          needConfirm(a, "drive_auth_logout", "ends the stored Proton Drive session for every client on this machine.");
+          legacyNeed("drive_auth_logout", "ends the stored Proton Drive session for every client on this machine.");
+          const denied = await requireApproval({ tool: name, effect: "reversible", fields: {} }, true);
+          if (denied) return denied;
           await drive.authLogout();
           return ok({ message: "Logged out successfully." });
         }
@@ -1597,6 +1742,11 @@ export async function main() {
 
         case "drive_mkdir": {
           const mkdirPath = validateRemotePath(a.path);
+          const denied = await requireApproval(
+            { tool: name, effect: effectFor("reversible", [mkdirPath]), fields: { path: mkdirPath } },
+            gateNeeded(false, {}, { resultingPaths: [mkdirPath] }),
+          );
+          if (denied) return denied;
           await drive.mkdir(mkdirPath);
           return ok({ message: `Folder created: ${mkdirPath}` });
         }
@@ -1610,23 +1760,35 @@ export async function main() {
           if (!["skip", "merge", "rename", "replace"].includes(dcs2)) {
             return fail(`folderConflictStrategy must be skip, merge, rename, or replace`);
           }
-          if ((fcs === "replace" || dcs2 === "replace") && a.confirmed !== true) {
+          const replacing = fcs === "replace" || dcs2 === "replace";
+          if (replacing && apMode === "model" && a.confirmed !== true) {
             throw new NeedsConfirmationError("drive_upload with strategy 'replace' trashes the existing remote item. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
           const uploadLocal = validateLocalPath(a.localPath, { scan: true, upload: true });
           const uploadRemote = validateRemotePath(a.remotePath);
+          const skipThumbnails = a.skipThumbnails === true;
           const uploadExtra: { snapshot?: string } = {};
-          if (snapshotEnabled() && (fcs === "replace" || dcs2 === "replace")) {
-            if (statSync(uploadLocal, { throwIfNoEntry: false })?.isDirectory()) {
-              return refuse("snapshot", `drive_upload refused: replacing a folder is not versioned and PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE is on. Nothing was uploaded. Use 'merge', 'rename' or 'skip' instead, or turn snapshots off.`);
-            } else if (fcs === "replace") {
-              const target = joinRemote(uploadRemote, basename(uploadLocal));
-              try {
-                const snap = await snapshotBeforeOverwrite(drive, target, withinRoots);
-                if (snap.snapshot) uploadExtra.snapshot = snap.snapshot;
-              } catch (err) {
-                return refuse("snapshot", `drive_upload refused: could not snapshot ${showValue(target)} before replacing it (${truncate(err instanceof Error ? err.message : String(err), 200)}). Nothing was uploaded.`);
-              }
+          const snapshotUpload = snapshotEnabled() && replacing;
+          // A refusal that needs no Drive call comes before the question to the human.
+          if (snapshotUpload && statSync(uploadLocal, { throwIfNoEntry: false })?.isDirectory()) {
+            return refuse("snapshot", `drive_upload refused: replacing a folder is not versioned and PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE is on. Nothing was uploaded. Use 'merge', 'rename' or 'skip' instead, or turn snapshots off.`);
+          }
+          const uploadTarget = joinRemote(uploadRemote, basename(uploadLocal));
+          const uploadDenied = await requireApproval(
+            {
+              tool: name,
+              effect: effectFor("reversible", [uploadRemote, uploadTarget]),
+              fields: { localPath: uploadLocal, remotePath: uploadRemote, fileConflictStrategy: fcs, folderConflictStrategy: dcs2, skipThumbnails },
+            },
+            gateNeeded(replacing, { fileConflictStrategy: fcs, folderConflictStrategy: dcs2 }, { resultingPaths: [uploadRemote, uploadTarget] }),
+          );
+          if (uploadDenied) return uploadDenied;
+          if (snapshotUpload && fcs === "replace") {
+            try {
+              const snap = await snapshotBeforeOverwrite(drive, uploadTarget, withinRoots);
+              if (snap.snapshot) uploadExtra.snapshot = snap.snapshot;
+            } catch (err) {
+              return refuse("snapshot", `drive_upload refused: could not snapshot ${showValue(uploadTarget)} before replacing it (${truncate(err instanceof Error ? err.message : String(err), 200)}). Nothing was uploaded.`);
             }
           }
           const uploadResult = await drive.upload(
@@ -1634,7 +1796,7 @@ export async function main() {
             uploadRemote,
             fcs as FileConflictStrategy,
             dcs2 as FolderConflictStrategy,
-            a.skipThumbnails === true
+            skipThumbnails
           );
           if (uploadResult.failed > 0) {
             return fail(`Upload completed with ${uploadResult.failed} failed file(s). uploaded=${uploadResult.uploaded} skipped=${uploadResult.skipped}`);
@@ -1654,13 +1816,20 @@ export async function main() {
           if (mode === "readonly" && (fdcs === "remove" || fodcs === "remove")) {
             return refuse("readonly", "drive_download with strategy 'remove' deletes existing local files and is not available in readonly mode. Use 'skip' or 'rename', or set PROTON_DRIVE_MODE=full and restart the server.");
           }
-          if ((fdcs === "remove" || fodcs === "remove") && a.confirmed !== true) {
+          const removing = fdcs === "remove" || fodcs === "remove";
+          if (removing && apMode === "model" && a.confirmed !== true) {
             throw new NeedsConfirmationError("drive_download with strategy 'remove' deletes the existing LOCAL file or folder before downloading. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
           const downloadRemote = validateRemotePath(a.remotePath);
+          const downloadTarget = validateDownloadTarget(a.localPath, [downloadRemote]);
+          const downloadDenied = await requireApproval(
+            { tool: name, effect: removing ? "local-delete" : "reversible", fields: { remotePath: downloadRemote, localPath: downloadTarget, fileConflictStrategy: fdcs, folderConflictStrategy: fodcs } },
+            gateNeeded(removing, { fileConflictStrategy: fdcs, folderConflictStrategy: fodcs }),
+          );
+          if (downloadDenied) return downloadDenied;
           const downloadResult = await drive.download(
             downloadRemote,
-            validateDownloadTarget(a.localPath, [downloadRemote]),
+            downloadTarget,
             fdcs as FileDownloadConflictStrategy,
             fodcs as FolderDownloadConflictStrategy
           );
@@ -1673,6 +1842,12 @@ export async function main() {
         case "drive_rename": {
           const renamePath = validateRemotePath(a.path);
           const newName = validateName(a.newName);
+          const renamedTo = resultingPaths(name, { path: renamePath, newName });
+          const denied = await requireApproval(
+            { tool: name, effect: effectFor("reversible", [renamePath, ...renamedTo]), fields: { path: renamePath, newName } },
+            gateNeeded(false, {}, { resultingPaths: renamedTo, sourcePaths: [renamePath] }),
+          );
+          if (denied) return denied;
           await drive.rename(renamePath, newName);
           return ok({ message: `Renamed: ${renamePath} → ${newName}` });
         }
@@ -1680,16 +1855,26 @@ export async function main() {
         case "drive_move": {
           const moveSrc = validateRemotePath(a.sourcePath);
           const moveDst = validateRemotePath(a.destinationPath);
+          const denied = await requireApproval(
+            { tool: name, effect: effectFor("reversible", [moveSrc, moveDst]), fields: { sourcePath: moveSrc, destinationPath: moveDst } },
+            gateNeeded(false, {}, { resultingPaths: [moveDst], sourcePaths: [moveSrc] }),
+          );
+          if (denied) return denied;
           await drive.move(moveSrc, moveDst);
           return ok({ message: `Moved: ${moveSrc} → ${moveDst}` });
         }
 
         case "drive_delete": {
-          if (a.confirmed !== true) {
+          if (apMode === "model" && a.confirmed !== true) {
             throw new NeedsConfirmationError("drive_delete requires confirmed=true. Ask the user to confirm before deleting.");
           }
           const deletePath = a.path === undefined ? undefined : validateRemotePath(a.path);
           const deleteUid = a.uid ? validateFlagValue(a.uid as string, "uid") : undefined;
+          const denied = await requireApproval({
+            tool: name, effect: "irreversible", fields: fieldsOf({ path: deletePath, uid: deleteUid }),
+            ...(apMode !== "model" && deleteUid && !deletePath ? { display: await trashedItem(deleteUid) } : {}),
+          }, true);
+          if (denied) return denied;
           await drive.delete(deletePath, deleteUid);
           return ok({ message: `Deleted: ${deletePath ?? `uid ${deleteUid}`}` });
         }
@@ -1754,7 +1939,7 @@ export async function main() {
           return ok(await drive.shareStatus(validateRemotePath(a.path)));
 
         case "drive_share_invite": {
-          needConfirm(a, "drive_share_invite", "immediately emails the invitee and grants them access.");
+          legacyNeed("drive_share_invite", "immediately emails the invitee and grants them access.");
           const email = validateEmail(a.email);
           if (typeof a.role !== "string") {
             return fail("role must be a string: viewer, editor, or admin");
@@ -1764,8 +1949,15 @@ export async function main() {
             return fail("role must be viewer, editor, or admin");
           }
           const inviteMsg = typeof a.message === "string" ? validateMessage(a.message) : undefined;
+          const invitePath = validateRemotePath(a.path);
+          const denied = await requireApproval({
+            tool: name, effect: "outward",
+            fields: fieldsOf({ path: invitePath, email, role, messageDigest: inviteMsg === undefined ? null : digest(inviteMsg) }),
+            display: { message: inviteMsg === undefined ? 0 : [...inviteMsg].length },
+          }, true);
+          if (denied) return denied;
           await drive.shareInvite(
-            validateRemotePath(a.path),
+            invitePath,
             email,
             role as "viewer" | "editor" | "admin",
             inviteMsg
@@ -1775,14 +1967,19 @@ export async function main() {
 
         case "drive_share_revoke":
         {
-          needConfirm(a, "drive_share_revoke", "removes a person's access.");
+          legacyNeed("drive_share_revoke", "removes a person's access.");
           const revokeEmail = validateEmail(a.email);
-          await drive.shareRevoke(validateRemotePath(a.path), revokeEmail);
+          const revokePath = validateRemotePath(a.path);
+          const denied = await requireApproval({ tool: name, effect: "outward", fields: { path: revokePath, email: revokeEmail } }, true);
+          if (denied) return denied;
+          await drive.shareRevoke(revokePath, revokeEmail);
           return ok({ message: `Revoked access for ${revokeEmail}.` });
         }
 
         case "drive_trash": {
           const trashPath = validateRemotePath(a.path);
+          const denied = await requireApproval({ tool: name, effect: effectFor("reversible", [trashPath]), fields: { path: trashPath } }, gateNeeded(false, {}, { sourcePaths: [trashPath] }));
+          if (denied) return denied;
           await drive.trash(trashPath);
           return ok({ message: `Moved to trash: ${trashPath}` });
         }
@@ -1805,11 +2002,25 @@ export async function main() {
           const destFolder = validateRemotePath(a.destinationFolder);
           const movePlan = planBulkMove(sources, destFolder, await loadListing(drive, foldersToList(sources, destFolder)));
           if (a.confirmed !== true) {
-            return ok({ applied: false, ...movePlan, next: movePlan.problems.length ? "Fix problems first." : "Get user approval, then confirmed=true." });
+            return ok({ applied: false, ...movePlan, next: movePlan.problems.length ? "Fix problems first." : applyNext });
           }
           if (movePlan.problems.length) return fail(`drive_bulk_move not applied, nothing moved: ${JSON.stringify(movePlan.problems)}`);
-          if (canElicit() && !(await askApproval(bulkPrompt("drive_bulk_move", "Move", sources, destFolder)))) {
-            return fail("drive_bulk_move not applied, nothing moved: the user did not approve.");
+          if (apMode === "model") {
+            if (canElicit() && !(await askApproval(bulkPrompt("drive_bulk_move", "Move", sources, destFolder)))) {
+              return fail("drive_bulk_move not applied, nothing moved: the user did not approve.");
+            }
+          } else {
+            const movedTo = resultingPaths(name, { sources, destinationFolder: destFolder });
+            const denied = await requireApproval({
+              tool: name, effect: effectFor("reversible", [...sources, ...movedTo]),
+              fields: { destinationFolder: destFolder, moves: movePlan.plan.map((p) => `${p.source} -> ${p.destination}`) },
+            }, true);
+            if (denied) return denied;
+            // The human approved this exact plan: apply it only if Drive still gives the same one.
+            const again = planBulkMove(sources, destFolder, await loadListing(drive, foldersToList(sources, destFolder)));
+            if (canonical(again) !== canonical(movePlan)) {
+              return refuse("approval_changed", "drive_bulk_move not applied, nothing moved: Drive changed after the user approved the plan. Run the plan again and ask for approval again.");
+            }
           }
           try { await drive.bulkMove(sources, destFolder); } finally { invalidatePath(destFolder); sources.forEach(invalidatePath); }
           return ok({ applied: true, moved: movePlan.plan.length, plan: movePlan.plan });
@@ -1819,11 +2030,20 @@ export async function main() {
           const trashPaths = validateRemotePathList(a.paths, "paths");
           const trashPlan = planBulkTrash(trashPaths, await loadListing(drive, foldersToList(trashPaths)));
           if (a.confirmed !== true) {
-            return ok({ applied: false, ...trashPlan, next: trashPlan.problems.length ? "Fix problems first." : "Get user approval, then confirmed=true." });
+            return ok({ applied: false, ...trashPlan, next: trashPlan.problems.length ? "Fix problems first." : applyNext });
           }
           if (trashPlan.problems.length) return fail(`drive_bulk_trash not applied, nothing trashed: ${JSON.stringify(trashPlan.problems)}`);
-          if (canElicit() && !(await askApproval(bulkPrompt("drive_bulk_trash", "Trash", trashPaths)))) {
-            return fail("drive_bulk_trash not applied, nothing trashed: the user did not approve.");
+          if (apMode === "model") {
+            if (canElicit() && !(await askApproval(bulkPrompt("drive_bulk_trash", "Trash", trashPaths)))) {
+              return fail("drive_bulk_trash not applied, nothing trashed: the user did not approve.");
+            }
+          } else {
+            const denied = await requireApproval({ tool: name, effect: effectFor("reversible", trashPaths), fields: { paths: trashPlan.plan.map((p) => p.source) } }, true);
+            if (denied) return denied;
+            const again = planBulkTrash(trashPaths, await loadListing(drive, foldersToList(trashPaths)));
+            if (canonical(again) !== canonical(trashPlan)) {
+              return refuse("approval_changed", "drive_bulk_trash not applied, nothing trashed: Drive changed after the user approved the plan. Run the plan again and ask for approval again.");
+            }
           }
           try { await drive.bulkTrash(trashPaths); } finally { trashPaths.forEach(invalidatePath); }
           return ok({ applied: true, trashed: trashPlan.plan.length, plan: trashPlan.plan });
@@ -1832,24 +2052,39 @@ export async function main() {
         case "drive_restore": {
           const restorePath = a.path === undefined ? undefined : validateRemotePath(a.path);
           const restoreUid = a.uid ? validateFlagValue(a.uid as string, "uid") : undefined;
+          const restoreNeed = gateNeeded(false, {}, { sourcePaths: restorePath ? [restorePath] : [] });
+          const denied = await requireApproval({
+            tool: name, effect: effectFor("reversible", restorePath ? [restorePath] : []), fields: fieldsOf({ path: restorePath, uid: restoreUid }),
+            ...(restoreNeed && restoreUid && !restorePath ? { display: await trashedItem(restoreUid) } : {}),
+          }, restoreNeed);
+          if (denied) return denied;
           await drive.restore(restorePath, restoreUid);
           return ok({ message: `Restored from trash: ${restorePath ?? `uid ${restoreUid}`}` });
         }
 
-        case "drive_empty_trash":
-          if (a.confirmed !== true) {
+        case "drive_empty_trash": {
+          if (apMode === "model" && a.confirmed !== true) {
             throw new NeedsConfirmationError(
               "drive_empty_trash requires confirmed=true. " +
               "Use drive_list_trash first to show the user what will be deleted, then ask for confirmation."
             );
           }
+          const denied = await requireApproval({ tool: name, effect: "irreversible", fields: {} }, true);
+          if (denied) return denied;
           await drive.emptyTrash();
           return ok({ message: "Trash emptied." });
+        }
 
         case "drive_copy": {
           const copySrc = validateRemotePath(a.sourcePath);
           const copyDst = validateRemotePath(a.destinationPath);
           const copyName = typeof a.newName === "string" ? validateName(a.newName) : undefined;
+          const copiedTo = resultingPaths(name, { sourcePath: copySrc, destinationPath: copyDst, newName: copyName });
+          const denied = await requireApproval(
+            { tool: name, effect: effectFor("reversible", [copySrc, ...copiedTo]), fields: fieldsOf({ sourcePath: copySrc, destinationPath: copyDst, newName: copyName }) },
+            gateNeeded(false, {}, { resultingPaths: copiedTo, sourcePaths: [copySrc] }),
+          );
+          if (denied) return denied;
           await drive.copy(copySrc, copyDst, copyName);
           return ok({ message: `Copied: ${copySrc} → ${copyDst}${copyName ? ` as '${copyName}'` : ""}` });
         }
@@ -1860,56 +2095,85 @@ export async function main() {
         case "drive_invitation_accept": {
           if (typeof a.uid !== "string" || !a.uid) return fail("uid must be a non-empty string");
           const acceptUid = validateFlagValue(a.uid, "uid");
+          // Accepting is not gated in model mode (1.10.1); in human/strict it is, because it opens a folder somebody else controls.
+          const denied = await requireApproval({
+            tool: name, effect: "outward", fields: { uid: acceptUid },
+            ...(apMode !== "model" ? { display: await invitation(acceptUid) } : {}),
+          }, apMode !== "model");
+          if (denied) return denied;
           await drive.invitationAccept(acceptUid);
           return ok({ message: "Invitation accepted." });
         }
 
         case "drive_invitation_reject": {
           if (typeof a.uid !== "string" || !a.uid) return fail("uid must be a non-empty string");
-          needConfirm(a, "drive_invitation_reject", "declines the invitation permanently.");
+          legacyNeed("drive_invitation_reject", "declines the invitation permanently.");
           const rejectUid = validateFlagValue(a.uid, "uid");
+          const denied = await requireApproval({
+            tool: name, effect: "irreversible", fields: { uid: rejectUid },
+            ...(apMode !== "model" ? { display: await invitation(rejectUid) } : {}),
+          }, true);
+          if (denied) return denied;
           await drive.invitationReject(rejectUid);
           return ok({ message: "Invitation rejected." });
         }
 
         case "drive_share_leave": {
-          needConfirm(a, "drive_share_leave", "removes your own access to a shared folder.");
+          legacyNeed("drive_share_leave", "removes your own access to a shared folder.");
           const leavePath = validateRemotePath(a.path);
+          const denied = await requireApproval({ tool: name, effect: "irreversible", fields: { path: leavePath } }, true);
+          if (denied) return denied;
           await drive.shareLeave(leavePath);
           return ok({ message: `Left shared folder: ${leavePath}` });
         }
 
         case "drive_share_set_url": {
-          needConfirm(a, "drive_share_set_url", "creates or replaces a PUBLIC link that anyone with the URL can open.");
+          legacyNeed("drive_share_set_url", "creates or replaces a PUBLIC link that anyone with the URL can open.");
           const setUrlPath = validateRemotePath(a.path);
           const role = typeof a.role === "string" ? a.role : "viewer";
           if (!["viewer", "editor"].includes(role)) return fail("role must be viewer or editor");
           const password = typeof a.password === "string" && a.password ? validateFlagValue(a.password, "password") : undefined;
           const expiration = typeof a.expiration === "string" && a.expiration ? validateFlagValue(a.expiration, "expiration") : undefined;
-          if ((!password || !expiration) && a.resetSettings !== true) {
+          const resetSettings = a.resetSettings === true;
+          const checkLostSettings = (!password || !expiration) && !resetSettings;
+          let replacesExistingLink: boolean | undefined;
+          if (checkLostSettings || apMode !== "model") {
             // set-url replaces the link's settings, so whatever this call omits would be silently removed.
             const before = await drive.shareStatus(setUrlPath); // a failed read refuses too: unknown settings are not safe to overwrite
-            const lost = [!password && before.sharePasswordProtected ? "password" : "", !expiration && before.shareUrlExpiresAt ? `expiration (${before.shareUrlExpiresAt})` : ""].filter(Boolean);
-            if (lost.length) {
-              return refuse("link_settings", `drive_share_set_url refused: ${showValue(setUrlPath)} already has a public link, and this call does not pass its ${lost.join(" and ")}, which would be REMOVED (set-url replaces all link settings). Nothing was changed. Pass ${lost.length > 1 ? "them" : "it"} again, or pass resetSettings=true to drop ${lost.length > 1 ? "them" : "it"} on purpose.`);
+            replacesExistingLink = before.shareUrl !== undefined || before.sharePasswordProtected !== undefined;
+            if (checkLostSettings) {
+              const lost = [!password && before.sharePasswordProtected ? "password" : "", !expiration && before.shareUrlExpiresAt ? `expiration (${before.shareUrlExpiresAt})` : ""].filter(Boolean);
+              if (lost.length) {
+                return refuse("link_settings", `drive_share_set_url refused: ${showValue(setUrlPath)} already has a public link, and this call does not pass its ${lost.join(" and ")}, which would be REMOVED (set-url replaces all link settings). Nothing was changed. Pass ${lost.length > 1 ? "them" : "it"} again, or pass resetSettings=true to drop ${lost.length > 1 ? "them" : "it"} on purpose.`);
+              }
             }
           }
+          const denied = await requireApproval({
+            tool: name, effect: "outward",
+            fields: fieldsOf({ path: setUrlPath, role, passwordDigest: password === undefined ? null : passwordDigest(password), expiration: expiration ?? null, resetSettings, replacesExistingLink }),
+            display: { password: password !== undefined },
+          }, true);
+          if (denied) return denied;
           const link = await drive.shareSetUrl(setUrlPath, role as "viewer" | "editor", password, expiration);
           return ok(link);
         }
 
         case "drive_share_remove_url": {
-          needConfirm(a, "drive_share_remove_url", "disables the public link.");
+          legacyNeed("drive_share_remove_url", "disables the public link.");
           const removeUrlPath = validateRemotePath(a.path);
+          const denied = await requireApproval({ tool: name, effect: "outward", fields: { path: removeUrlPath } }, true);
+          if (denied) return denied;
           await drive.shareRemoveUrl(removeUrlPath);
           return ok({ message: `Public link removed: ${removeUrlPath}` });
         }
 
         case "drive_share_remove_all": {
-          if (a.confirmed !== true) {
+          if (apMode === "model" && a.confirmed !== true) {
             throw new NeedsConfirmationError("drive_share_remove_all requires confirmed=true. Use drive_share_status first to show the user who has access.");
           }
           const removeAllPath = validateRemotePath(a.path);
+          const denied = await requireApproval({ tool: name, effect: "outward", fields: { path: removeAllPath } }, true);
+          if (denied) return denied;
           const removeAll = await drive.shareRemoveAll(removeAllPath);
           const linkNote = removeAll.publicLink ? " A public link is still active — anyone with it keeps access; remove it with drive_share_remove_url." : "";
           return ok({ message: (removeAll.removed === 0 ? `Nothing to remove: ${removeAllPath} has no members or pending invitations.` : `Removed all members and invitations (${removeAll.removed}) from: ${removeAllPath}.`) + linkNote });
@@ -1921,6 +2185,8 @@ export async function main() {
         case "photos_create_album": {
           if (typeof a.name !== "string" || !a.name.trim()) return fail("name must be a non-empty string");
           const albumName = validateName(a.name);
+          const denied = await requireApproval({ tool: name, effect: "reversible", fields: { name: albumName } }, gateNeeded(false, {}));
+          if (denied) return denied;
           await drive.createAlbum(albumName);
           return ok({ message: `Album created: ${albumName}` });
         }
@@ -1931,15 +2197,20 @@ export async function main() {
           const newName = typeof a.name === "string" && a.name.trim() ? validateName(a.name) : undefined;
           const coverPhotoUid = typeof a.coverPhotoUid === "string" && a.coverPhotoUid.trim() ? validateName(a.coverPhotoUid) : undefined;
           if (!newName && !coverPhotoUid) return fail("At least one of name or coverPhotoUid must be provided");
+          const denied = await requireApproval({ tool: name, effect: "reversible", fields: fieldsOf({ albumPath: updateAlbumPath, name: newName, coverPhotoUid }) }, gateNeeded(false, {}));
+          if (denied) return denied;
           await drive.updateAlbum(updateAlbumPath, newName, coverPhotoUid);
           return ok({ message: `Album updated: ${newName ? `/albums/${newName}` : updateAlbumPath}` });
         }
 
         case "photos_delete_album": {
-          if (a.confirmed !== true) throw new NeedsConfirmationError("photos_delete_album requires confirmed=true. Show the user the album name and photo count first.");
+          if (apMode === "model" && a.confirmed !== true) throw new NeedsConfirmationError("photos_delete_album requires confirmed=true. Show the user the album name and photo count first.");
           const albumDelPath = validateRemotePath(a.albumPath);
           if (!albumDelPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
-          await drive.deleteAlbum(albumDelPath, a.force === true, a.save === true);
+          const albumForce = a.force === true, albumSave = a.save === true;
+          const denied = await requireApproval({ tool: name, effect: "irreversible", fields: { albumPath: albumDelPath, force: albumForce, save: albumSave } }, true);
+          if (denied) return denied;
+          await drive.deleteAlbum(albumDelPath, albumForce, albumSave);
           return ok({ message: `Album deleted: ${albumDelPath}` });
         }
 
@@ -1954,16 +2225,20 @@ export async function main() {
           const addPhotoPath = validateRemotePath(a.photoPath);
           if (!addAlbumPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
           if (!addPhotoPath.startsWith("/photos/")) return fail("photoPath must start with /photos/");
+          const denied = await requireApproval({ tool: name, effect: "reversible", fields: { albumPath: addAlbumPath, photoPath: addPhotoPath } }, gateNeeded(false, {}));
+          if (denied) return denied;
           await drive.addPhotoToAlbum(addAlbumPath, addPhotoPath);
           return ok({ message: `Added ${addPhotoPath} to ${addAlbumPath}` });
         }
 
         case "photos_remove_from_album": {
-          needConfirm(a, "photos_remove_from_album", "removes a photo from the album.");
+          legacyNeed("photos_remove_from_album", "removes a photo from the album.");
           const remAlbumPath = validateRemotePath(a.albumPath);
           const remPhotoPath = validateRemotePath(a.photoPath);
           if (!remAlbumPath.startsWith("/albums/")) return fail("albumPath must start with /albums/");
           if (!remPhotoPath.startsWith("/photos/")) return fail("photoPath must start with /photos/");
+          const denied = await requireApproval({ tool: name, effect: "reversible", fields: { albumPath: remAlbumPath, photoPath: remPhotoPath } }, true);
+          if (denied) return denied;
           await drive.removePhotoFromAlbum(remAlbumPath, remPhotoPath);
           return ok({ message: `Removed ${remPhotoPath} from ${remAlbumPath}` });
         }
@@ -1980,9 +2255,14 @@ export async function main() {
           if (mode === "readonly" && pdcs === "remove") {
             return refuse("readonly", "photos_download with conflictStrategy 'remove' deletes existing local files and is not available in readonly mode. Use 'skip' or 'rename', or set PROTON_DRIVE_MODE=full and restart the server.");
           }
-          if (pdcs === "remove" && a.confirmed !== true) {
+          if (pdcs === "remove" && apMode === "model" && a.confirmed !== true) {
             throw new NeedsConfirmationError("photos_download with conflictStrategy 'remove' deletes the existing LOCAL file before downloading. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
+          const photoDenied = await requireApproval(
+            { tool: name, effect: pdcs === "remove" ? "local-delete" : "reversible", fields: { photoPaths: downloadPaths, localFolder: downloadFolder, conflictStrategy: pdcs } },
+            gateNeeded(pdcs === "remove", { conflictStrategy: pdcs }),
+          );
+          if (photoDenied) return photoDenied;
           const downloadSummary = await drive.photoDownload(downloadPaths, downloadFolder, pdcs as PhotoDownloadConflictStrategy);
           if (downloadSummary.failedItems > 0) {
             return fail(`Download completed with ${downloadSummary.failedItems} failed item(s). transferred=${downloadSummary.transferredItems}`);
@@ -1995,6 +2275,8 @@ export async function main() {
           const uploadPaths = a.localPaths.map((p) => validateLocalPath(p, { scan: true, upload: true }));
           const pucs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
           if (!["skip", "rename"].includes(pucs)) return fail("conflictStrategy must be skip or rename");
+          const denied = await requireApproval({ tool: name, effect: "reversible", fields: { localPaths: uploadPaths, conflictStrategy: pucs } }, gateNeeded(false, {}));
+          if (denied) return denied;
           const uploadSummary = await drive.photoUpload(uploadPaths, pucs as PhotoUploadConflictStrategy);
           if (uploadSummary.failedItems > 0) {
             return fail(`Upload completed with ${uploadSummary.failedItems} failed item(s). transferred=${uploadSummary.transferredItems}`);
@@ -2051,20 +2333,51 @@ export async function main() {
           if (!syncRoot) return fail("PROTON_DRIVE_SYNC_PATH is not set. Set it to the root of your Proton Drive sync folder.");
           if (typeof a.content !== "string") return fail("content must be a string");
           const writePath = validateRemotePath(a.path);
+          const writeContent = a.content;
           const exists = await syncFileExists(syncRoot, writePath);
-          if (a.confirmed !== true && exists) {
-            throw new NeedsConfirmationError(`drive_write_file would overwrite the existing file ${writePath}. Ask the user to confirm, then call again with confirmed=true.`);
-          }
-          let snap: Snapshot = {};
-          if (exists && snapshotEnabled()) {
+          const legacyOverwriteRefusal = () => new NeedsConfirmationError(`drive_write_file would overwrite the existing file ${writePath}. Ask the user to confirm, then call again with confirmed=true.`);
+          if (apMode === "model" && a.confirmed !== true && exists) throw legacyOverwriteRefusal();
+          // Overwriting is gated; so is a new file under /shared-with-me and, in strict mode, every write.
+          const writeGate = (overwrites: boolean) => requireApproval(
+            {
+              tool: name, effect: overwrites ? "irreversible" : effectFor("reversible", [writePath]),
+              fields: { path: writePath, overwritesExisting: overwrites, contentDigest: digest(writeContent) },
+              display: { content: Buffer.byteLength(writeContent, "utf8") },
+            },
+            gateNeeded(overwrites, {}, { overwritesExisting: overwrites, resultingPaths: [writePath] }),
+          );
+          const snapshotForOverwrite = async (): Promise<Snapshot | ToolResult> => {
+            if (!snapshotEnabled()) return {};
             try {
               // A path outside the Drive roots is relative to the sync folder, i.e. to /my-files.
-              snap = await snapshotLocalBeforeOverwrite(syncRoot, writePath === "/my-files" || writePath.startsWith("/my-files/") ? writePath : `/my-files${writePath}`, withinRoots);
+              return await snapshotLocalBeforeOverwrite(syncRoot, writePath === "/my-files" || writePath.startsWith("/my-files/") ? writePath : `/my-files${writePath}`, withinRoots);
             } catch (err) {
               return refuse("snapshot", `drive_write_file refused: could not snapshot ${showValue(writePath)} before overwriting it (${truncate(err instanceof Error ? err.message : String(err), 200)}). The file was not changed.`);
             }
+          };
+          let snap: Snapshot = {};
+          const denied = await writeGate(exists);
+          if (denied) return denied;
+          if (exists) {
+            const s = await snapshotForOverwrite();
+            if ("content" in s) return s;
+            snap = s;
+            await writeSyncFile(syncRoot, writePath, writeContent);
+          } else {
+            try {
+              await writeSyncFile(syncRoot, writePath, writeContent, { exclusive: true });
+            } catch (err) {
+              if (!(err instanceof SyncFileExistsError)) throw err;
+              // The file appeared after the existence check: it is now an overwrite and goes through the gate like one.
+              if (apMode === "model" && a.confirmed !== true) throw legacyOverwriteRefusal();
+              const deniedNow = await writeGate(true);
+              if (deniedNow) return deniedNow;
+              const s = await snapshotForOverwrite();
+              if ("content" in s) return s;
+              snap = s;
+              await writeSyncFile(syncRoot, writePath, writeContent);
+            }
           }
-          await writeSyncFile(syncRoot, writePath, a.content);
           return ok({ message: `Written: ${writePath}`, ...(snap.snapshot ? { snapshot: snap.snapshot } : {}) });
         }
 
@@ -2081,12 +2394,13 @@ export async function main() {
   const handleCall = async (req: { params: { name: string; arguments?: Record<string, unknown> } }): Promise<ToolResult> => {
     const started = Date.now();
     const { name, arguments: args = {} } = req.params;
+    const note: { approval?: AuditEntry["approval"] } = {};
     const record = (outcome: "ok" | "error" | "refused", code?: string) => {
       if (!audit) return;
       try {
         audit.append({
           tool: truncate(name, 100), args: redactArgs(name, args, TOOL_DEFS.find((t) => t.name === name)?.inputSchema.properties ?? {}),
-          outcome, ...(code ? { code } : {}), durationMs: Date.now() - started,
+          outcome, ...(code ? { code } : {}), ...(outcome === "ok" && note.approval ? { approval: note.approval } : {}), durationMs: Date.now() - started,
         });
       } catch (err) {
         logger.warn(`Audit log write failed for ${name}: ${err instanceof Error ? err.message : String(err)}`);
@@ -2094,7 +2408,7 @@ export async function main() {
     };
     let result: ToolResult;
     try {
-      result = await callTool(req);
+      result = await callTool(req, note);
     } catch (err) {
       record("error", err instanceof McpError ? "unknown_tool" : "exception");
       throw err;
@@ -2115,6 +2429,8 @@ export async function main() {
       // notifications/cancelled actually kills a running upload/download.
       return await callContext.run({ signal: extra?.signal }, async () => {
         const first = await handleCall(req);
+        // Human/strict ask the human inside the call, whatever `confirmed` says. Only model mode (1.10.1) upgrades a refusal here.
+        if (apMode !== "model") return first;
         // A gate refused with NeedsConfirmationError. If the client can ask the human directly,
         // let the human (never the model) grant it; any failure keeps the refusal.
         if (!confirmationRefusals.has(first) || !canElicit()) return first;

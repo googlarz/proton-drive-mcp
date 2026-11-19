@@ -4,7 +4,7 @@
   "display_name": "Proton Drive",
   "version": "0.0.0",
   "description": "Give Claude access to your Proton Drive: list, upload, download, share and manage end-to-end encrypted files via the official proton-drive CLI.",
-  "long_description": "Upload, download, search, share, move, trash and manage your Proton Drive files and photos from Claude Desktop. This extension wraps the official proton-drive CLI, so files stay end-to-end encrypted and nothing goes through a third-party relay.\n\nRequires the official proton-drive CLI to be installed and signed in (run `proton-drive auth login` once). Enter the path to the CLI in the settings field below: run `which proton-drive` in a terminal (usually ~/.local/bin/proton-drive).",
+  "long_description": "Upload, download, search, share, move, trash and manage your Proton Drive files and photos from Claude Desktop. This extension wraps the official proton-drive CLI, so files stay end-to-end encrypted and nothing goes through a third-party relay.\n\nDestructive or outward-facing actions (deleting, sharing, public links, replacing files) need your approval, asked by the extension itself. If Claude Desktop cannot show that question, the action is refused until you approve it in a terminal with proton-drive-cli approve. Requires the official proton-drive CLI to be installed and signed in (run `proton-drive auth login` once). Enter the path to the CLI in the settings field below: run `which proton-drive` in a terminal (usually ~/.local/bin/proton-drive).",
   "author": {
     "name": "googlarz",
     "url": "https://github.com/googlarz"
@@ -39,6 +39,7 @@
         "PROTON_DRIVE_MODE": "${user_config.read_only}",
         "PROTON_DRIVE_REMOTE_ROOTS": "${user_config.remote_roots}",
         "PROTON_DRIVE_AUDIT_LOG": "${user_config.audit_log}",
+        "PROTON_DRIVE_APPROVAL": "${user_config.approval_mode}",
         "PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE": "${user_config.snapshot_before_overwrite}"
       }
     }
@@ -80,6 +81,13 @@
       "type": "string",
       "title": "Audit log file",
       "description": "Optional. Absolute path of a file that records every tool call (tamper-evident, owner-only). If it cannot be written, tools that change Drive are refused. Leave empty for no log.",
+      "required": false
+    },
+    "approval_mode": {
+      "type": "string",
+      "title": "Who approves destructive operations (human, strict or model)",
+      "description": "Optional. Type human, strict or model; empty means human. human (default): deleting, emptying the trash, sharing, public links, accepting invitations and writing into shared folders need YOUR approval in a dialog (or in a terminal: `proton-drive-cli approve <code>`, or `npx -y -p proton-drive-mcp proton-drive-cli approve <code>` without a global install); the assistant cannot approve for you. strict: every change to Drive asks you. model: the assistant's own confirmation is enough (the 1.10 behaviour; use only for unattended jobs). Any other value is treated as strict.",
+      "default": "human",
       "required": false
     },
     "snapshot_before_overwrite": {
@@ -319,7 +327,7 @@
       "arguments": [
         "path"
       ],
-      "text": "Help me organise my Proton Drive folder ${arguments.path}.\n1. Survey it with drive_tree and drive_usage. Do not change anything yet.\n2. Propose a clearer folder structure and explain the reasoning briefly.\n3. Show the concrete plan by calling drive_bulk_move WITHOUT confirmed, so it is a dry run, and present the result to me.\n4. Wait for my explicit OK before running anything with confirmed=true. Apply only what I approved.\nNever permanently delete anything; use drive_trash (reversible) if something must go, and ask first."
+      "text": "Help me organise my Proton Drive folder ${arguments.path}.\n1. Survey it with drive_tree and drive_usage. Do not change anything yet.\n2. Propose a clearer folder structure and explain the reasoning briefly.\n3. Show the concrete plan by calling drive_bulk_move WITHOUT confirmed, so it is a dry run, and present the result to me.\n4. Wait for my explicit OK, then apply only what I approved. The server asks me again to approve the exact list; if I decline, stop and do not retry.\nNever permanently delete anything; use drive_trash (reversible) if something must go, and ask first."
     },
     {
       "name": "find-files",

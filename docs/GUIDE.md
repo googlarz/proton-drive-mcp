@@ -41,7 +41,7 @@ Restart Claude Desktop afterwards.
 |---|---|---|
 | "Find duplicate files in /my-files/Documents. List them with the space they waste. Do not delete anything." | `drive_find_duplicates` | No. It only reports and never deletes. |
 | "Who has access to my shared folders? Which public links never expire?" | `drive_sharing_audit` | No. Link URLs are left out of the result. |
-| "Propose how to move the PDFs in /my-files/Documents/Inbox into /my-files/Documents/PDFs. Show me the plan first and wait for my yes." | `drive_bulk_move` | Not until you confirm: without `confirmed` it returns a plan only. Needs writes enabled (section 4). |
+| "Propose how to move the PDFs in /my-files/Documents/Inbox into /my-files/Documents/PDFs. Show me the plan first and wait for my yes." | `drive_bulk_move` | Not until you approve: it first returns a plan only, and applying needs your approval of the exact list. Needs writes enabled (section 4). |
 | "Find the document that mentions my 2023 tax return." | `drive_search_content` | No change on Drive. Needs the opt-in content index (below). |
 | "How much space does each folder under /my-files/Documents use? Show the five biggest." | `drive_usage` | No. |
 | "What changed in /my-files/Documents in the last 7 days?" | `drive_recent_changes` | No. |
@@ -52,7 +52,10 @@ Content search is off by default. Add `"PROTON_DRIVE_CONTENT_INDEX": "1"` to the
 
 - [ ] Try the read-only prompts first and check the results look right.
 - [ ] Trash is reversible: `drive_trash` and `drive_bulk_trash` move items to the Drive trash, and `drive_restore` brings them back (`drive_list_trash` shows what is there). `drive_delete` and `drive_empty_trash` are permanent; do not ask for them.
-- [ ] Bulk operations are two-step: `drive_bulk_move` and `drive_bulk_trash` return a plan and change nothing until the call is repeated with `confirmed=true`. Read the plan before saying yes.
+- [ ] Bulk operations are two-step: `drive_bulk_move` and `drive_bulk_trash` return a plan and change nothing until you approve the exact list. Read the plan before saying yes.
+- [ ] **You are asked by the server, not by the assistant.** For anything that deletes, shares, makes a public link, accepts an invitation or replaces a file, the server shows you a question of its own. Chat messages like "yes, go ahead" are not the approval. Read the paths, the email address and the role in that question before you accept. If you are not sure, decline.
+- [ ] Know the second way to approve. Some apps cannot show the question (it is not verified whether Claude Desktop can). Then the assistant tells you a code such as `K7Q2-M9XD`. Open a terminal yourself and run `proton-drive-cli approve K7Q2-M9XD` (without a global install: `npx -y -p proton-drive-mcp proton-drive-cli approve K7Q2-M9XD`). The terminal must use the same `PROTON_DRIVE_APPROVAL_DIR` (or the same `HOME` / `XDG_CACHE_HOME`) as the server, otherwise it says the code is unknown. The same route is offered when an app can show the question but you close it without answering. It prints what the server recorded; read it, and type `yes` only if it is what you wanted. Then ask the assistant to try again with the same request. `proton-drive-cli approvals` lists open requests and `proton-drive-cli deny K7Q2-M9XD` cancels one. The approval works once and expires after a few minutes. This is untested on Windows.
+- [ ] Do not set `PROTON_DRIVE_APPROVAL=model`. It lets the assistant approve for itself.
 - [ ] Set `PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE=1` so a file is copied into a `.versions` folder next to it before anything overwrites it.
 - [ ] Keep `PROTON_DRIVE_REMOTE_ROOTS` on the narrowest folder that works, and keep the audit log on.
 - [ ] To allow writes, remove `PROTON_DRIVE_MODE` from the config (the default is `full`) and restart.

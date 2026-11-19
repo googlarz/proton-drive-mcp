@@ -37,24 +37,56 @@ flowchart LR
 2. **File content and names to the model.** Both are untrusted input. A file can contain text that tries to instruct the model (prompt injection). The tool descriptions tell the model to treat returned text as data, which reduces but does not remove the risk.
 3. **Server to CLI.** The CLI is always started with an argument array (`spawn`, no shell), never through a command string.
 
-## Controls (all opt-in, MCP server only)
+## Controls (MCP server only; the approval gate is on by default, the rest are opt-in)
 
 | Variable | Effect |
 |---|---|
+| `PROTON_DRIVE_APPROVAL=human\|strict\|model` | Who approves destructive and outward-facing operations. Default `human`: a person, never the model. `strict` gates every changing tool; `model` restores the old behaviour |
 | `PROTON_DRIVE_MODE=readonly` | Hides and refuses every tool that changes Drive or the account. Downloads to local disk stay available, but not with the `remove` strategies, which delete existing local files |
 | `PROTON_DRIVE_REMOTE_ROOTS` | Confines every Drive path argument to the listed folders |
 | `PROTON_DRIVE_AUDIT_LOG` | One tamper-evident JSON line per tool call, refusals included |
 | `PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE=1` | Keeps the previous version before an overwrite |
 
-Without them the server runs in full mode.
+Without the opt-in ones the server runs in full mode, with the approval gate in `human` mode.
 
-**Confirmation is not human approval.** Destructive and outward-facing tools take `confirmed: true`, but that is an argument the model fills in itself. Nothing ties it to a plan or to anything you said, and a model can send it on its first call. `drive_bulk_move` and `drive_bulk_trash` return a plan when called without it, but the call that applies is not checked against that plan. There is no plan token. What actually limits damage:
+## Human approval gate (on by default since 1.11.0)
+
+Before 1.11.0, destructive tools took `confirmed: true`, an argument the model fills in itself. That was not human approval. It is now not an authorisation at all (the argument is still accepted, deprecated, and ignored in the default mode; it remains only the plan/apply switch of `drive_bulk_move` and `drive_bulk_trash`).
+
+**What the gate guarantees.** In the default mode (`PROTON_DRIVE_APPROVAL` unset or `human`), a gated operation runs only after a person said yes to that exact operation. The operation is built from the server's validated arguments; the same object is shown, hashed and executed. The text the person sees is written by the server: a fixed first line per tool, then one line per validated value, with control, bidirectional, zero-width and every other Unicode format or default-ignorable character in names shown as `\uXXXX` so a file name cannot add or reorder lines or hide in blank space. Fields a person must recognise (invitee and inviter e-mail, the item named by a `uid`) list every non-ASCII character by code point (`contains non-ASCII: U+0430`), so a Cyrillic look-alike letter is visible. Operations addressed only by a `uid` (`drive_delete`, invitations) show the name, inviter and folder looked up from Drive before the question, or `(name not resolved)`. Passwords and message texts are never shown. A refused call changes nothing and is written to the audit log with a code (`approval_required`, `approval_declined`, `approval_unavailable`, `approval_changed`); an approved call records the channel and a short hash of the operation.
+
+**The two channels.**
+1. *Elicitation in the same call.* If the client declares MCP elicitation (form mode), the server asks for every gated call, whatever `confirmed` says. Only Accept with the approve box ticked counts. An explicit decline is final. One dialog is open at a time; a second gated call meanwhile is refused (`approval_unavailable`), not queued, so a looping model cannot stack dialogs. A cancel, an error or a 120 s timeout is not a no: the server then falls back to channel 2 for that operation (a pending record and an `approval_required` refusal with the terminal command), which still needs a person at a terminal; with no usable store it is a plain refusal. After 5 declined or failed prompts in a minute the server stops asking and refuses. For the two bulk tools the plan is computed again after the approval, and nothing is applied if it differs from the plan that was approved.
+2. *Terminal approval, for clients that cannot elicit.* The server refuses with a code and stores a record of the operation (tool, hash of the operation, the text above) in a private approvals folder. The person runs `proton-drive-cli approve <code>` in an interactive terminal, reads the stored text, and types `yes`. The next identical call consumes the approval once. A request lasts 10 minutes, an approval 5; a different argument is a different operation; a second use or a concurrent second call is refused (the record is claimed by an atomic rename). The model never receives a secret: the code is an identifier, and the person reads the server's record, not the model's description. When a dialog is closed or fails, an approved record that was already waiting is discarded and a fresh pending one is written, so the model cannot use an old terminal approval to answer a question that was just asked (tested). When a dialog is accepted or declined, pending and approved records for the same operation are removed as well; that cleanup is best effort: it is skipped if the approvals folder only appears after the exists-check, a cleanup error only writes a warning, and a terminal approval typed at the same moment can survive it (it stays valid for 5 minutes, once, for that exact operation). The command must see the same approvals folder as the server (same `PROTON_DRIVE_APPROVAL_DIR`, `XDG_CACHE_HOME` and `HOME`). The approvals folder is outside the sync folder (startup check) and out of reach of the download tools.
+
+If neither channel exists, the call is refused.
+
+**What it trusts.**
+- The client's dialog: the gate cannot tell a person from a client that answers the dialog itself or forwards it to the model.
+- Your own account and files: anything that can write your files or the approvals folder can forge an approval.
+- That you read what you approve.
+- POSIX rename semantics on a local disk for the terminal route (macOS and Linux; Windows is untested, and a network-mounted approvals folder is not assumed to work).
+
+**What it does not cover.**
+- A compromised local machine, or any process that can write your files.
+- A malicious or naive MCP client, and an auto-answer you configure yourself (for example a Claude Code `Elicitation` hook or an Agent SDK handler). That is you switching the gate off.
+- **A model with a shell.** If the client gives the model a terminal (Claude Code's Bash tool, Desktop Commander and similar), it can run the official `proton-drive` CLI directly, outside this server. Nothing here can stop that. Deny it in the client; the README has an example rule for Claude Code. That rule is a pattern match, not a complete barrier. The same holds for the terminal route: `proton-drive-cli approve` requires an interactive terminal, but a model with a shell could run it under a pseudo-terminal and type `yes` itself, so the example also denies `approve` (`Bash(*proton-drive-cli approve*)`, `Bash(*proton-drive-cli*approve*)`).
+- Copying files into a folder under `/my-files` that is already shared or has a public link: the destination's sharing state is not checked. `PROTON_DRIVE_REMOTE_ROOTS` limits where the model can write.
+- What a person approves without reading. Short, fixed-format prompts help; they do not make the decision.
+- Whether a given client shows the dialog at all. Claude Code in a terminal does. For Claude Desktop this is not verified; a client that cannot elicit gets the terminal route. A client that declares elicitation but auto-cancels or errors gets the terminal route for each gated call (it fails closed: still a person at a terminal). A client that auto-declines explicitly makes gated tools unusable there; use `model` knowingly.
+
+**What is not gated in the default mode.** Reversible changes inside your own `/my-files`: a single `drive_trash`, `drive_restore`, `drive_move` / `drive_rename` / `drive_copy` / `drive_mkdir` inside `/my-files`, an upload that replaces nothing, album create / update / add, `photos_upload`, and `drive_write_file` to a new file. Paths under `/shared-with-me` are gated for all of these, and so is `drive_invitation_accept`. `drive_restore` by `uid` alone is not gated either (reversible, accepted risk; `strict` covers it, and shows the item's path when it can look it up). A loop of single `drive_trash` calls is not stopped in the default mode; trash is recoverable for a limited time (the retention period is not verified here).
+
+**`strict`** (`PROTON_DRIVE_APPROVAL=strict`) puts every tool that changes Drive or the account behind the gate, including the ungated set above. Use it with sensitive data. An unknown value of the variable is treated as `strict`.
+
+**`model`** (`PROTON_DRIVE_APPROVAL=model`) is an opt-out that restores the 1.10.1 behaviour: the assistant's own `confirmed: true` is enough, and an eliciting client is asked only when a call would otherwise be refused. Nobody approves in this mode; the server prints a warning at startup. It exists for unattended jobs where no person is present. Combine it with `PROTON_DRIVE_REMOTE_ROOTS` and the audit log.
+
+The other controls still apply, and are checked before any approval is asked:
 
 - `PROTON_DRIVE_MODE=readonly`: the changing tools are not offered and are refused if called.
 - `PROTON_DRIVE_REMOTE_ROOTS`: the folders the model can reach on Drive.
 - `PROTON_DRIVE_AUDIT_LOG`: a record of what happened, including refused calls. It does not prevent anything.
-- Your MCP client's own tool-approval prompts. If you approve each tool call there, that is the human check.
-- If the client supports MCP elicitation, the server asks you when a `confirmed` gate refuses a call and before it applies a bulk move or bulk trash. A model that sends `confirmed: true` to any other tool is not stopped by this.
+- Your MCP client's own tool-approval prompts, if you use them, are a second check.
 
 Trash is reversible and the duplicate finder never deletes.
 

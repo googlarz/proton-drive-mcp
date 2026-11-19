@@ -58,7 +58,7 @@ describe("startup probe", () => {
     const extra = version === undefined ? {} : { FAKE_CLI_VERSION: version };
     const c = new McpClient({ env: fakeEnv("json", sb, extra) });
     await c.initialize({ timeout: 5000 });
-    if (version !== undefined) await waitFor(() => /\[WARN\]/.test(c.stderr), 3000).catch(() => {});
+    if (version !== undefined) await waitFor(() => /Tested with/.test(c.stderr), 3000).catch(() => {});
     else await new Promise((r) => setTimeout(r, 500));
     const err = c.stderr;
     await c.close();
