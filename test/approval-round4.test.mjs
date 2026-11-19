@@ -45,3 +45,30 @@ describe("only the ESC byte is escaped; the rest of an escape sequence stays vis
     assert.equal(out, `x${BS}x1b[2K${BS}x1b[1Ay`);
   });
 });
+
+// CodeQL js/insufficient-password-hash: the link password is part of the operation hash that is written to the approvals folder.
+// A plain sha256 of a short password in there could be guessed offline, so it goes through a slow key-derivation function.
+describe("the public-link password is not hashed with a plain fast hash", async () => {
+  const { createHash } = await import("node:crypto");
+  const { join } = await import("node:path");
+  const { createApprovalStore } = await import("../dist/utils/approvalStore.js");
+  const { opHash } = await import("../dist/utils/approval.js");
+  const { withServer, text } = await import("./helpers/approval-harness.mjs");
+  const codeOf = (r) => /approve ([A-Z2-9]{4}-[A-Z2-9]{4})/.exec(text(r))?.[1];
+  const args = (password) => ({ path: "/my-files/p", role: "viewer", password });
+
+  it("the stored operation hash differs from one built with sha256(password), and the same password still matches on replay only", async () => {
+    await withServer({ caps: {} }, async (ctx) => {
+      const store = createApprovalStore({ dir: join(ctx.dir, "approvals") });
+      const code = codeOf(await ctx.call("drive_share_set_url", args("hunter2")));
+      const plain = createHash("sha256").update("hunter2").digest("hex").slice(0, 32);
+      const naive = opHash({ tool: "drive_share_set_url", effect: "outward", fields: { path: "/my-files/p", role: "viewer", passwordDigest: plain, expiration: null, resetSettings: false, replacesExistingLink: false } });
+      assert.notEqual(store.get(code).opHash, naive);
+      store.approve(code);
+      assert.equal((await ctx.call("drive_share_set_url", args("other"))).isError, true);
+      assert.deepEqual(ctx.changes(), []);
+      assert.notEqual((await ctx.call("drive_share_set_url", args("hunter2"))).isError, true);
+      assert.equal(ctx.changes().length, 1);
+    });
+  });
+});

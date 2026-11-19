@@ -425,11 +425,16 @@ describe("ApprovalGate: elicitation channel", () => {
   });
 
   it("a prompt that never settles is a timeout refusal", async () => {
-    const gate = new ApprovalGate({ mode: "human", elicit: fakeElicit(["hang"]), elicitTimeoutMs: 20 });
-    const r = await gate.require(invite());
-    assert.equal(r.ok, false);
-    assert.equal(r.code, "approval_unavailable");
-    assert.match(r.message, /timed out/);
+    // The gate's backstop timer is unref'd on purpose (the server's stdio keeps the process alive). Keep the loop alive here, otherwise
+    // Node 22's runner sees a pending promise with an empty event loop and cancels the rest of the file.
+    const keepAlive = setInterval(() => {}, 1000);
+    try {
+      const gate = new ApprovalGate({ mode: "human", elicit: fakeElicit(["hang"]), elicitTimeoutMs: 20 });
+      const r = await gate.require(invite());
+      assert.equal(r.ok, false);
+      assert.equal(r.code, "approval_unavailable");
+      assert.match(r.message, /timed out/);
+    } finally { clearInterval(keepAlive); }
   });
 
   it("asks every time: the same operation approved twice prompts twice", async () => {

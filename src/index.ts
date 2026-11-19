@@ -12,7 +12,7 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createRequire } from "node:module";
-import { createHash } from "node:crypto";
+import { createHash, scryptSync } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import {
@@ -126,6 +126,12 @@ function needConfirm(a: Record<string, unknown>, tool: string, action: string): 
 // ---- Approval gate helpers (1.11.0) ----
 /** Secrets are hashed into the operation but never shown: only this digest (hex prefix) goes into Operation.fields. */
 const digest = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 32);
+/**
+ * Same idea for the public-link password, which is low-entropy and whose digest ends up inside the operation hash stored in the
+ * approvals folder: a deterministic but deliberately slow key derivation (fixed salt, because the hash must match again on the next call
+ * and after a restart), so the stored hash is not a cheap offline guessing oracle for the password.
+ */
+const passwordDigest = (s: string) => scryptSync(s, "proton-drive-mcp approval v1: link password", 16).toString("hex");
 /** Drops undefined entries so optional validated values simply do not appear in the operation. */
 const fieldsOf = (o: Record<string, FieldValue | undefined>): Record<string, FieldValue> =>
   Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Record<string, FieldValue>;
@@ -2144,7 +2150,7 @@ export async function main() {
           }
           const denied = await requireApproval({
             tool: name, effect: "outward",
-            fields: fieldsOf({ path: setUrlPath, role, passwordDigest: password === undefined ? null : digest(password), expiration: expiration ?? null, resetSettings, replacesExistingLink }),
+            fields: fieldsOf({ path: setUrlPath, role, passwordDigest: password === undefined ? null : passwordDigest(password), expiration: expiration ?? null, resetSettings, replacesExistingLink }),
             display: { password: password !== undefined },
           }, true);
           if (denied) return denied;
