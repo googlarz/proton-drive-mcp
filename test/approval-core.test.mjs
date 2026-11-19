@@ -211,10 +211,10 @@ describe("requiresApproval", () => {
   const SHARED = "/shared-with-me/team/x";
   const MINE = "/my-files/x";
 
-  it("gated set is the 18 from 1.10.1 plus invitation_accept, copy, move, mkdir, rename", () => {
+  it("gated set is the 18 from 1.10.1 plus invitation_accept, copy, move, mkdir, rename, trash, restore (the last six only for /shared-with-me)", () => {
     const old18 = [...ALWAYS.filter((t) => t !== "drive_invitation_accept"), "drive_bulk_move", "drive_bulk_trash", "drive_upload", "drive_download", "photos_download", "drive_write_file"];
     assert.equal(old18.length, 18);
-    assert.deepEqual([...GATED_TOOLS].sort(), [...old18, "drive_invitation_accept", "drive_copy", "drive_move", "drive_mkdir", "drive_rename"].sort());
+    assert.deepEqual([...GATED_TOOLS].sort(), [...old18, "drive_invitation_accept", "drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_trash", "drive_restore"].sort());
   });
 
   it("unconditional tools need approval in human and strict, never in model mode, whatever ctx and confirmed say", () => {
@@ -276,8 +276,8 @@ describe("requiresApproval", () => {
 
   it("copy, move, mkdir, rename, bulk_move apply: only when the resulting path is under /shared-with-me", () => {
     const cases = [
-      ["drive_copy", { sourcePath: "/shared-with-me/a", destinationPath: MINE }, { resultingPaths: [MINE + "/a"] }, { sourcePath: MINE, destinationPath: "/shared-with-me/a" }, { resultingPaths: [SHARED] }],
-      ["drive_move", { sourcePath: "/shared-with-me/a", destinationPath: MINE }, { resultingPaths: [MINE] }, { sourcePath: MINE, destinationPath: SHARED }, { resultingPaths: [SHARED] }],
+      ["drive_copy", { sourcePath: MINE, destinationPath: "/my-files/d" }, { resultingPaths: [MINE + "/a"] }, { sourcePath: MINE, destinationPath: "/shared-with-me/a" }, { resultingPaths: [SHARED] }],
+      ["drive_move", { sourcePath: MINE, destinationPath: "/my-files/y" }, { resultingPaths: [MINE] }, { sourcePath: MINE, destinationPath: SHARED }, { resultingPaths: [SHARED] }],
       ["drive_mkdir", { path: MINE }, { resultingPaths: [MINE] }, { path: SHARED }, { resultingPaths: [SHARED] }],
       ["drive_rename", { path: MINE, newName: "n" }, { resultingPaths: [MINE + "n"] }, { path: SHARED, newName: "n" }, { resultingPaths: ["/shared-with-me/team/n"] }],
       ["drive_bulk_move", { sources: [MINE], destinationFolder: "/my-files/d", confirmed: true }, { resultingPaths: ["/my-files/d/x"] }, { sources: [MINE], destinationFolder: "/shared-with-me/t", confirmed: true }, { resultingPaths: ["/shared-with-me/t/x"] }],
@@ -294,6 +294,33 @@ describe("requiresApproval", () => {
     assert.equal(requiresApproval("drive_move", { sourcePath: MINE, destinationPath: "/my-files/shared-with-me/x" }, "human", {}), false);
     assert.equal(requiresApproval("drive_move", { sourcePath: MINE, destinationPath: "/shared-with-me-not" }, "human", {}), false);
     assert.equal(requiresApproval("drive_copy", { sourcePath: MINE, destinationPath: "/SHARED-WITH-ME/x" }, "human", {}), true);
+  });
+
+  it("anything that reads from /shared-with-me is gated too: copy/move out, rename, trash, restore, bulk move and trash", () => {
+    const SH = "/shared-with-me/team/a";
+    for (const [t, args, ctx] of [
+      ["drive_copy", { sourcePath: SH, destinationPath: MINE }, { sourcePaths: [SH], resultingPaths: [MINE + "/a"] }],
+      ["drive_move", { sourcePath: SH, destinationPath: MINE }, { sourcePaths: [SH], resultingPaths: [MINE] }],
+      ["drive_rename", { path: SH, newName: "n" }, { sourcePaths: [SH], resultingPaths: ["/shared-with-me/team/n"] }],
+      ["drive_trash", { path: SH }, { sourcePaths: [SH] }],
+      ["drive_restore", { path: SH }, { sourcePaths: [SH] }],
+      ["drive_bulk_move", { sources: [SH], destinationFolder: "/my-files/d", confirmed: true }, { sourcePaths: [SH], resultingPaths: ["/my-files/d/a"] }],
+      ["drive_bulk_trash", { paths: [SH], confirmed: true }, { sourcePaths: [SH] }],
+    ]) {
+      for (const mode of ["human", "strict"]) {
+        const full = { ...ctx, mutatingTools: MUTATING_TOOL_NAMES };
+        assert.equal(requiresApproval(t, args, mode, full), true, `${t} ${mode} (args + ctx)`);
+        assert.equal(requiresApproval(t, t.startsWith("drive_bulk") ? { confirmed: true } : {}, mode, full), true, `${t} ${mode} (ctx only)`);
+      }
+      if (t !== "drive_bulk_move" && t !== "drive_bulk_trash") assert.equal(requiresApproval(t, args, "human", {}), true, `${t} (args only)`);
+      assert.equal(requiresApproval(t, args, "model", ctx), false, `${t} model`);
+    }
+    for (const [t, args, ctx] of [
+      ["drive_trash", { path: MINE }, { sourcePaths: [MINE] }],
+      ["drive_restore", { path: "/trash/x" }, { sourcePaths: ["/trash/x"] }],
+      ["drive_rename", { path: MINE, newName: "n" }, { sourcePaths: [MINE], resultingPaths: ["/my-files/n"] }],
+      ["drive_move", { sourcePath: MINE, destinationPath: "/my-files/y" }, { sourcePaths: [MINE], resultingPaths: ["/my-files/y"] }],
+    ]) assert.equal(requiresApproval(t, args, "human", ctx), false, `${t} inside /my-files`);
   });
 
   it("not gated in human mode: reversible work inside the user's own Drive", () => {

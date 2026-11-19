@@ -59,6 +59,8 @@ export function fakeEnv(mode, sandbox, extra = {}) {
     PROTON_DRIVE_BIN: FAKE_CLI,
     // The suites written for 1.10.1 rely on confirmed=true being enough; the approval suites set the mode they test (null = leave it unset).
     PROTON_DRIVE_APPROVAL: "model",
+    // Never touch the real user's approval store from a test.
+    PROTON_DRIVE_APPROVAL_DIR: join(sandbox.dir, "approvals"),
     FAKE_MODE: mode,
     FAKE_ARGV_LOG: sandbox.argvLog,
     FAKE_PIDFILE: sandbox.pidFile,

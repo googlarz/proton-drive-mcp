@@ -1802,8 +1802,8 @@ export async function main() {
           const newName = validateName(a.newName);
           const renamedTo = resultingPaths(name, { path: renamePath, newName });
           const denied = await requireApproval(
-            { tool: name, effect: effectFor("reversible", renamedTo), fields: { path: renamePath, newName } },
-            gateNeeded(false, {}, { resultingPaths: renamedTo }),
+            { tool: name, effect: effectFor("reversible", [renamePath, ...renamedTo]), fields: { path: renamePath, newName } },
+            gateNeeded(false, {}, { resultingPaths: renamedTo, sourcePaths: [renamePath] }),
           );
           if (denied) return denied;
           await drive.rename(renamePath, newName);
@@ -1814,8 +1814,8 @@ export async function main() {
           const moveSrc = validateRemotePath(a.sourcePath);
           const moveDst = validateRemotePath(a.destinationPath);
           const denied = await requireApproval(
-            { tool: name, effect: effectFor("reversible", [moveDst]), fields: { sourcePath: moveSrc, destinationPath: moveDst } },
-            gateNeeded(false, {}, { resultingPaths: [moveDst] }),
+            { tool: name, effect: effectFor("reversible", [moveSrc, moveDst]), fields: { sourcePath: moveSrc, destinationPath: moveDst } },
+            gateNeeded(false, {}, { resultingPaths: [moveDst], sourcePaths: [moveSrc] }),
           );
           if (denied) return denied;
           await drive.move(moveSrc, moveDst);
@@ -1933,7 +1933,7 @@ export async function main() {
 
         case "drive_trash": {
           const trashPath = validateRemotePath(a.path);
-          const denied = await requireApproval({ tool: name, effect: "reversible", fields: { path: trashPath } }, gateNeeded(false, {}));
+          const denied = await requireApproval({ tool: name, effect: effectFor("reversible", [trashPath]), fields: { path: trashPath } }, gateNeeded(false, {}, { sourcePaths: [trashPath] }));
           if (denied) return denied;
           await drive.trash(trashPath);
           return ok({ message: `Moved to trash: ${trashPath}` });
@@ -1967,7 +1967,7 @@ export async function main() {
           } else {
             const movedTo = resultingPaths(name, { sources, destinationFolder: destFolder });
             const denied = await requireApproval({
-              tool: name, effect: effectFor("reversible", movedTo),
+              tool: name, effect: effectFor("reversible", [...sources, ...movedTo]),
               fields: { destinationFolder: destFolder, moves: movePlan.plan.map((p) => `${p.source} -> ${p.destination}`) },
             }, true);
             if (denied) return denied;
@@ -1993,7 +1993,7 @@ export async function main() {
               return fail("drive_bulk_trash not applied, nothing trashed: the user did not approve.");
             }
           } else {
-            const denied = await requireApproval({ tool: name, effect: "reversible", fields: { paths: trashPlan.plan.map((p) => p.source) } }, true);
+            const denied = await requireApproval({ tool: name, effect: effectFor("reversible", trashPaths), fields: { paths: trashPlan.plan.map((p) => p.source) } }, true);
             if (denied) return denied;
             const again = planBulkTrash(trashPaths, await loadListing(drive, foldersToList(trashPaths)));
             if (canonical(again) !== canonical(trashPlan)) {
@@ -2007,7 +2007,7 @@ export async function main() {
         case "drive_restore": {
           const restorePath = a.path === undefined ? undefined : validateRemotePath(a.path);
           const restoreUid = a.uid ? validateFlagValue(a.uid as string, "uid") : undefined;
-          const denied = await requireApproval({ tool: name, effect: "reversible", fields: fieldsOf({ path: restorePath, uid: restoreUid }) }, gateNeeded(false, {}));
+          const denied = await requireApproval({ tool: name, effect: effectFor("reversible", restorePath ? [restorePath] : []), fields: fieldsOf({ path: restorePath, uid: restoreUid }) }, gateNeeded(false, {}, { sourcePaths: restorePath ? [restorePath] : [] }));
           if (denied) return denied;
           await drive.restore(restorePath, restoreUid);
           return ok({ message: `Restored from trash: ${restorePath ?? `uid ${restoreUid}`}` });
@@ -2032,8 +2032,8 @@ export async function main() {
           const copyName = typeof a.newName === "string" ? validateName(a.newName) : undefined;
           const copiedTo = resultingPaths(name, { sourcePath: copySrc, destinationPath: copyDst, newName: copyName });
           const denied = await requireApproval(
-            { tool: name, effect: effectFor("reversible", copiedTo), fields: fieldsOf({ sourcePath: copySrc, destinationPath: copyDst, newName: copyName }) },
-            gateNeeded(false, {}, { resultingPaths: copiedTo }),
+            { tool: name, effect: effectFor("reversible", [copySrc, ...copiedTo]), fields: fieldsOf({ sourcePath: copySrc, destinationPath: copyDst, newName: copyName }) },
+            gateNeeded(false, {}, { resultingPaths: copiedTo, sourcePaths: [copySrc] }),
           );
           if (denied) return denied;
           await drive.copy(copySrc, copyDst, copyName);

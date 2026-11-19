@@ -155,7 +155,7 @@ export const GATED_TOOLS: ReadonlySet<string> = new Set([
   "drive_auth_logout", "drive_delete", "drive_empty_trash", "drive_share_invite", "drive_share_revoke", "drive_share_set_url",
   "drive_share_remove_url", "drive_share_remove_all", "drive_share_leave", "drive_invitation_reject", "photos_delete_album",
   "photos_remove_from_album", "drive_bulk_move", "drive_bulk_trash", "drive_upload", "drive_download", "photos_download", "drive_write_file",
-  "drive_invitation_accept", "drive_copy", "drive_move", "drive_mkdir", "drive_rename",
+  "drive_invitation_accept", "drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_trash", "drive_restore",
 ]);
 
 const ALWAYS = new Set([
@@ -164,13 +164,15 @@ const ALWAYS = new Set([
   "photos_delete_album", "photos_remove_from_album",
 ]);
 const BULK = new Set(["drive_bulk_move", "drive_bulk_trash"]);
-// Outward when the resulting path is under /shared-with-me.
-const SHARED_DEST = new Set(["drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_bulk_move", "drive_upload", "drive_write_file"]);
-const DEST_ARGS = ["destinationPath", "destinationFolder", "remotePath", "path"];
+// Outward when any path the operation reads from or ends up at (either side) is under /shared-with-me.
+const SHARED_DEST = new Set(["drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_bulk_move", "drive_upload", "drive_write_file", "drive_trash", "drive_bulk_trash", "drive_restore"]);
+const PATH_ARGS = ["destinationPath", "destinationFolder", "remotePath", "path", "sourcePath", "sources", "paths"];
 
 export interface GateContext {
   /** Paths the operation ends up at (what resultingPaths yields; for upload / mkdir the target). */
   resultingPaths?: string[];
+  /** Paths the operation takes things from (move/copy/rename sources, items to trash or restore). Under /shared-with-me they gate the call just like a destination there. */
+  sourcePaths?: string[];
   /** drive_write_file: the target already exists, so the write overwrites. */
   overwritesExisting?: boolean;
   /** Bulk tools: this call applies (true) or only computes the plan (false). Defaults to args.confirmed === true, which is the plan/apply switch. */
@@ -201,7 +203,8 @@ export function requiresApproval(tool: string, args: Record<string, unknown>, mo
   if (tool === "drive_upload" && ["fileConflictStrategy", "folderConflictStrategy"].some((k) => args[k] === "replace")) return true;
   if (tool === "drive_write_file" && ctx.overwritesExisting === true) return true;
   if (SHARED_DEST.has(tool)) {
-    const paths = [...(ctx.resultingPaths ?? []), ...DEST_ARGS.map((k) => args[k]).filter((x): x is string => typeof x === "string")];
+    const fromArgs = PATH_ARGS.flatMap((k) => { const v = args[k]; return typeof v === "string" ? [v] : Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []; });
+    const paths = [...(ctx.resultingPaths ?? []), ...(ctx.sourcePaths ?? []), ...fromArgs];
     if (paths.some(underShared)) return true;
   }
   return false;

@@ -192,12 +192,14 @@ describe("tool annotations, titles and _meta", () => {
   });
 });
 
+// 1.11.0 semantics (PROTON_DRIVE_APPROVAL=human, the default): the server asks the human for every gated call, whatever `confirmed` says.
+// The 1.10.1 behaviour (model mode) is covered in approval-gate.test.mjs and by every other suite.
 describe("elicitation for gated tools", () => {
   async function withClient(capabilities, handler, fn, mode = "json", extraEnv = {}) {
     const sb = makeSandbox();
     const client = new Client({ name: "t", version: "0" }, { capabilities });
     if (handler) client.setRequestHandler(ElicitRequestSchema, handler);
-    const transport = new StdioClientTransport({ command: process.execPath, args: [DIST_INDEX], env: fakeEnv(mode, sb, extraEnv) });
+    const transport = new StdioClientTransport({ command: process.execPath, args: [DIST_INDEX], env: fakeEnv(mode, sb, { PROTON_DRIVE_APPROVAL: "human", ...extraEnv }) });
     await client.connect(transport);
     try { await fn(client, sb); } finally { await client.close(); sb.cleanup(); }
   }
@@ -214,11 +216,13 @@ describe("elicitation for gated tools", () => {
   });
 
   for (const [label, reply] of [["decline", { action: "decline" }], ["cancel", { action: "cancel" }], ["accept without approve", { action: "accept", content: { approve: false } }]]) {
-    it(`${label} keeps the refusal and runs nothing`, async () => {
+    it(`${label} refuses and runs nothing, even with confirmed=true`, async () => {
       await withClient({ elicitation: { form: {} } }, async () => reply, async (client, sb) => {
-        const r = await client.callTool({ name: "drive_delete", arguments: { path: "/trash/a.txt", confirmed: false } });
-        assert.equal(r.isError, true);
-        assert.match(text(r), /confirmed=true/);
+        for (const confirmed of [false, true]) {
+          const r = await client.callTool({ name: "drive_delete", arguments: { path: "/trash/a.txt", confirmed } });
+          assert.equal(r.isError, true);
+          assert.match(text(r), /declined/);
+        }
         assert.deepEqual(nonVersionCalls(sb.argvLog), []);
       });
     });
@@ -235,31 +239,32 @@ describe("elicitation for gated tools", () => {
     await withClient({ elicitation: { form: {} } }, async () => ({ action: "decline" }), async (client, sb) => {
       const r = await client.callTool({ name: "drive_empty_trash", arguments: {} });
       assert.equal(r.isError, true);
-      assert.match(text(r), /confirmed=true/);
+      assert.match(text(r), /declined/);
       assert.deepEqual(nonVersionCalls(sb.argvLog), []);
     });
     await withClient({}, null, async (client, sb) => {
+      // No capability: `confirmed` is no longer required, and the call is refused with a terminal approval code instead.
       const r = await client.callTool({ name: "drive_delete", arguments: { path: "/trash/a.txt" } });
       assert.equal(r.isError, true);
-      assert.match(text(r), /Missing required argument 'confirmed'/);
+      assert.match(text(r), /proton-drive-cli approve [A-Z2-9]{4}-[A-Z2-9]{4}/);
       assert.deepEqual(nonVersionCalls(sb.argvLog), []);
     });
   });
 
-  it("a throwing elicitation handler falls back to the refusal", async () => {
+  it("a throwing elicitation handler refuses", async () => {
     await withClient({ elicitation: { form: {} } }, async () => { throw new Error("boom"); }, async (client, sb) => {
-      const r = await client.callTool({ name: "drive_empty_trash", arguments: { confirmed: false } });
+      const r = await client.callTool({ name: "drive_empty_trash", arguments: { confirmed: true } });
       assert.equal(r.isError, true);
-      assert.match(text(r), /confirmed=true/);
+      assert.match(text(r), /failed or timed out/);
       assert.deepEqual(nonVersionCalls(sb.argvLog), []);
     });
   });
 
-  it("without the capability behaviour is unchanged", async () => {
+  it("without the capability even confirmed=true is refused", async () => {
     await withClient({}, null, async (client, sb) => {
-      const r = await client.callTool({ name: "drive_delete", arguments: { path: "/trash/a.txt", confirmed: false } });
+      const r = await client.callTool({ name: "drive_delete", arguments: { path: "/trash/a.txt", confirmed: true } });
       assert.equal(r.isError, true);
-      assert.match(text(r), /confirmed=true/);
+      assert.match(text(r), /needs the user's approval/);
       assert.deepEqual(nonVersionCalls(sb.argvLog), []);
     });
   });
@@ -281,7 +286,7 @@ describe("elicitation for gated tools", () => {
     ["drive_bulk_trash", { paths: ["/my-files/s/x.txt"], confirmed: true }],
     ["drive_bulk_move", { sources: ["/my-files/s/x.txt"], destinationFolder: "/my-files/d", confirmed: true }],
   ]) {
-    it(`${tool} confirmed=true: human accept applies, message shows operation, count and paths`, async () => {
+    it(`${tool} confirmed=true: human accept applies, message shows operation, count and every path`, async () => {
       let msg = "";
       await withClient({ elicitation: { form: {} } }, async (req) => { msg = req.params.message; return { action: "accept", content: { approve: true } }; }, async (client, sb) => {
         const r = await client.callTool({ name: tool, arguments: args });
@@ -289,7 +294,7 @@ describe("elicitation for gated tools", () => {
         assert.equal(mutations(sb).length, 1);
       }, "tree", { FAKE_TREE: BULK_TREE() });
       assert.match(msg, new RegExp(tool));
-      assert.match(msg, /1 item/);
+      assert.match(msg, /^(paths|moves) \(1\):$/m);
       assert.match(msg, /\/my-files\/s\/x\.txt/);
       if (tool === "drive_bulk_move") assert.match(msg, /\/my-files\/d/);
     });
@@ -299,20 +304,22 @@ describe("elicitation for gated tools", () => {
         await withClient({ elicitation: { form: {} } }, async () => reply, async (client, sb) => {
           const r = await client.callTool({ name: tool, arguments: args });
           assert.equal(r.isError, true);
-          assert.match(text(r), /did not approve/);
+          assert.match(text(r), /declined/);
           assert.deepEqual(mutations(sb), []);
         }, "tree", { FAKE_TREE: BULK_TREE() });
       });
     }
 
-    it(`${tool} confirmed=true: an erroring handler refuses; no capability keeps today's behaviour`, async () => {
+    it(`${tool} confirmed=true: an erroring handler refuses; no capability refuses too`, async () => {
       await withClient({ elicitation: { form: {} } }, async () => { throw new Error("boom"); }, async (client, sb) => {
         assert.equal((await client.callTool({ name: tool, arguments: args })).isError, true);
         assert.deepEqual(mutations(sb), []);
       }, "tree", { FAKE_TREE: BULK_TREE() });
       await withClient({}, null, async (client, sb) => {
-        assert.notEqual((await client.callTool({ name: tool, arguments: args })).isError, true);
-        assert.equal(mutations(sb).length, 1);
+        const r = await client.callTool({ name: tool, arguments: args });
+        assert.equal(r.isError, true);
+        assert.match(text(r), /proton-drive-cli approve/);
+        assert.deepEqual(mutations(sb), []);
       }, "tree", { FAKE_TREE: BULK_TREE() });
     });
   }
@@ -363,7 +370,7 @@ describe("elicitation for gated tools", () => {
       for (let i = 0; i < 8; i++) {
         const r = await client.callTool({ name: "drive_delete", arguments: { path: "/trash/a.txt", confirmed: false } });
         assert.equal(r.isError, true);
-        assert.match(text(r), /confirmed=true/);
+        assert.match(text(r), i < 5 ? /declined/ : /too many approval requests/);
       }
       assert.equal(asked, 5);
       assert.deepEqual(nonVersionCalls(sb.argvLog), []);
