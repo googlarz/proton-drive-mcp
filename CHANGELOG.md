@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`drive_checkup`** (read-only): a one-call health report for a folder. Findings: exact-duplicate candidates and wasted bytes, empty folders, large old files, public links without a known expiry, items shared with other accounts, sensitive-looking names inside shared items (a guess from file names only), and what sits in the trash. Returns a score from 0 to 100 with `scoreParts` showing every deduction (formula in the README), counts, and at most 3 example paths per finding; `namesInResult` says how many names the result carries. `finding` returns one page (up to 200 names). Allowed in readonly mode; full tool tier only. With `PROTON_DRIVE_REMOTE_ROOTS` set, the account-wide trash is left out.
+- **`drive_cleanup`**: trashes redundant copies of exact duplicates and empty folders under a path. The server builds the list from a fresh, complete scan (the assistant names no files); the kept copy of each group is never on it; shared items, items under a shared folder or link, and items whose name is already in the trash are left out and reported under `skipped`. Without `confirmed` it returns the plan (counts, bytes, 10 samples). Applying always needs your approval of the exact list in the server's own dialog, and runs only if a fresh scan gives the same list. `verify: true` compares sha256 first and is needed for anything shared. Up to 200 items per call. Everything goes to the trash; nothing is deleted.
+- **`drive_undo`**: reverses a recorded batch (`action` `list`, `plan` or `apply`). Restores trashed items to their original folders, or moves and renames items back. Every item is found by its uid and re-checked by uid afterwards; nothing is overwritten; a batch can be undone once. Applying always asks you, also for a plain restore.
+- **Undo journal.** `drive_cleanup`, `drive_trash`, `drive_bulk_trash`, `drive_bulk_move`, `drive_move` and `drive_rename` now record each batch locally before the change. Their results gain `undoId` and, where relevant, `notUndoable` and an `undo` note. Local plaintext files with the names of the items changed, in a private folder (`0700`, files `0600`), kept 30 days or 50 batches per account. New environment variables `PROTON_DRIVE_UNDO` (`0` switches it off) and `PROTON_DRIVE_UNDO_DIR`. Downloads and `drive_write_file` cannot write into the folder, and it is refused inside `PROTON_DRIVE_SYNC_PATH`.
+- MCP prompt **`drive-checkup`** (argument `path`); five prompts in total, also in the MCPB manifest.
+- CLI: `proton-drive-cli checkup [path] [--finding id] [--no-sharing] [--refresh] [--json]` and `proton-drive-cli undo [--list] [<id>] [--confirm] [--json]`. `drive_cleanup` is MCP-only.
+- README recipe "Checkup, cleanup, undo" (privacy statement, limits, score table), a checkup and undo section in the safe-use guide, and updates to the threat model, SPEC and ARCHITECTURE.
+
+### Changed
+- 58 tools (was 55). The `tools/list` test budget for the `full` tier rises from 49,000 to 52,000 bytes. Measured: about 51.8 KB with `PROTON_DRIVE_APPROVAL=model` and about 52.9 KB in the default `human` mode. `core` is unchanged.
+- The companion CLI mirrors 47 of 58 tools.
+
+### Security and notes
+- `drive_cleanup` and `drive_undo` join the gated set (apply step only; plans and `list` change nothing) and are hidden in readonly mode. `drive_cleanup` checks `path` against `PROTON_DRIVE_REMOTE_ROOTS`; `drive_undo` checks every journal path against it.
+- Forged-hash rule: duplicates are found by the sha1 the uploader claimed, which is not verified. Without `verify`, `drive_cleanup` acts only on groups with the same claimed hash and size where nothing is shared, so an editor of a shared folder cannot get the owner's file trashed by uploading a copy with a copied hash. Anything touching sharing needs `verify: true`.
+- Same-name limit: the CLI restores a trashed item by name only. An item whose name is already in the trash, or that shares a name with another item of the same batch, cannot be restored reliably. `drive_cleanup` leaves such items out; `drive_trash` and `drive_bulk_trash` behave as before but mark them not undoable. Undo works while items are in the trash; trash does not free space until it is emptied, and emptying is permanent.
+- The journal holds names in plain text (same kind of exposure as the file-name index and the approvals folder). `PROTON_DRIVE_UNDO=0` turns it off, at the price of no undo.
+- Not verified: `drive_checkup`, `drive_cleanup` and `drive_undo`, and the journalling in the five older tools, have been tested against the fake CLI only, not against a real Proton account. Whether a node keeps its uid through trash and restore, how long a checkup takes on a large folder, whether Claude Desktop shows the approval dialog, and Windows are all untested. The MCPB bundle has no setting for `PROTON_DRIVE_UNDO` or `PROTON_DRIVE_UNDO_DIR` yet.
+
 ## 1.11.0 — 2026-11-19
 
 ### Behaviour change: human approval gate, fail closed by default

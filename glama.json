@@ -80,11 +80,11 @@
     },
     {
       "name": "drive_cleanup",
-      "description": "Trash redundant duplicate copies and empty folders under a path; the server builds the list, reversible, asks the user first."
+      "description": "Trash redundant duplicate copies and empty folders under a path; nothing is deleted. The server builds the list from a fresh scan (you name no files), shows it for approval and trashes only if Drive is unchanged. Returns a plan without confirmed=true."
     },
     {
       "name": "drive_undo",
-      "description": "Undo a recorded trash, move or rename batch (restore from trash, move back); always asks the user first."
+      "description": "Undo a recorded batch (cleanup, trash, bulk trash, move, bulk move, rename): restores items from the trash or moves them back, each verified by id; nothing is overwritten. Works while items are in the trash and names are unique there. Applying always asks the user."
     },
     {
       "name": "drive_restore",
@@ -212,7 +212,7 @@
     },
     {
       "name": "drive_checkup",
-      "description": "Health report for a Proton Drive folder: duplicates, empty folders, large old files, risky sharing, trash; read-only."
+      "description": "Health report for a folder in one call: exact-duplicate candidates, empty folders, large old files, public links, outside access, sensitive-looking names in shared items, trash. Score 0-100 and at most 3 example paths per finding. Names, sizes, dates and sharing only; changes nothing."
     },
     {
       "name": "drive_sharing_audit",
