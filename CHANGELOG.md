@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.11.0 — 2026-11-19
 
 ### Behaviour change: human approval gate, fail closed by default
 - **Destructive and outward-facing operations now need a human yes, asked by the server.** The default (`PROTON_DRIVE_APPROVAL` unset or `human`) is fail closed.
