@@ -29,6 +29,8 @@ tools:
   - drive_sync_plan
   - drive_bulk_move
   - drive_bulk_trash
+  - drive_cleanup
+  - drive_undo
   - drive_restore
   - drive_empty_trash
   - drive_read_file
@@ -59,6 +61,7 @@ tools:
   - drive_rename
   - drive_usage
   - drive_find_duplicates
+  - drive_checkup
   - drive_sharing_audit
   - drive_share_expiry_report
   - drive_recent_changes

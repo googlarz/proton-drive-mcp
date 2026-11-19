@@ -17,7 +17,11 @@
 //                     (served as /my-files). Supports `filesystem` list | info | trash | restore | move | rename with the real CLI's rules:
 //                     /trash/<name> resolves to the FIRST trashed node of that name, restore/move report per-item {uid, ok, error} with exit 0,
 //                     a missing path fails the whole call (exit 1) before anything is applied, tests may edit the state file between calls.
+//                     Optional per-node fields: sha1 (claimedDigests.sha1), mtime (claimedModificationTime), mediaType, shared / sharedByUrl (the
+//                     isShared / isSharedByUrl listing flags) and sharing (the raw `sharing status` payload, default {}).
 //   FAKE_FAIL_UIDS         drive mode: comma list of uids whose restore/move reports ok:false (exit 0)
+//   FAKE_FAIL_TRASH_UIDS   drive mode: comma list of uids whose trash reports ok:false (exit 0); the others are trashed
+//   FAKE_FAIL_LIST_UIDS    drive mode: comma list of folder uids whose `filesystem list` fails (exit 1), to simulate a folder the walk cannot read
 //   FAKE_LIE_UIDS          drive mode: comma list of uids whose restore/move reports ok:true but changes nothing
 //   FAKE_COUNTER      locked-then-json: file holding the number of calls so far
 //   FAKE_LOCKED_TIMES locked-then-json: how many calls fail with "database is locked" (default 2)
@@ -227,11 +231,21 @@ switch (mode) {
     };
     const asItem = (n) => ({
       uid: n.uid, parentUid: n.parentUid, name: { ok: true, value: n.name }, type: n.type,
-      activeRevision: n.type === "file" ? { claimedSize: n.size ?? 0 } : undefined,
+      activeRevision: n.type === "file"
+        ? { claimedSize: n.size ?? 0, ...(n.mtime ? { claimedModificationTime: n.mtime } : {}), ...(n.sha1 ? { claimedDigests: { sha1: n.sha1 } } : {}) }
+        : undefined,
+      ...(n.mediaType ? { mediaType: n.mediaType } : {}),
+      isShared: n.shared === true, isSharedByUrl: n.sharedByUrl === true,
       ...(n.trashTime ? { trashTime: n.trashTime } : {}),
     });
     const err = (name, code, message) => ({ name, code, message });
     const [group, sub, ...rest] = argv.filter((a) => a !== "--json");
+    const failTrashUids = csv(process.env.FAKE_FAIL_TRASH_UIDS);
+    if (group === "sharing" && sub === "status") {
+      const node = resolve(rest[0]);
+      if (!node) fail(`Node not found: ${rest[0]}`);
+      out(node.sharing ?? {});
+    }
     if (group !== "filesystem") out([]);
     if (sub === "list") {
       const p = rest[0];
@@ -239,6 +253,7 @@ switch (mode) {
       if (p === "/trash") out(Object.values(nodes).filter((n) => !live(n)).map(asItem));
       const node = resolve(p);
       if (!node || node.type !== "folder") fail(`Item not found: ${p}`);
+      if (csv(process.env.FAKE_FAIL_LIST_UIDS).has(node.uid)) fail(`injected list failure: ${p}`);
       out(kids(node.uid).map(asItem));
     } else if (sub === "info") {
       const node = resolve(rest[0]);
@@ -246,9 +261,13 @@ switch (mode) {
       out(asItem(node));
     } else if (sub === "trash") {
       const targets = rest.map((p) => resolve(p) ?? fail(`Item not found: ${p}`));
-      for (const n of targets) n.trashTime = "2026-11-19T10:00:00Z";
+      const results = targets.map((n) => {
+        if (failTrashUids.has(n.uid)) return { uid: n.uid, ok: false, error: err("APICodeError", 2999, "injected failure") };
+        n.trashTime = "2026-11-19T10:00:00Z";
+        return { uid: n.uid, ok: true };
+      });
       save();
-      out(targets.map((n) => ({ uid: n.uid, ok: true })));
+      out(results);
     } else if (sub === "restore") {
       const targets = rest.map((p) => resolve(p) ?? fail(`Item not found: ${p}`));
       const results = targets.map((n) => {

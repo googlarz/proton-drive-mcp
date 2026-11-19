@@ -56,7 +56,13 @@ import { snapshotBeforeOverwrite, snapshotLocalBeforeOverwrite, snapshotEnabled,
 import { AuditLog, auditLogInside, redactArgs, canonical, type AuditEntry } from "./utils/audit.js";
 import { ApprovalGate, requiresApproval, resolveApprovalMode, underShared, type ApprovalMode, type Effect, type Elicit, type FieldValue, type GateContext, type Operation } from "./utils/approval.js";
 import { createApprovalStore, resolveApprovalDir, type ApprovalStore } from "./utils/approvalStore.js";
-import { assertApprovalDirUsable } from "./utils/localguard.js";
+import { assertApprovalDirUsable, assertUndoDirUsable } from "./utils/localguard.js";
+import { resolveUndoDir, undoEnabled } from "./utils/undoJournal.js";
+import { openUndoJournal, beginBatch, type JournalOpen } from "./services/undoRecord.js";
+import { runCheckup, computeCleanupPlan } from "./services/cleanupRun.js";
+import { planFingerprint, planSamples, summarizeForDialog, type CleanupFix } from "./services/cleanup.js";
+import { planUndo, applyUndo, UndoError } from "./services/undo.js";
+import { CHECKUP_FINDINGS, type CheckupFinding } from "./services/checkup.js";
 import { parseRemoteRoots, pathInRoots } from "./utils/remoteroots.js";
 
 const require = createRequire(import.meta.url);
@@ -157,7 +163,7 @@ function byTimeDescThenId<T>(time: (x: T) => string | undefined, id: (x: T) => s
 }
 const photoOrder = byTimeDescThenId<AlbumPhoto>((p) => p.captureTime, (p) => p.nodeUid);
 
-type JsonSchemaProp = { type?: string; enum?: readonly unknown[]; items?: { type?: string }; minimum?: number; maximum?: number };
+type JsonSchemaProp = { type?: string; enum?: readonly unknown[]; items?: { type?: string; enum?: readonly string[] }; minItems?: number; minimum?: number; maximum?: number };
 type ToolDef = {
   name: string;
   description: string;
@@ -189,6 +195,8 @@ function checkArgs(def: ToolDef, a: Record<string, unknown>): string | undefined
     if (p.type === "array") {
       if (!Array.isArray(v)) return `${k} must be an array.`;
       if (p.items?.type === "string" && v.some((x) => typeof x !== "string")) return `${k} must be an array of strings.`;
+      if (p.items?.enum && v.some((x) => !p.items?.enum?.includes(x as string))) return `${k} must only contain: ${p.items.enum.join(", ")}.`;
+      if (p.minItems !== undefined && v.length < p.minItems) return `${k} must have at least ${p.minItems} item(s).`;
     }
     if (p.enum && !p.enum.includes(v)) return `${k} must be one of: ${p.enum.join(", ")}.`;
   }
@@ -1082,6 +1090,37 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "drive_cleanup",
+    description:
+      "Trash redundant duplicate copies and empty folders under a path; nothing is deleted and drive_undo restores them. The server lists the items from a fresh, complete scan: you name no files, and kept copies, shared items and names already in the trash are left out. Without confirmed: plan (counts, bytes, 10 samples, skipped, remaining). With confirmed=true: trashes only if the user approved. Max 200 items per call.",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Folder under /my-files." },
+        fixes: { type: "array", items: { type: "string", enum: ["duplicates", "empty-folders"] }, minItems: 1, description: "What to clean." },
+        verify: { type: "boolean", description: "sha256-verify duplicates first (needed for shared items; slower)." },
+      },
+      required: ["path", "fixes"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_undo",
+    description:
+      "Undo a recorded batch (drive_cleanup, drive_bulk_trash, drive_trash, drive_bulk_move, drive_move, drive_rename): restores or moves items back, each checked by id; nothing is overwritten and changed items are skipped with a reason. action list (newest 20, no names), plan (default), apply (always asks the user first). Needs the local undo record (PROTON_DRIVE_UNDO=0 turns it off).",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "plan", "apply"], description: "Default plan." },
+        id: { type: "string", description: "Undo code like K7Q2-M9XD (default: newest batch not yet undone)." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
   // Analytics (read-only; walk the tree once, cached)
   {
     name: "drive_usage",
@@ -1129,6 +1168,27 @@ const TOOLS = [
       type: "object",
       properties: {
         path: { type: "string", description: "Folder (default /my-files)." },
+        refresh: { type: "boolean", description: "Ignore the cached walk." },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "drive_checkup",
+    description:
+      "Health report for a folder in one call: exact-duplicate candidates, empty folders, large old files, public links, outside access, sensitive-looking names in shared items, trash. Score 0-100 (scoreParts), counts and at most 3 example paths per finding (namesInResult counts them); names, sizes, dates and sharing only, no content. finding=<id> returns one page. Cached walk (up to 5 min); partial:true means call again. Changes nothing.",
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Folder under /my-files (default /my-files)." },
+        finding: { type: "string", enum: [...CHECKUP_FINDINGS], description: "One page of this finding instead of the summary." },
+        limit: { type: "integer", minimum: 1, maximum: 200, description: "Page size (default 50)." },
+        offset: { type: "integer", minimum: 0, description: "Items to skip." },
+        olderThanDays: { type: "integer", minimum: 0, description: "large-old age (default 365)." },
+        minSizeMB: { type: "integer", minimum: 0, description: "large-old size (default 50)." },
+        sharing: { type: "boolean", description: "false skips the sharing calls (link expiry unknown)." },
         refresh: { type: "boolean", description: "Ignore the cached walk." },
       },
       required: [],
@@ -1240,7 +1300,7 @@ const TOOLS = [
 const CONFIRM_ALWAYS = new Set([
   "drive_auth_logout", "drive_share_invite", "drive_share_revoke", "drive_share_set_url",
   "drive_share_remove_url", "drive_share_leave", "drive_invitation_reject", "photos_remove_from_album",
-  "drive_bulk_move", "drive_bulk_trash",
+  "drive_bulk_move", "drive_bulk_trash", "drive_cleanup",
 ]);
 const CONFIRM_CONDITIONAL: Record<string, string> = {
   drive_upload: "when fileConflictStrategy or folderConflictStrategy is 'replace' (it trashes the existing remote item)",
@@ -1289,6 +1349,7 @@ const TOOL_TITLES: Record<string, string> = {
   drive_share_expiry_report: "Report public link expiry", drive_recent_changes: "Show recent changes",
   drive_content_index: "Manage content search index", drive_search_content: "Search file contents",
   drive_refresh_index: "Refresh folder index",
+  drive_checkup: "Drive checkup", drive_cleanup: "Clean up duplicates and empty folders", drive_undo: "Undo a change",
 };
 // Hint for clients that cap tool-result size: these tools can legitimately return large payloads.
 const LARGE_RESULT_TOOLS = new Set(["drive_list", "drive_read_file", "drive_read_content", "drive_read_many"]);
@@ -1304,8 +1365,9 @@ const HUMAN_DESCRIPTION_EDITS: Record<string, [from: string, to: string]> = {
   drive_write_file: ["Refuses to overwrite an existing file unless confirmed=true — ask the user first.", "Overwriting an existing file needs the user's approval, which the server asks for itself."],
   drive_bulk_move: ["moves only if no problems.", "moves only if no problems. With confirmed=true the server first asks the user to approve the exact list, and moves nothing if the plan changed meanwhile."],
   drive_bulk_trash: ["trashes only if no problems.", "trashes only if no problems. With confirmed=true the server first asks the user to approve the exact list, and trashes nothing if the plan changed meanwhile."],
+  drive_cleanup: ["With confirmed=true: trashes only if the user approved.", "With confirmed=true the server first asks the user to approve the exact list, and trashes nothing if Drive changed meanwhile."],
 };
-const BULK_TOOLS = new Set(["drive_bulk_move", "drive_bulk_trash"]);
+const BULK_TOOLS = new Set(["drive_bulk_move", "drive_bulk_trash", "drive_cleanup"]);
 
 function buildToolDefs(humanApproval: boolean): ToolDef[] {
   return TOOLS.map((t) => {
@@ -1379,7 +1441,7 @@ export function resolveTier(raw: string | undefined): "full" | "core" {
 /** Changes Drive content, sharing, photos or the signed-in account. Hidden and refused in readonly mode. */
 export const MUTATING_TOOL_NAMES = new Set([
   "drive_auth_logout", "drive_upload", "drive_mkdir", "drive_rename", "drive_move", "drive_copy", "drive_delete",
-  "drive_trash", "drive_restore", "drive_empty_trash", "drive_bulk_move", "drive_bulk_trash", "drive_write_file",
+  "drive_trash", "drive_restore", "drive_empty_trash", "drive_bulk_move", "drive_bulk_trash", "drive_write_file", "drive_cleanup", "drive_undo",
   "drive_share_invite", "drive_share_revoke", "drive_share_set_url", "drive_share_remove_url", "drive_share_remove_all",
   "drive_share_leave", "drive_invitation_accept", "drive_invitation_reject",
   "photos_create_album", "photos_update_album", "photos_delete_album", "photos_add_to_album", "photos_remove_from_album", "photos_upload",
@@ -1388,7 +1450,7 @@ export const MUTATING_TOOL_NAMES = new Set([
 export const READ_TOOL_NAMES = new Set([
   "drive_auth_status", "drive_version", "drive_list", "drive_info", "drive_size", "drive_tree", "drive_search", "drive_download",
   "drive_list_trash", "drive_share_status", "drive_list_invitations", "drive_read_content", "drive_read_file",
-  "drive_sync_plan", "drive_usage", "drive_find_duplicates", "drive_sharing_audit", "drive_audit_log",
+  "drive_sync_plan", "drive_usage", "drive_find_duplicates", "drive_sharing_audit", "drive_audit_log", "drive_checkup",
   "drive_read_many", "drive_share_expiry_report", "drive_recent_changes", "drive_content_index", "drive_search_content", "drive_refresh_index",
   "photos_list_albums", "photos_list_album_photos", "photos_list_timeline", "photos_download",
 ]);
@@ -1409,7 +1471,7 @@ const sharePath: PathArg[] = [{ arg: "path" }];
 export const REMOTE_PATH_ARGS: Record<string, PathArg[]> = {
   drive_list: [{ arg: "path" }], drive_info: [{ arg: "path" }], drive_size: [{ arg: "path" }], drive_read_content: [{ arg: "path" }],
   drive_read_file: [{ arg: "path" }], drive_write_file: [{ arg: "path" }], drive_mkdir: [{ arg: "path" }],
-  drive_tree: walkRoot, drive_search: walkRoot, drive_usage: walkRoot, drive_find_duplicates: walkRoot, drive_sharing_audit: walkRoot,
+  drive_tree: walkRoot, drive_search: walkRoot, drive_usage: walkRoot, drive_checkup: walkRoot, drive_find_duplicates: walkRoot, drive_sharing_audit: walkRoot,
   drive_share_expiry_report: walkRoot, drive_recent_changes: walkRoot, drive_refresh_index: walkRoot, drive_read_many: [{ arg: "paths", list: true }],
   drive_content_index: [{ arg: "path" }], drive_search_content: [{ arg: "path" }],
   drive_upload: [{ arg: "remotePath" }], drive_download: [{ arg: "remotePath" }],
@@ -1418,6 +1480,8 @@ export const REMOTE_PATH_ARGS: Record<string, PathArg[]> = {
   drive_copy: [{ arg: "sourcePath" }, { arg: "destinationPath" }],
   drive_bulk_move: [{ arg: "sources", list: true, strict: true }, { arg: "destinationFolder" }],
   drive_bulk_trash: [{ arg: "paths", list: true, strict: true }],
+  drive_cleanup: [{ arg: "path" }],
+  drive_undo: [], // no path argument: every path in the undo record is checked against the roots one by one (undo.ts isPathAllowed)
   drive_sync_plan: [{ arg: "drivePath" }],
   drive_share_status: sharePath, drive_share_invite: sharePath, drive_share_revoke: sharePath, drive_share_leave: [{ arg: "path", strict: true }],
   drive_share_set_url: sharePath, drive_share_remove_url: sharePath, drive_share_remove_all: sharePath,
@@ -1574,6 +1638,18 @@ export async function main() {
     try { assertApprovalDirUsable(resolveApprovalDir(process.env), process.env); }
     catch (err) { logger.warn(`approval store unusable (${err instanceof Error ? err.message : String(err)}): operations that need approval and cannot be approved in a dialog will be refused until this is fixed.`); }
   }
+  // The undo journal (1.12.0): same startup warning as the approvals folder, and the journal itself is opened on first use.
+  if (undoEnabled(process.env)) {
+    try { assertUndoDirUsable(resolveUndoDir(process.env), process.env); }
+    catch (err) { logger.warn(`undo journal unusable (${err instanceof Error ? err.message : String(err)}): changes will run without an undo record until this is fixed.`); }
+  }
+  let journalOpen: JournalOpen | undefined;
+  const getJournal = async (): Promise<JournalOpen> => {
+    if (journalOpen) return journalOpen;
+    const opened = await openUndoJournal(drive, process.env);
+    if (opened.journal) journalOpen = opened; // only a working journal is kept: the account key may be known on the next call
+    return opened;
+  };
   const gate = new ApprovalGate({
     mode: apMode,
     get elicit() { return canElicit() ? elicitHuman : undefined; },
@@ -1848,8 +1924,10 @@ export async function main() {
             gateNeeded(false, {}, { resultingPaths: renamedTo, sourcePaths: [renamePath] }),
           );
           if (denied) return denied;
-          await drive.rename(renamePath, newName);
-          return ok({ message: `Renamed: ${renamePath} → ${newName}` });
+          const renameBatch = await beginBatch(drive, await getJournal(), { tool: name, kind: "rename", paths: [renamePath], to: () => renamedTo[0] });
+          try { await drive.rename(renamePath, newName); } catch (err) { await renameBatch.settleAfterError(); throw err; }
+          renameBatch.complete();
+          return ok({ message: `Renamed: ${renamePath} → ${newName}`, ...renameBatch.report() });
         }
 
         case "drive_move": {
@@ -1860,8 +1938,10 @@ export async function main() {
             gateNeeded(false, {}, { resultingPaths: [moveDst], sourcePaths: [moveSrc] }),
           );
           if (denied) return denied;
-          await drive.move(moveSrc, moveDst);
-          return ok({ message: `Moved: ${moveSrc} → ${moveDst}` });
+          const moveBatch = await beginBatch(drive, await getJournal(), { tool: name, kind: "move", paths: [moveSrc], to: () => moveDst });
+          try { await drive.move(moveSrc, moveDst); } catch (err) { await moveBatch.settleAfterError(); throw err; }
+          moveBatch.complete();
+          return ok({ message: `Moved: ${moveSrc} → ${moveDst}`, ...moveBatch.report() });
         }
 
         case "drive_delete": {
@@ -1904,6 +1984,22 @@ export async function main() {
             path: a.path === undefined ? "/my-files" : validateRemotePath(a.path),
             refresh: a.refresh === true,
           }));
+
+        case "drive_checkup": {
+          const checkupPath = a.path === undefined ? "/my-files" : validateRemotePath(a.path);
+          if (checkupPath !== "/my-files" && !checkupPath.startsWith("/my-files/")) return fail("drive_checkup: path must be /my-files or a folder under it.");
+          return ok(await runCheckup(drive, {
+            path: checkupPath,
+            finding: a.finding as CheckupFinding | undefined,
+            limit: a.limit as number | undefined,
+            offset: a.offset as number | undefined,
+            olderThanDays: a.olderThanDays as number | undefined,
+            minSizeMB: a.minSizeMB as number | undefined,
+            sharing: a.sharing !== false,
+            refresh: a.refresh === true,
+            skipTrash: remoteRoots !== null,
+          }));
+        }
 
         case "drive_share_expiry_report":
           return ok(await driveShareExpiryReport(drive, {
@@ -1980,8 +2076,10 @@ export async function main() {
           const trashPath = validateRemotePath(a.path);
           const denied = await requireApproval({ tool: name, effect: effectFor("reversible", [trashPath]), fields: { path: trashPath } }, gateNeeded(false, {}, { sourcePaths: [trashPath] }));
           if (denied) return denied;
-          await drive.trash(trashPath);
-          return ok({ message: `Moved to trash: ${trashPath}` });
+          const trashBatch = await beginBatch(drive, await getJournal(), { tool: name, kind: "trash", paths: [trashPath] });
+          try { await drive.trash(trashPath); } catch (err) { await trashBatch.settleAfterError(); throw err; }
+          trashBatch.complete();
+          return ok({ message: `Moved to trash: ${trashPath}`, ...trashBatch.report() });
         }
 
         case "drive_sync_plan": {
@@ -2022,8 +2120,13 @@ export async function main() {
               return refuse("approval_changed", "drive_bulk_move not applied, nothing moved: Drive changed after the user approved the plan. Run the plan again and ask for approval again.");
             }
           }
-          try { await drive.bulkMove(sources, destFolder); } finally { invalidatePath(destFolder); sources.forEach(invalidatePath); }
-          return ok({ applied: true, moved: movePlan.plan.length, plan: movePlan.plan });
+          const movedMap = new Map(movePlan.plan.map((p) => [p.source, p.destination as string]));
+          const moveBatch = await beginBatch(drive, await getJournal(), { tool: name, kind: "move", paths: sources, to: (from) => movedMap.get(from) ?? from });
+          try { await drive.bulkMove(sources, destFolder); }
+          catch (err) { await moveBatch.settleAfterError(); throw err; }
+          finally { invalidatePath(destFolder); sources.forEach(invalidatePath); }
+          moveBatch.complete();
+          return ok({ applied: true, moved: movePlan.plan.length, plan: movePlan.plan, ...moveBatch.report() });
         }
 
         case "drive_bulk_trash": {
@@ -2045,8 +2148,107 @@ export async function main() {
               return refuse("approval_changed", "drive_bulk_trash not applied, nothing trashed: Drive changed after the user approved the plan. Run the plan again and ask for approval again.");
             }
           }
-          try { await drive.bulkTrash(trashPaths); } finally { trashPaths.forEach(invalidatePath); }
-          return ok({ applied: true, trashed: trashPlan.plan.length, plan: trashPlan.plan });
+          const bulkBatch = await beginBatch(drive, await getJournal(), { tool: name, kind: "trash", paths: trashPaths });
+          try { await drive.bulkTrash(trashPaths); }
+          catch (err) { await bulkBatch.settleAfterError(); throw err; }
+          finally { trashPaths.forEach(invalidatePath); }
+          bulkBatch.complete();
+          return ok({ applied: true, trashed: trashPlan.plan.length, plan: trashPlan.plan, ...bulkBatch.report() });
+        }
+
+        case "drive_cleanup": {
+          const cleanupPath = validateRemotePath(a.path);
+          if (cleanupPath !== "/my-files" && !cleanupPath.startsWith("/my-files/")) return fail("drive_cleanup: path must be /my-files or a folder under it.");
+          const fixes = [...new Set(a.fixes as string[])].sort() as CleanupFix[];
+          const verify = a.verify === true;
+          // The list comes from the server's own fresh, complete scan; the model names no file.
+          const run = await computeCleanupPlan(drive, { path: cleanupPath, fixes, verify });
+          if ("refusal" in run) return refuse("cleanup_refused", `drive_cleanup: ${run.refusal}`);
+          const cleanupPlan = run.plan;
+          const planView = {
+            path: cleanupPath, fixes, verified: run.verified, counts: cleanupPlan.counts, bytes: cleanupPlan.bytes,
+            samples: planSamples(cleanupPlan, 10), skipped: cleanupPlan.skipped, remaining: cleanupPlan.remaining,
+          };
+          const more = cleanupPlan.remaining > 0 ? ` ${cleanupPlan.remaining} more item(s) are left for a later call.` : "";
+          if (cleanupPlan.items.length === 0) return ok({ applied: false, ...planView, next: "Nothing to clean up under this path." });
+          if (a.confirmed !== true) return ok({ applied: false, ...planView, next: applyNext + more });
+          const cleanupPaths = cleanupPlan.items.map((i) => i.path);
+          if (apMode === "model") {
+            if (canElicit() && !(await askApproval(bulkPrompt("drive_cleanup", "Trash", cleanupPaths)))) {
+              return fail("drive_cleanup not applied, nothing trashed: the user did not approve.");
+            }
+          } else {
+            const denied = await requireApproval({ tool: name, effect: "reversible", fields: { path: cleanupPath, fixes, trash: summarizeForDialog(cleanupPlan) } }, true);
+            if (denied) return denied;
+            // The human approved this exact list: apply it only if a fresh scan gives the same one.
+            const again = await computeCleanupPlan(drive, { path: cleanupPath, fixes, verify });
+            if ("refusal" in again || planFingerprint(again.plan) !== planFingerprint(cleanupPlan)) {
+              return refuse("approval_changed", "drive_cleanup not applied, nothing trashed: Drive changed after the user approved the list. Run the plan again and ask for approval again.");
+            }
+          }
+          const cleanupKnown = new Map(cleanupPlan.items.map((i) => [i.path, { uid: i.uid, parentUid: i.parentUid, name: i.name, size: i.kind === "duplicate" ? i.size : undefined }]));
+          const cleanupBatch = await beginBatch(drive, await getJournal(), { tool: name, kind: "trash", paths: cleanupPaths, known: cleanupKnown, reportOff: true });
+          try {
+            await drive.bulkTrash(cleanupPaths);
+          } catch (err) {
+            const kept = await cleanupBatch.settleAfterError();
+            const msg = err instanceof Error ? err.message : String(err);
+            const undoId = cleanupBatch.report().undoId;
+            return failWith("error", "partial", `drive_cleanup did not finish: ${truncate(msg, 300)}${kept === undefined ? "" : ` ${kept.length} of ${cleanupPaths.length} item(s) reached the trash${undoId && kept.length ? ` (undo code ${undoId})` : ""}.`} Run drive_checkup again to see what is left.`);
+          }
+          cleanupBatch.complete();
+          return ok({
+            applied: true, path: cleanupPath, trashed: cleanupPaths.length, bytes: cleanupPlan.bytes, notUndoable: 0, ...cleanupBatch.report(),
+            remaining: cleanupPlan.remaining,
+            note: "The items are in the trash: space is released only when the trash is emptied, and drive_undo restores them while they are there.",
+          });
+        }
+
+        case "drive_undo": {
+          const action = (a.action ?? "plan") as "list" | "plan" | "apply";
+          const jo = await getJournal();
+          if (!jo.journal) return refuse("undo_unavailable", `drive_undo is unavailable: ${jo.reason}.`);
+          const journal = jo.journal;
+          const pathAllowed = (p: string) => !remoteRoots || pathInRoots(p, remoteRoots, true);
+          // A path outside PROTON_DRIVE_REMOTE_ROOTS is never shown to the model, even in a refusal.
+          const shown = (p: string) => (pathAllowed(p) ? p : "(outside PROTON_DRIVE_REMOTE_ROOTS)");
+          const undoId = a.id === undefined ? undefined : (a.id as string);
+          try {
+            if (action === "list") return ok(await planUndo(drive, journal, { action: "list" }));
+            const undoPlan = await planUndo(drive, journal, { action: "plan", id: undoId, isPathAllowed: pathAllowed });
+            const notRestorable = undoPlan.items.filter((i) => !i.restorable && !i.alreadyInPlace).length;
+            if (action === "plan") {
+              return ok({
+                action: "plan", id: undoPlan.id, when: undoPlan.when, tool: undoPlan.tool, kind: undoPlan.kind, status: undoPlan.status,
+                restorable: undoPlan.restorableCount, notRestorable, itemsTotal: undoPlan.items.length,
+                items: undoPlan.items.slice(0, 50).map((i) => ({ ...i, path: shown(i.path) })),
+                next: undoPlan.restorableCount === 0
+                  ? "Nothing in this batch can be undone; the reasons are listed per item."
+                  : apMode === "model" ? "Get user approval, then call drive_undo with action 'apply' and this id." : "Call drive_undo with action 'apply' and this id; the server asks the user to approve the exact list itself.",
+              });
+            }
+            if (undoPlan.restore.length + undoPlan.moveBack.length === 0) {
+              const why = [...new Set(undoPlan.items.map((i) => i.reason).filter(Boolean))].slice(0, 3).join("; ");
+              return refuse("nothing_restorable", `Nothing in batch ${undoPlan.id} can be undone${why ? ` (${why})` : ""}.`);
+            }
+            if (apMode === "model") {
+              if (canElicit() && !(await askApproval(bulkPrompt("drive_undo", "Restore or move back", [...undoPlan.restore, ...undoPlan.moveBack])))) {
+                return fail("drive_undo not applied, nothing changed: the user did not approve.");
+              }
+            } else {
+              const denied = await requireApproval({
+                tool: name, effect: "reversible",
+                fields: { id: undoPlan.id, when: undoPlan.when, restore: undoPlan.restore, moveBack: undoPlan.moveBack },
+              }, true);
+              if (denied) return denied;
+            }
+            // applyUndo plans again and refuses (approval_changed) unless that gives exactly the approved list.
+            const done = await applyUndo(drive, journal, { id: undoPlan.id, expectedFingerprint: undoPlan.fingerprint, isPathAllowed: pathAllowed });
+            return ok({ applied: true, ...done, failed: done.failed.slice(0, 50).map((f) => ({ ...f, path: shown(f.path) })) });
+          } catch (err) {
+            if (err instanceof UndoError) return refuse(err.code, err.message);
+            throw err;
+          }
         }
 
         case "drive_restore": {

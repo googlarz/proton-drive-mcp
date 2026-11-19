@@ -211,10 +211,10 @@ describe("requiresApproval", () => {
   const SHARED = "/shared-with-me/team/x";
   const MINE = "/my-files/x";
 
-  it("gated set is the 18 from 1.10.1 plus invitation_accept, copy, move, mkdir, rename, trash, restore (the last six only for /shared-with-me)", () => {
+  it("gated set is the 18 from 1.10.1 plus invitation_accept, copy, move, mkdir, rename, trash, restore (the last six only for /shared-with-me) and, from 1.12.0, the apply step of drive_cleanup and drive_undo", () => {
     const old18 = [...ALWAYS.filter((t) => t !== "drive_invitation_accept"), "drive_bulk_move", "drive_bulk_trash", "drive_upload", "drive_download", "photos_download", "drive_write_file"];
     assert.equal(old18.length, 18);
-    assert.deepEqual([...GATED_TOOLS].sort(), [...old18, "drive_invitation_accept", "drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_trash", "drive_restore"].sort());
+    assert.deepEqual([...GATED_TOOLS].sort(), [...old18, "drive_invitation_accept", "drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_trash", "drive_restore", "drive_cleanup", "drive_undo"].sort());
   });
 
   it("unconditional tools need approval in human and strict, never in model mode, whatever ctx and confirmed say", () => {
@@ -333,9 +333,20 @@ describe("requiresApproval", () => {
   it("strict covers every tool in the mutating list, and still not reads or plan-only bulk calls", () => {
     const ctx = { mutatingTools: MUTATING_TOOL_NAMES };
     for (const t of MUTATING_TOOL_NAMES) {
-      if (t === "drive_bulk_move" || t === "drive_bulk_trash") continue;
+      if (t === "drive_bulk_move" || t === "drive_bulk_trash" || t === "drive_cleanup" || t === "drive_undo") continue; // plan/apply tools, below
       assert.equal(requiresApproval(t, {}, "strict", ctx), true, t);
     }
+    for (const t of ["drive_bulk_move", "drive_bulk_trash", "drive_cleanup"]) {
+      assert.equal(requiresApproval(t, {}, "strict", ctx), false, `${t} plan`);
+      assert.equal(requiresApproval(t, { confirmed: true }, "strict", ctx), true, `${t} apply`);
+      assert.equal(requiresApproval(t, { confirmed: true }, "human", {}), true, `${t} apply in human mode`);
+      assert.equal(requiresApproval(t, { confirmed: true }, "model", {}), false, `${t} in model mode`);
+    }
+    for (const mode of ["human", "strict"]) {
+      assert.equal(requiresApproval("drive_undo", { action: "apply" }, mode, ctx), true, `drive_undo apply ${mode}`);
+      for (const action of [undefined, "list", "plan"]) assert.equal(requiresApproval("drive_undo", { action }, mode, ctx), false, `drive_undo ${action} ${mode}`);
+    }
+    assert.equal(requiresApproval("drive_undo", { action: "apply" }, "model", ctx), false);
     assert.equal(requiresApproval("drive_trash", { path: MINE }, "strict", ctx), true);
     assert.equal(requiresApproval("drive_list", {}, "strict", ctx), false);
     assert.equal(requiresApproval("drive_download", {}, "strict", ctx), false);

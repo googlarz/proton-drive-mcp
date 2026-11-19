@@ -52,6 +52,8 @@ export const TOOL_TITLES: Readonly<Record<string, string>> = {
   photos_remove_from_album: "remove a photo from an album",
   drive_bulk_move: "move several items",
   drive_bulk_trash: "move several items to the trash",
+  drive_cleanup: "move redundant copies and empty folders to the trash",
+  drive_undo: "undo an earlier change (restore from the trash, move or rename back)",
   drive_upload: "upload (may replace existing items)",
   drive_download: "download (may delete existing LOCAL files or folders first)",
   photos_download: "download photos (may delete existing LOCAL files first)",
@@ -73,6 +75,7 @@ const FIELD_ORDER = [
   "path", "paths", "sources", "sourcePath", "remotePath", "destinationPath", "destinationFolder", "newName", "localPath",
   "album", "albumName", "name", "uid", "item", "inviter", "invitedFolder", "email", "role", "expiration", "replacesExistingLink", "resetSettings", "password",
   "message", "content", "fileConflictStrategy", "folderConflictStrategy", "conflictStrategy",
+  "fixes", "trash", "id", "when", "restore", "moveBack",
 ];
 const KEY_OK = /^[A-Za-z][A-Za-z0-9_]{0,40}$/;
 const LIST_FULL_MAX = 50;
@@ -160,12 +163,13 @@ export function resolveApprovalMode(env: string | undefined | Record<string, str
 
 // ---- Which operations need a human --------------------------------------------------------------------------------
 
-/** Default-mode gated set: the 18 gated before 1.11.0 plus drive_invitation_accept and the /shared-with-me destinations. Some entries are gated only conditionally, see requiresApproval. */
+/** Default-mode gated set: the 18 gated before 1.11.0 plus drive_invitation_accept, the /shared-with-me destinations and (1.12.0) the apply step of drive_cleanup and drive_undo. Some entries are gated only conditionally, see requiresApproval. */
 export const GATED_TOOLS: ReadonlySet<string> = new Set([
   "drive_auth_logout", "drive_delete", "drive_empty_trash", "drive_share_invite", "drive_share_revoke", "drive_share_set_url",
   "drive_share_remove_url", "drive_share_remove_all", "drive_share_leave", "drive_invitation_reject", "photos_delete_album",
   "photos_remove_from_album", "drive_bulk_move", "drive_bulk_trash", "drive_upload", "drive_download", "photos_download", "drive_write_file",
   "drive_invitation_accept", "drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_trash", "drive_restore",
+  "drive_cleanup", "drive_undo",
 ]);
 
 const ALWAYS = new Set([
@@ -173,7 +177,7 @@ const ALWAYS = new Set([
   "drive_share_remove_url", "drive_share_remove_all", "drive_share_leave", "drive_invitation_reject", "drive_invitation_accept",
   "photos_delete_album", "photos_remove_from_album",
 ]);
-const BULK = new Set(["drive_bulk_move", "drive_bulk_trash"]);
+const BULK = new Set(["drive_bulk_move", "drive_bulk_trash", "drive_cleanup"]);
 // Outward when any path the operation reads from or ends up at (either side) is under /shared-with-me.
 const SHARED_DEST = new Set(["drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_bulk_move", "drive_upload", "drive_write_file", "drive_trash", "drive_bulk_trash", "drive_restore"]);
 const PATH_ARGS = ["destinationPath", "destinationFolder", "remotePath", "path", "sourcePath", "sources", "paths"];
@@ -203,6 +207,7 @@ export function requiresApproval(tool: string, args: Record<string, unknown>, mo
   if (BULK.has(tool)) {
     return ctx.apply ?? args.confirmed === true; // a plan (no apply) changes nothing
   }
+  if (tool === "drive_undo") return ctx.apply ?? args.action === "apply"; // list and plan change nothing
   const isRemove = (...ks: string[]) => ks.some((k) => args[k] === "remove");
   if ((tool === "drive_download" && isRemove("fileConflictStrategy", "folderConflictStrategy")) || (tool === "photos_download" && isRemove("conflictStrategy"))) return true;
   if (mode === "strict") {

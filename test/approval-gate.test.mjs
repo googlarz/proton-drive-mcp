@@ -9,6 +9,7 @@ import { AuditLog } from "../dist/utils/audit.js";
 import { MUTATING_TOOL_NAMES, READ_TOOL_NAMES } from "../dist/index.js";
 import { GATED_TOOLS, requiresApproval, underShared } from "../dist/utils/approval.js";
 import { ACCEPT, DECLINE, CANCEL, NO_APPROVE, THROWS, withServer, writeTree, text } from "./helpers/approval-harness.mjs";
+import { driveSetup, file, folder, seedJournal } from "./helpers/drive-state.mjs";
 
 // ---- the gated set: one entry per way a tool can be gated -------------------------------------------------------------
 const MEMBER = JSON.stringify({ members: [{ inviteeEmail: "a@example.org", role: "viewer" }] });
@@ -60,12 +61,25 @@ const GATED_CASES = [
   { tool: "drive_bulk_trash", label: "from /shared-with-me", args: () => ({ paths: ["/shared-with-me/t/a.txt"] }), plan: true, setup: (sb) => ({ FAKE_TREE: writeTree(sb.dir, { "/shared-with-me/t": [{ name: "a.txt", type: "file" }] }) }), fakeMode: "tree" },
   { tool: "drive_bulk_move", label: "out of /shared-with-me", args: () => ({ sources: ["/shared-with-me/t/a.txt"], destinationFolder: "/my-files/d" }), plan: true, setup: (sb) => ({ FAKE_TREE: writeTree(sb.dir, { "/shared-with-me/t": [{ name: "a.txt", type: "file" }], "/my-files/d": [] }) }), fakeMode: "tree" },
 ];
+// 1.12.0: drive_cleanup (plan/apply like the bulk tools) and drive_undo (action apply) on the stateful fake Drive.
+const DUPES = [folder("d1", "root", "docs"), folder("d2", "root", "inbox"), file("f1", "d1", "a.pdf", { size: 5000, sha1: "S1", mtime: "2020-01-01T00:00:00Z" }), file("f2", "d2", "a (1).pdf", { size: 5000, sha1: "S1", mtime: "2024-01-01T00:00:00Z" })];
+GATED_CASES.push(
+  { tool: "drive_cleanup", args: () => ({ path: "/my-files", fixes: ["duplicates"] }), plan: true, setup: driveSetup(DUPES), fakeMode: "drive" },
+  {
+    tool: "drive_undo", args: () => ({ action: "apply" }), once: true, fakeMode: "drive",
+    setup: (sb) => {
+      const env = driveSetup([folder("d1", "root", "docs"), file("f1", "d1", "a.txt", { trashTime: "2026-11-19T10:00:00Z" })])(sb);
+      seedJournal(sb, { items: [{ uid: "f1", from: "/my-files/docs/a.txt", name: "a.txt", restorable: true }] });
+      return env;
+    },
+  },
+);
 const caseName = (c) => (c.label ? `${c.tool} ${c.label}` : c.tool);
 const CONFIRMED = [["true", { confirmed: true }], ["false", { confirmed: false }], ["absent", {}]];
 
 /** Calls once per prompt-less/prompted call and returns {r, delta} where delta = CLI calls that are not reads. */
 // These tools have no `confirmed` argument at all (the schema rejects it), so there is only the "absent" variant.
-const NO_CONFIRMED_ARG = new Set(["drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_trash", "drive_restore", "drive_invitation_accept"]);
+const NO_CONFIRMED_ARG = new Set(["drive_undo", "drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_trash", "drive_restore", "drive_invitation_accept"]);
 async function callCase(ctx, c, confirmedArgs) {
   const before = ctx.changes().length;
   const r = await ctx.call(c.tool, { ...c.args(ctx.sb), ...(NO_CONFIRMED_ARG.has(c.tool) ? {} : confirmedArgs) });
@@ -111,6 +125,7 @@ describe("A1/A2: gated operations x confirmed x human answer (client can elicit)
         const ops = new Set();
         for (const [cLabel, cArgs] of CONFIRMED) {
           if (c.plan && cLabel !== "true") continue; // only the apply call changes anything
+          if (c.once && ops.size > 0) continue; // a recorded batch can be undone once
           const asked = ctx.asked;
           const { r, delta } = await callCase(ctx, c, cArgs);
           assert.equal(ctx.asked, asked + 1, `${caseName(c)} confirmed ${cLabel}: asked once`);
@@ -302,17 +317,17 @@ describe("modes", () => {
 describe("tools/list per mode", () => {
   const list = (approval) => withServer({ approval, caps: {} }, async (ctx) => (await ctx.client.listTools()).tools);
 
-  it("55 tools in every mode; human/strict stop telling the model to pass confirmed=true and no longer require it", async () => {
+  it("58 tools in every mode; human/strict stop telling the model to pass confirmed=true and no longer require it", async () => {
     const model = await list("model");
     for (const mode of ["human", "strict"]) {
       const tools = await list(mode);
-      assert.equal(tools.length, 55);
+      assert.equal(tools.length, 58);
       assert.deepEqual(tools.map((t) => t.name), model.map((t) => t.name));
       for (const t of tools) {
         const where = `${mode} ${t.name}`;
         assert.ok(!(t.inputSchema.required ?? []).includes("confirmed"), where);
-        if (["drive_bulk_move", "drive_bulk_trash"].includes(t.name)) {
-          assert.match(t.description, /Without confirmed: plan and problems only/);
+        if (["drive_bulk_move", "drive_bulk_trash", "drive_cleanup"].includes(t.name)) {
+          assert.match(t.description, /Without confirmed: plan/);
           assert.match(t.description, /asks the user to approve the exact list/);
           assert.ok(t.inputSchema.properties.confirmed, where);
           continue;

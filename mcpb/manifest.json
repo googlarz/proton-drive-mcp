@@ -192,6 +192,14 @@
       "description": "Trash many items on Proton Drive (recoverable); returns a plan first, applies only with confirmed=true."
     },
     {
+      "name": "drive_cleanup",
+      "description": "Trash redundant duplicate copies and empty folders under a path; the server builds the list, reversible, asks the user first."
+    },
+    {
+      "name": "drive_undo",
+      "description": "Undo a recorded trash, move or rename batch (restore from trash, move back); always asks the user first."
+    },
+    {
       "name": "drive_restore",
       "description": "Restore a trashed file or folder back to its original Proton Drive path."
     },
@@ -288,6 +296,10 @@
       "description": "Find likely duplicate files in Proton Drive (claimed sha1, same size, or hash-verified); suggests a keeper, never deletes."
     },
     {
+      "name": "drive_checkup",
+      "description": "Health report for a Proton Drive folder: duplicates, empty folders, large old files, risky sharing, trash; read-only."
+    },
+    {
       "name": "drive_sharing_audit",
       "description": "Audit public links, invitees and risk flags across shared items in Proton Drive."
     },
@@ -346,6 +358,14 @@
       "name": "sharing-audit",
       "description": "Review what is shared from your Proton Drive and explain the risks.",
       "text": "Audit what I share from Proton Drive.\nUse drive_sharing_audit to list shared folders, members, pending invitations and public links. Explain the risks in plain language (for example public links without a password, editors who no longer need access, stale invitations) and suggest what to tighten. Do not revoke anything without my explicit OK."
+    },
+    {
+      "name": "drive-checkup",
+      "description": "Give a Proton Drive folder a health checkup: duplicates, empty folders, risky sharing and trash, with an offer to clean up that can be undone.",
+      "arguments": [
+        "path"
+      ],
+      "text": "Give my Proton Drive folder ${arguments.path} a checkup.\n1. Call drive_checkup for that path and summarise the result in plain language: the score, what matters most, and what each finding means. Say if the scan was incomplete.\n2. If it lists duplicates or empty folders, offer drive_cleanup for them. Everything it removes goes to the trash and can be undone. Show me the plan first; the server asks me to approve the exact list itself.\n3. Mention that drive_undo puts back what drive_cleanup (or an earlier trash, move or rename) changed, while the items are still in the trash.\nSharing risks and large old files are for me to decide: describe them, change nothing."
     }
   ],
   "compatibility": {

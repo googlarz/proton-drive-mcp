@@ -325,7 +325,7 @@ proton-drive-cli deny K7Q2-M9XD     # discard a request
 ```
 
 ### Search, analytics and cleanup
-`drive_search` · `drive_tree` · `drive_usage` · `drive_find_duplicates` · `drive_sharing_audit` · `drive_sync_plan` · `drive_bulk_move` · `drive_bulk_trash`
+`drive_search` · `drive_tree` · `drive_usage` · `drive_find_duplicates` · `drive_sharing_audit` · `drive_sync_plan` · `drive_bulk_move` · `drive_bulk_trash` · `drive_cleanup` · `drive_undo`
 
 ```bash
 proton-drive-cli tree /my-files --depth 2
@@ -443,7 +443,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 `drive_list_invitations` · `drive_invitation_accept` · `drive_invitation_reject` · `drive_share_leave`
 
 ### Analytics
-`drive_usage` · `drive_find_duplicates` · `drive_sharing_audit` · `drive_share_expiry_report` · `drive_recent_changes`
+`drive_usage` · `drive_find_duplicates` · `drive_checkup` · `drive_sharing_audit` · `drive_share_expiry_report` · `drive_recent_changes`
 
 ### Content search (opt-in, see [Content search](#content-search-opt-in))
 `drive_content_index` · `drive_search_content`
@@ -484,6 +484,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 | `drive_share_status` | Get sharing members and URL | `path` |
 | `drive_usage` | Storage analytics for a subtree: totals, largest files/folders, extension and media-type breakdown, old files, trash stats (sum of file sizes, not the account quota) | `path?`, `top?`, `olderThanDays?`, `refresh?` |
 | `drive_find_duplicates` | Likely duplicate groups (claimed sha1 / same size; `verify` downloads and sha256s candidates), wasted bytes, suggested keeper — never deletes | `path?`, `minSize?`, `verify?`, `maxVerifyBytes?`, `maxVerifyTotalBytes?` (default 500 MB, max 2 GB), `limit?`, `refresh?` |
+| `drive_checkup` | One-call health report for a folder: duplicates, empty folders, large old files, public links, outside access, sensitive-looking names in shared items, trash; score and at most 3 example names per finding. Changes nothing | `path?`, `finding?`, `limit?`, `offset?`, `olderThanDays?`, `minSizeMB?`, `sharing?`, `refresh?` |
 | `drive_sharing_audit` | Public links (no URL), invitees, pending invitations and risk flags for shared items (max 100) | `path?`, `refresh?` |
 | `drive_share_expiry_report` | Public links under a path with `expiresAt`, `daysLeft` and flags `expired`, `expiringSoon`, `noExpiry`, `hasPassword`, soonest first. Uses the sharing audit walk (max 100 shared items; `capped` says when more exist). Lists only links set directly on items below `path`: a link on the folder passed as `path` itself is not listed, so pass its parent. Changes nothing | `path?`, `withinDays?` (default 14), `refresh?` |
 | `drive_recent_changes` | Files added or modified since a date (`since`: ISO date or `7d`/`12h`/`2w`, default 7d), from one complete walk. With `snapshot: "diff"` or `"save"` (needs `PROTON_DRIVE_INDEX=1`): added, removed, modified and moved files against the previous snapshot of that path. See [Recent changes](#recent-changes) | `path?`, `since?`, `limit?` (default 50, max 500), `snapshot?`, `refresh?` |
@@ -500,6 +501,8 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 | `drive_sync_plan` | Read-only diff of a local folder vs a Drive folder (nothing transferred) | `localPath`, `drivePath`, `direction?` (up/down/both), `ignore?`, `compare?` (size-mtime/sha1), `limit?` |
 | `drive_bulk_move` | Move up to 200 items into an existing folder; without `confirmed` returns the plan and problems only | `sources`, `destinationFolder`, `confirmed?` (plan/apply switch: `true` applies, after you approve the list) |
 | `drive_bulk_trash` | Trash up to 200 items (recoverable); without `confirmed` returns the plan and problems only | `paths`, `confirmed?` (plan/apply switch: `true` applies, after you approve the list) |
+| `drive_cleanup` | Trash the redundant copies of exact duplicates and empty folders under a path; the server builds the list from a fresh scan and shows it to you; without `confirmed` returns the plan only | `path`, `fixes`, `verify?`, `confirmed?` (plan/apply switch) |
+| `drive_undo` | Undo a recorded trash, move or rename batch; `apply` always asks you first | `action?` (list/plan/apply), `id?` |
 | `drive_restore` | Restore from trash | `path` |
 | `drive_empty_trash` | Permanently delete all trash ⚠️ | — |
 | `drive_read_file` | Read text file from local sync folder | `path` |

@@ -79,6 +79,14 @@
       "description": "Trash many items on Proton Drive (recoverable); returns a plan first, applies only with confirmed=true."
     },
     {
+      "name": "drive_cleanup",
+      "description": "Trash redundant duplicate copies and empty folders under a path; the server builds the list, reversible, asks the user first."
+    },
+    {
+      "name": "drive_undo",
+      "description": "Undo a recorded trash, move or rename batch (restore from trash, move back); always asks the user first."
+    },
+    {
       "name": "drive_restore",
       "description": "Restore a file or folder from trash on Proton Drive."
     },
@@ -201,6 +209,10 @@
     {
       "name": "drive_find_duplicates",
       "description": "Find likely duplicate files in Proton Drive (claimed sha1, same size, or hash-verified); suggests a keeper, never deletes."
+    },
+    {
+      "name": "drive_checkup",
+      "description": "Health report for a Proton Drive folder: duplicates, empty folders, large old files, risky sharing, trash; read-only."
     },
     {
       "name": "drive_sharing_audit",

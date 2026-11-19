@@ -25,7 +25,7 @@ describe("tool tier", () => {
     core = await withServer({ PROTON_DRIVE_TOOL_TIER: "core" }, (c) => c.listTools());
   });
 
-  it("default lists all 55 tools", () => assert.equal(full.length, 55));
+  it("default lists all 58 tools", () => assert.equal(full.length, 58));
 
   it("core lists exactly the curated set, all present in full", () => {
     assert.deepEqual(core.map((t) => t.name).sort(), [...CORE].sort());
@@ -45,7 +45,8 @@ describe("tool tier", () => {
   // +100 each in 1.4.0: one sentence in drive_search explaining stale:true (persistent index).
   // drive_read_content (+~800 bytes, also in core). drive_audit_log (+~650 bytes, full only) in 1.6.0, plus drive_read_many, drive_share_expiry_report and drive_recent_changes (+~3.6 KB, full only).
   it("tools/list stays within the size budget", () => {
-    assert.ok(size(full) <= 49_000, `full ${size(full)} bytes`);
+    // Raised from 49,000 to 52,000 on purpose in 1.12.0: drive_checkup, drive_cleanup and drive_undo add about 3.3 KB (measured 51,835 here in model mode, 52,918 in the default human mode, whose texts are longer).
+    assert.ok(size(full) <= 52_000, `full ${size(full)} bytes`);
     assert.ok(size(core) <= 18_000, `core ${size(core)} bytes`);
   });
 
@@ -81,7 +82,7 @@ describe("tool tier", () => {
     sb.cleanup();
     const lines = out.split("\n").filter(Boolean).map((l) => JSON.parse(l)); // throws on any non-JSON line
     assert.ok(lines.every((m) => m.jsonrpc === "2.0"));
-    assert.equal(lines.find((m) => m.id === 2).result.tools.length, 55);
+    assert.equal(lines.find((m) => m.id === 2).result.tools.length, 58);
     assert.equal((err.match(/PROTON_DRIVE_TOOL_TIER/g) ?? []).length, 1);
   });
 });

@@ -75,14 +75,14 @@ describe("list/info metadata", () => {
 });
 
 describe("prompts", () => {
-  it("advertises the capability and lists four prompts", async () => {
+  it("advertises the capability and lists five prompts", async () => {
     const sb = makeSandbox();
     const c = await startServer("json", sb);
     try {
       const init = await c.initialize();
       assert.ok(init.result.capabilities.prompts);
       const { prompts } = (await c.request("prompts/list", {})).result;
-      assert.deepEqual(prompts.map((p) => p.name).sort(), ["find-files", "organise-folder", "sharing-audit", "storage-audit"]);
+      assert.deepEqual(prompts.map((p) => p.name).sort(), ["drive-checkup", "find-files", "organise-folder", "sharing-audit", "storage-audit"]);
       assert.ok(prompts.every((p) => p.description && p.title));
     } finally { await c.close(); sb.cleanup(); }
   });
@@ -164,6 +164,7 @@ const EXPECTED = {
   drive_refresh_index: R,
   drive_bulk_move: { destructiveHint: false },
   drive_bulk_trash: { destructiveHint: false, idempotentHint: true },
+  drive_cleanup: W, drive_undo: W, drive_checkup: R,
 };
 
 describe("tool annotations, titles and _meta", () => {
