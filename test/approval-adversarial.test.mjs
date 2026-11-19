@@ -1153,35 +1153,40 @@ describe("(d) elicitation answers that are not a clean yes", () => {
   });
 
   it("a human who never answers: the gate's own timeout refuses (gate-level, injected timeout)", async () => {
+    // The gate's backstop timer is unref'd (the server's stdio keeps the process alive); keep the loop alive here, otherwise
+    // Node 22's runner sees a pending promise with an empty event loop and cancels the rest of the file.
+    const keepAlive = setInterval(() => {}, 1000);
+    try {
     // The server has no env var for the backstop timeout (130 s default, SDK request timeout 120 s), so the end-to-end variant is
-    // skipped; the gate object takes elicitTimeoutMs, which is exercised here.
-    const op = { tool: "drive_delete", effect: "irreversible", fields: { path: "/trash/a.txt" } };
-    let aborted = false;
-    const never = (_s, signal) => new Promise(() => { signal?.addEventListener?.("abort", () => { aborted = true; }); });
-    const warnings = [];
-    const gate = new ApprovalGate({ mode: "human", elicit: never, elicitTimeoutMs: 40, onWarning: (m) => warnings.push(m) });
-    const t0 = Date.now();
-    const res = await gate.require(op, { legacyConfirmed: true });
-    assert.equal(res.ok, false);
-    assert.equal(res.code, "approval_unavailable");
-    assert.ok(Date.now() - t0 < 3000);
-    void aborted;
-    // late accept after the timeout changes nothing
-    let release;
-    const late = () => new Promise((r) => { release = () => r("accept"); });
-    const gate2 = new ApprovalGate({ mode: "human", elicit: late, elicitTimeoutMs: 30 });
-    const res2 = await gate2.require(op);
-    release();
-    assert.equal(res2.ok, false);
-    // garbage elicit results are refusals
-    for (const bad of [undefined, null, true, "ACCEPT", "yes", 1, {}, "accept ", "approved"]) {
-      const g = new ApprovalGate({ mode: "human", elicit: async () => bad });
-      const r = await g.require(op, { legacyConfirmed: true });
-      assert.equal(r.ok, false, JSON.stringify(bad));
-    }
-    // an elicit that throws synchronously
-    const g3 = new ApprovalGate({ mode: "human", elicit: () => { throw new Error("boom"); } });
-    assert.equal((await g3.require(op)).ok, false);
+      // skipped; the gate object takes elicitTimeoutMs, which is exercised here.
+      const op = { tool: "drive_delete", effect: "irreversible", fields: { path: "/trash/a.txt" } };
+      let aborted = false;
+      const never = (_s, signal) => new Promise(() => { signal?.addEventListener?.("abort", () => { aborted = true; }); });
+      const warnings = [];
+      const gate = new ApprovalGate({ mode: "human", elicit: never, elicitTimeoutMs: 40, onWarning: (m) => warnings.push(m) });
+      const t0 = Date.now();
+      const res = await gate.require(op, { legacyConfirmed: true });
+      assert.equal(res.ok, false);
+      assert.equal(res.code, "approval_unavailable");
+      assert.ok(Date.now() - t0 < 3000);
+      void aborted;
+      // late accept after the timeout changes nothing
+      let release;
+      const late = () => new Promise((r) => { release = () => r("accept"); });
+      const gate2 = new ApprovalGate({ mode: "human", elicit: late, elicitTimeoutMs: 30 });
+      const res2 = await gate2.require(op);
+      release();
+      assert.equal(res2.ok, false);
+      // garbage elicit results are refusals
+      for (const bad of [undefined, null, true, "ACCEPT", "yes", 1, {}, "accept ", "approved"]) {
+        const g = new ApprovalGate({ mode: "human", elicit: async () => bad });
+        const r = await g.require(op, { legacyConfirmed: true });
+        assert.equal(r.ok, false, JSON.stringify(bad));
+      }
+      // an elicit that throws synchronously
+      const g3 = new ApprovalGate({ mode: "human", elicit: () => { throw new Error("boom"); } });
+      assert.equal((await g3.require(op)).ok, false);
+    } finally { clearInterval(keepAlive); }
   });
 
   it("gate level: human and strict never take legacyConfirmed as a yes; with no elicit and no store the answer is refusal", async () => {
