@@ -1363,7 +1363,7 @@ export const REMOTE_PATH_ARGS: Record<string, PathArg[]> = {
   drive_content_index: [{ arg: "path" }], drive_search_content: [{ arg: "path" }],
   drive_upload: [{ arg: "remotePath" }], drive_download: [{ arg: "remotePath" }],
   drive_rename: [{ arg: "path", strict: true }], drive_trash: [{ arg: "path", strict: true }],
-  drive_move: [{ arg: "sourcePath", strict: true }, { arg: "destinationPath" }],
+  drive_move: [{ arg: "sourcePath", strict: true }, { arg: "destinationPath", strict: true }], // destinationPath is the final path of the item
   drive_copy: [{ arg: "sourcePath" }, { arg: "destinationPath" }],
   drive_bulk_move: [{ arg: "sources", list: true, strict: true }, { arg: "destinationFolder" }],
   drive_bulk_trash: [{ arg: "paths", list: true, strict: true }],
@@ -1396,7 +1396,28 @@ export function rootsRefusal(name: string, a: Record<string, unknown>, roots: st
       return `${name} refused: ${arg} ${showValue(p)} ${why} (allowed: ${roots.map((r) => showValue(r)).join(", ") || "nothing, no valid root is configured"}).`;
     }
   }
+  // The path each item ends up at is checked as well, not only the folder argument it was derived from.
+  for (const p of resultingPaths(name, a)) {
+    if (!pathInRoots(p, roots, true)) return `${name} refused: the resulting path ${showValue(p)} is outside PROTON_DRIVE_REMOTE_ROOTS (allowed: ${roots.map((r) => showValue(r)).join(", ") || "nothing, no valid root is configured"}).`;
+  }
   return undefined;
+}
+
+function resultingPaths(name: string, a: Record<string, unknown>): string[] {
+  const base = (p: string) => p.slice(p.lastIndexOf("/") + 1); // validated paths have no trailing slash
+  const join = (dir: string, leaf: string) => `${dir === "/" ? "" : dir}/${leaf}`;
+  const parentOf = (p: string) => p.slice(0, p.lastIndexOf("/")) || "/";
+  if (name === "drive_move") return [validateRemotePath(a.destinationPath)];
+  if (name === "drive_rename") return [join(parentOf(validateRemotePath(a.path)), validateName(a.newName))];
+  if (name === "drive_copy") {
+    const src = validateRemotePath(a.sourcePath);
+    return [join(validateRemotePath(a.destinationPath), typeof a.newName === "string" ? validateName(a.newName) : base(src))];
+  }
+  if (name === "drive_bulk_move") {
+    const dst = validateRemotePath(a.destinationFolder);
+    return validateRemotePathList(a.sources, "sources").map((s) => join(dst, base(s)));
+  }
+  return [];
 }
 
 export { showValue };

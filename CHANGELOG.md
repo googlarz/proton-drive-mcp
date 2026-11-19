@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- `PROTON_DRIVE_REMOTE_ROOTS`: the final path of `drive_move`, `drive_copy`, `drive_rename` and `drive_bulk_move` is now checked against the roots, not only the path arguments; `drive_move` can no longer target a root folder itself.
+
 ## 1.10.0 — 2026-11-18
 
 ### Added
