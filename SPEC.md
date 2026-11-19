@@ -32,7 +32,7 @@ Registry: `server.json` (official MCP Registry) and `package.json` `mcpName` mus
 ```
 src/index.ts              MCP server: TOOLS (schemas), tool-surface derivation (gates, pagination),
                           schema enforcement, dispatch, lifecycle (signals, cancellation)
-src/cli.ts                Companion CLI (mirrors 45 of 55 tools; drive_size/drive_read_file/drive_write_file/drive_audit_log/drive_read_many/drive_share_expiry_report/drive_recent_changes/drive_content_index/drive_search_content/drive_refresh_index are MCP-only)
+src/cli.ts                Companion CLI (mirrors 47 of 58 tools; drive_size/drive_read_file/drive_write_file/drive_audit_log/drive_read_many/drive_share_expiry_report/drive_recent_changes/drive_content_index/drive_search_content/drive_refresh_index/drive_cleanup are MCP-only)
 src/services/content.ts   drive_read_content: private-temp download, text/docx/pdf extraction, paging
 src/services/ocr.ts       Opt-in local OCR (PROTON_DRIVE_OCR=1): engine choice, Vision helper build, tesseract/pdftoppm runs, limits
 src/ocr/vision-ocr.swift  macOS Vision + PDFKit helper, compiled on first use (copied to dist/ocr/ by the build)
@@ -48,13 +48,19 @@ src/utils/localguard.ts   Credential-location denylist / PROTON_DRIVE_LOCAL_ROOT
 src/utils/remoteroots.ts  PROTON_DRIVE_REMOTE_ROOTS parsing and segment-boundary matching
 src/utils/audit.ts        PROTON_DRIVE_AUDIT_LOG: hash-chained JSONL log, argument redaction
 src/services/snapshot.ts  PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE: .versions copies
+src/services/checkup.ts   drive_checkup: pure findings, score table (SCORE_TABLE) and finding pages
+src/services/cleanupRun.ts drive_checkup / drive_cleanup plan orchestration: walk, trash listing, sharing audit, optional verify
+src/services/cleanup.ts   drive_cleanup planner: eligibility rules, keeper, skips, approval-dialog lines, plan fingerprint
+src/services/undo.ts      drive_undo engine: list / plan / apply, uid-verified restore and move-back
+src/services/undoRecord.ts Server-side glue: opens the journal, records a batch around each changing call (beginBatch)
+src/utils/undoJournal.ts  Undo journal: one JSON file per batch, PROTON_DRIVE_UNDO / PROTON_DRIVE_UNDO_DIR, 30 days / 50 batches
 src/utils/syncfs.ts       Symlink-safe read/write inside PROTON_DRIVE_SYNC_PATH
 src/utils/isMainModule.ts Entry-point detection (realpath, so npm's .bin symlink works)
 src/types/index.ts        Shared response types
 test/                     Unit tests (injected runner) + real-process tests (fake CLI over stdio)
 ```
 
-## Tools (55)
+## Tools (58)
 
 - **Auth / meta:** `drive_auth_status`, `drive_auth_logout`, `drive_version`
 - **Filesystem:** `drive_list`, `drive_info`, `drive_size`, `drive_read_content`, `drive_read_many`, `drive_tree`, `drive_search`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`
@@ -62,7 +68,8 @@ test/                     Unit tests (injected runner) + real-process tests (fak
 - **Sharing:** `drive_share_status`, `drive_share_invite`, `drive_share_revoke`, `drive_share_remove_all`, `drive_share_set_url`, `drive_share_remove_url`, `drive_share_leave`
 - **Invitations:** `drive_list_invitations`, `drive_invitation_accept`, `drive_invitation_reject`
 - **Plan & bulk:** `drive_sync_plan` (plan only), `drive_bulk_move`, `drive_bulk_trash` (plan first, `confirmed` to apply; applying needs human approval of the exact list)
-- **Analytics:** `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_share_expiry_report`, `drive_recent_changes`
+- **Cleanup and undo (1.12.0):** `drive_cleanup` (plan first, `confirmed` to apply; the server builds the list of redundant duplicate copies and empty folders, applying needs human approval of the exact list, everything goes to the trash), `drive_undo` (`action` `list`, `plan` default or `apply`; apply always needs human approval; restores or moves back, each item verified by uid). Both hidden in `PROTON_DRIVE_MODE=readonly`. They need the undo journal (`PROTON_DRIVE_UNDO=0` switches it off).
+- **Analytics:** `drive_usage`, `drive_find_duplicates`, `drive_checkup` (read-only health report with a 0-100 score; full tier only, allowed in readonly mode), `drive_sharing_audit`, `drive_share_expiry_report`, `drive_recent_changes`
 - **Photos:** `photos_list_albums`, `photos_create_album`, `photos_update_album`, `photos_delete_album`, `photos_list_album_photos`, `photos_add_to_album`, `photos_remove_from_album`, `photos_list_timeline`, `photos_download`, `photos_upload`
 - **Local sync folder (needs `PROTON_DRIVE_SYNC_PATH`):** `drive_read_file`, `drive_write_file`
 - **OCR (needs `PROTON_DRIVE_OCR=1`):** no new tools; `drive_read_content`, `drive_read_many` and the content index read scanned PDFs and images locally (Vision or tesseract). Results carry `ocr: true`.
@@ -88,6 +95,7 @@ Tested against Proton Drive CLI 0.8.x (`TESTED_CLI = "0.8"` in `src/utils/cliVer
 - All argv built as arrays for `spawn` (no shell); flag injection blocked by validators.
 - Human approval gate (`PROTON_DRIVE_APPROVAL`, default `human`; module `src/utils/approval.ts`, store `src/utils/approvalStore.ts`): destructive or outward-facing tools (delete, empty trash, remove-all, album delete, invite, revoke, public links, leave, accept and reject invitation, logout, remove-from-album), the `replace` / `remove` conflict strategies, overwriting a sync-folder file, applying a bulk move or trash, and anything that reads from or writes to `/shared-with-me` need a human yes for that exact operation. Channel 1: MCP elicitation, for every gated call. Channel 2, when the client cannot elicit: refusal with a code, then `proton-drive-cli approve <code>` in an interactive terminal, then the same call again (single use; pending 10 min, approved 5 min). Otherwise the call is refused. `strict` gates every mutating tool; `model` restores 1.10.1 (`confirmed: true` suffices).
 - `confirmed` is deprecated (removal planned for 2.0): still accepted, no longer an authorisation in `human` / `strict`, and still the plan/apply switch of `drive_bulk_move` / `drive_bulk_trash`. The CLI requires `--confirm` for the destructive ones. CLI commands `approvals`, `approve`, `deny` manage terminal approvals.
+- Undo (1.12.0): `drive_cleanup` and `drive_undo` apply only after human approval of the exact list. The undo journal (plaintext names, private folder, 30 days) is written before a changing call and completed after it; `drive_undo` acts on an item only when found by uid where the journal says it is, restores from the trash only when the name is unique there (the CLI restores by name), overwrites nothing and re-checks every item by uid afterwards. Without `verify`, `drive_cleanup` acts only on unshared groups with the same claimed hash and size.
 - Local paths: credential-location denylist (or `PROTON_DRIVE_LOCAL_ROOT` allowlist), symlinks resolved first.
 - Errors never echo the command line; output is truncated.
 - CLI children run in their own process group and are killed on timeout, cancellation, disconnect and SIGTERM/SIGINT.

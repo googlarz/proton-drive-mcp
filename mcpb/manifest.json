@@ -4,7 +4,7 @@
   "display_name": "Proton Drive",
   "version": "0.0.0",
   "description": "Give Claude access to your Proton Drive: list, upload, download, share and manage end-to-end encrypted files via the official proton-drive CLI.",
-  "long_description": "Upload, download, search, share, move, trash and manage your Proton Drive files and photos from Claude Desktop. This extension wraps the official proton-drive CLI, so files stay end-to-end encrypted and nothing goes through a third-party relay.\n\nDestructive or outward-facing actions (deleting, sharing, public links, replacing files) need your approval, asked by the extension itself. If Claude Desktop cannot show that question, the action is refused until you approve it in a terminal with proton-drive-cli approve. Requires the official proton-drive CLI to be installed and signed in (run `proton-drive auth login` once). Enter the path to the CLI in the settings field below: run `which proton-drive` in a terminal (usually ~/.local/bin/proton-drive).",
+  "long_description": "Upload, download, search, share, move, trash and manage your Proton Drive files and photos from Claude Desktop. This extension wraps the official proton-drive CLI, so files stay end-to-end encrypted and nothing goes through a third-party relay.\n\nA folder checkup reports duplicates, empty folders, risky sharing and trash; a cleanup moves redundant copies to the trash from a list the server builds, and an undo puts recorded changes back while the items are still in the trash. Destructive or outward-facing actions (deleting, sharing, public links, replacing files) need your approval, asked by the extension itself. If Claude Desktop cannot show that question, the action is refused until you approve it in a terminal with proton-drive-cli approve. Requires the official proton-drive CLI to be installed and signed in (run `proton-drive auth login` once). Enter the path to the CLI in the settings field below: run `which proton-drive` in a terminal (usually ~/.local/bin/proton-drive).",
   "author": {
     "name": "googlarz",
     "url": "https://github.com/googlarz"
@@ -193,11 +193,11 @@
     },
     {
       "name": "drive_cleanup",
-      "description": "Trash redundant duplicate copies and empty folders under a path; the server builds the list, reversible, asks the user first."
+      "description": "Trash redundant duplicate copies and empty folders under a path; nothing is deleted. The server builds the list from a fresh scan (you name no files), shows it for approval and trashes only if Drive is unchanged. Returns a plan without confirmed=true."
     },
     {
       "name": "drive_undo",
-      "description": "Undo a recorded trash, move or rename batch (restore from trash, move back); always asks the user first."
+      "description": "Undo a recorded batch (cleanup, trash, bulk trash, move, bulk move, rename): restores items from the trash or moves them back, each verified by id; nothing is overwritten. Works while items are in the trash and names are unique there. Applying always asks the user."
     },
     {
       "name": "drive_restore",
@@ -297,7 +297,7 @@
     },
     {
       "name": "drive_checkup",
-      "description": "Health report for a Proton Drive folder: duplicates, empty folders, large old files, risky sharing, trash; read-only."
+      "description": "Health report for a folder in one call: exact-duplicate candidates, empty folders, large old files, public links, outside access, sensitive-looking names in shared items, trash. Score 0-100 and at most 3 example paths per finding. Names, sizes, dates and sharing only; changes nothing."
     },
     {
       "name": "drive_sharing_audit",
