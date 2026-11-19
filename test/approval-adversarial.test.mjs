@@ -1069,7 +1069,7 @@ describe("(b) /shared-with-me in disguise: a gated operation never runs without 
 
   for (const [group, list, strong] of [["resolves to /shared-with-me", TRULY, true], ["ambiguous spelling", AMBIGUOUS, false]]) {
     for (const dest of list) {
-      const // live check on CLI 0.9.0: the real CLI rejects this spelling, not exploitable (kept as todo: the gate still decides on the literal string)
+      // live check on CLI 0.9.0: the real CLI rejects this spelling, not exploitable (kept as todo: the gate still decides on the literal string)
       const advisory = !strong && ADVISORY.has(dest) ? { todo: "live check on CLI 0.9.0: the real CLI rejects this spelling, not exploitable" } : {};
       it(`${group}: ${JSON.stringify(dest)}`, advisory, async () => {
         for (const caps of [{ elicitation: { form: {} } }, {}]) {

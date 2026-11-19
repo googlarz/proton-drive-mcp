@@ -39,6 +39,7 @@
         "PROTON_DRIVE_MODE": "${user_config.read_only}",
         "PROTON_DRIVE_REMOTE_ROOTS": "${user_config.remote_roots}",
         "PROTON_DRIVE_AUDIT_LOG": "${user_config.audit_log}",
+        "PROTON_DRIVE_APPROVAL": "${user_config.approval_mode}",
         "PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE": "${user_config.snapshot_before_overwrite}"
       }
     }
@@ -80,6 +81,13 @@
       "type": "string",
       "title": "Audit log file",
       "description": "Optional. Absolute path of a file that records every tool call (tamper-evident, owner-only). If it cannot be written, tools that change Drive are refused. Leave empty for no log.",
+      "required": false
+    },
+    "approval_mode": {
+      "type": "string",
+      "title": "Who approves destructive operations (human, strict or model)",
+      "description": "Optional. Type human, strict or model; empty means human. human (default): deleting, emptying the trash, sharing, public links, accepting invitations and writing into shared folders need YOUR approval in a dialog (or in a terminal: `proton-drive-cli approve <code>`, or `npx -y -p proton-drive-mcp proton-drive-cli approve <code>` without a global install); the assistant cannot approve for you. strict: every change to Drive asks you. model: the assistant's own confirmation is enough (the 1.10 behaviour; use only for unattended jobs). Any other value is treated as strict.",
+      "default": "human",
       "required": false
     },
     "snapshot_before_overwrite": {

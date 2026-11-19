@@ -5,7 +5,7 @@
 ### Behaviour change: human approval gate, fail closed by default
 - **Destructive and outward-facing operations now need a human yes, asked by the server.** The default (`PROTON_DRIVE_APPROVAL` unset or `human`) is fail closed.
 - With a client that can show MCP elicitation (Claude Code CLI does), you will now see a dialog on calls that used to pass silently when the assistant sent `confirmed: true`.
-- With a client that cannot (whether Claude Desktop can is not verified), gated calls are refused with `approval_required` until you approve them in a terminal (`proton-drive-cli approve <code>`, then ask the assistant to repeat the call), or until you set `PROTON_DRIVE_APPROVAL=model` knowingly.
+- With a client that cannot (whether Claude Desktop can is not verified), gated calls are refused with `approval_required` until you approve them in a terminal (`proton-drive-cli approve <code>`, or `npx -y -p proton-drive-mcp proton-drive-cli approve <code>` without a global install, then ask the assistant to repeat the call; the terminal must use the same `PROTON_DRIVE_APPROVAL_DIR` / `HOME` / `XDG_CACHE_HOME` as the server), or until you set `PROTON_DRIVE_APPROVAL=model` knowingly.
 - `confirmed` is no longer an authorisation. It is still accepted in the schemas where it was, no longer required, and ignored in `human` and `strict`. On `drive_bulk_move` and `drive_bulk_trash` it remains the plan/apply switch. `PROTON_DRIVE_APPROVAL=model` restores the 1.10.1 behaviour (a startup warning is written to stderr).
 - Unattended or scheduled runs that change Drive must set `PROTON_DRIVE_APPROVAL=model`, ideally with `PROTON_DRIVE_REMOTE_ROOTS` and the audit log.
 - Tool descriptions no longer tell the assistant to pass `confirmed=true`; they say the server asks the user.
@@ -13,6 +13,10 @@
 ### Security
 - The assistant can no longer approve its own destructive operation by sending `confirmed: true`. The prompt is built by the server from validated values (fixed first line per tool, one line per value; control, bidirectional and zero-width characters in names are made visible and cannot add or reorder lines; passwords and message texts are not shown), and what is shown is what is executed.
 - New in the gated set: `drive_invitation_accept`, and `drive_copy`, `drive_move`, `drive_mkdir`, `drive_rename`, `drive_upload`, `drive_write_file`, `drive_trash`, `drive_restore` and the bulk tools when a path they read from or write to is under `/shared-with-me`. This closes a chain that needed no gated tool: accept an invitation, then copy files into the inviter's folder.
+- Look-alike letters from another alphabet in an e-mail address, an inviter or an item name are listed by code point in the prompt; every Unicode format or default-ignorable character is shown as `\uXXXX`. Operations addressed by `uid` alone (`drive_delete`, invitation accept/reject) show the item, inviter and folder, looked up before the question (`(name not resolved)` when that fails).
+- Only one approval dialog is open at a time; further gated calls meanwhile are refused (`approval_unavailable`), not queued.
+- A dialog that is cancelled, fails or times out falls back to the terminal route (`approval_required` with a code) instead of refusing outright; an explicit decline stays final.
+- A misconfigured approvals folder (inside the sync folder) is reported on stderr at startup and the assistant is told it is a server setting.
 - Bulk apply is tied to the plan the user approved: the plan is computed again after approval, and nothing is applied if it differs (`approval_changed`).
 - The approvals folder cannot be written by `drive_download` or `photos_download`, and the server refuses to use one inside `PROTON_DRIVE_SYNC_PATH`.
 - `drive_write_file` creates a new file exclusively; if the file appears after the existence check, the call goes through the gate like an overwrite.

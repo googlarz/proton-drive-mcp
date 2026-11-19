@@ -18,7 +18,7 @@ describe("item 7: invisible and default-ignorable characters are shown as \\uXXX
     ...cp(0x3164, 0x115f, 0x1160, 0x034f, 0xffa0, 0x180b, 0x180c, 0x180d, 0x180e, 0xfe00, 0xfe0f, 0xfff9, 0xfffa, 0xfffb, 0x1d173, 0x1d17a, 0xe0100, 0xe0001, 0x200b, 0x202e, 0x2066, 0x00ad, 0x061c, 0x0600, 0x110bd),
   ];
   for (const ch of SAMPLES) {
-    const hex = ch.codePointAt(0).toString(16);
+    const hex = ch.codePointAt(0).toString(16).padStart(4, "0");
     it(`U+${hex.toUpperCase().padStart(4, "0")} never reaches the human as a raw character`, () => {
       const out = showValueStrict(`/my-files/a${ch}b`);
       assert.ok(!out.includes(ch), `raw character left in ${JSON.stringify(out)}`);

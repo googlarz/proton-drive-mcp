@@ -29,7 +29,7 @@ describe("mcpb manifest", () => {
     assert.ok(refs.every(Boolean));
     assert.deepEqual([...refs].sort(), Object.keys(manifest.user_config).sort());
     assert.deepEqual(Object.keys(env).sort(), [
-      "PROTON_DRIVE_AUDIT_LOG", "PROTON_DRIVE_BIN", "PROTON_DRIVE_INDEX", "PROTON_DRIVE_MODE", "PROTON_DRIVE_REMOTE_ROOTS",
+      "PROTON_DRIVE_APPROVAL", "PROTON_DRIVE_AUDIT_LOG", "PROTON_DRIVE_BIN", "PROTON_DRIVE_INDEX", "PROTON_DRIVE_MODE", "PROTON_DRIVE_REMOTE_ROOTS",
       "PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE", "PROTON_DRIVE_SYNC_PATH",
     ]);
     assert.ok(Object.values(manifest.user_config).every((c) => c.required === false));
@@ -73,6 +73,22 @@ describe("mcpb manifest", () => {
     };
     assert.deepEqual(run({ PROTON_DRIVE_MODE: "true", PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE: "true", PROTON_DRIVE_REMOTE_ROOTS: "/my-files/A", PROTON_DRIVE_AUDIT_LOG: "/tmp/a.jsonl" }), ["readonly", "1", "/my-files/A", "/tmp/a.jsonl"]);
     assert.deepEqual(run({ PROTON_DRIVE_MODE: "false", PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE: "false", PROTON_DRIVE_REMOTE_ROOTS: "", PROTON_DRIVE_AUDIT_LOG: "${user_config.audit_log}" }), [null, null, null, null]);
+  });
+
+  it("approval_mode defaults to human and the launcher passes a real value through but drops an empty or unfilled one", () => {
+    const c = manifest.user_config.approval_mode;
+    assert.equal(c.default, "human");
+    assert.equal(manifest.server.mcp_config.env.PROTON_DRIVE_APPROVAL, "${user_config.approval_mode}");
+    assert.match(c.description, /npx -y -p proton-drive-mcp proton-drive-cli approve/);
+    const src = read("mcpb", "launcher.mjs").split("// index.js only")[0];
+    const run = (v) => {
+      const env = { ...process.env };
+      delete env.PROTON_DRIVE_APPROVAL;
+      if (v !== undefined) env.PROTON_DRIVE_APPROVAL = v;
+      return JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", `${src}\nconsole.log(JSON.stringify(process.env.PROTON_DRIVE_APPROVAL ?? null));`], { env, encoding: "utf8" }));
+    };
+    for (const v of ["human", "strict", "model"]) assert.equal(run(v), v);
+    for (const v of ["", "  ", "${user_config.approval_mode}", undefined]) assert.equal(run(v), null, String(v));
   });
 
   it("tool names equal the server's real tools/list", async () => {
