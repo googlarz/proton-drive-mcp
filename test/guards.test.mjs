@@ -84,6 +84,23 @@ describe("PROTON_DRIVE_MODE=readonly", () => {
     });
   });
 
+  it("downloads cannot delete or overwrite local files: the 'remove' strategies are refused", async () => {
+    await withServer({ PROTON_DRIVE_MODE: "readonly" }, async (c, sb) => {
+      const out = join(sb.dir, "out");
+      for (const [tool, args] of [
+        ["drive_download", { remotePath: "/my-files/a.txt", localPath: out, fileConflictStrategy: "remove", confirmed: true }],
+        ["drive_download", { remotePath: "/my-files/a", localPath: out, folderConflictStrategy: "remove", confirmed: true }],
+        ["photos_download", { photoPaths: ["/photos/a.jpg"], localFolder: out, conflictStrategy: "remove", confirmed: true }],
+      ]) {
+        const r = await c.call(tool, args);
+        assert.equal(r.isError, true, tool);
+        assert.match(r.text, /readonly mode/, tool);
+      }
+      await sleep(100);
+      assert.deepEqual(nonVersionCalls(sb.argvLog), []);
+    });
+  });
+
   it("an invalid value fails closed (readonly) with one stderr warning; full still lists 55", async () => {
     await withServer({ PROTON_DRIVE_MODE: "bogus" }, async (c) => {
       assert.equal((await c.listTools()).length, 28);

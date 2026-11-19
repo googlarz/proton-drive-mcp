@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Security
+- Local path checks (upload, download, sync plan, photo tools) now ignore letter case on macOS and Windows and resolve existing paths with `realpath.native`, so `~/.SSH` is treated like `~/.ssh`. Linux stays case-sensitive.
+- The local deny list also covers shell start-up files (`.zshrc`, `.bashrc`, `.profile` and the other login-shell files) and `LaunchAgents`/`LaunchDaemons` folders.
+- Downloads are checked under the name each item gets inside the destination folder, and a downloaded folder may not contain a protected location.
+- Readonly mode: `drive_download` and `photos_download` refuse the `remove` conflict strategies, which delete existing local files. Plain downloads stay available. Documented in the README and THREAT_MODEL.
+- Folder uploads are checked entry by entry, not only at the top. A secret-looking file name or a symlink that leads out of the folder refuses the upload with a message naming the entry. Folders holding a file such as `.env.example` are refused too unless `PROTON_DRIVE_ALLOW_SENSITIVE_PATHS=1` is set.
+- The audit log file and `.versions` snapshot folders in the sync folder can no longer be a write destination of the local write tools.
+
+### Changed
+- THREAT_MODEL.md and the README now state that `confirmed: true` is an argument the model sets, not human approval, that bulk apply calls are not tied to a plan, and which controls do protect (readonly mode, remote roots, audit log, client tool approval, elicitation where supported). No behavior change.
+
 ## 1.10.0 — 2026-11-18
 
 ### Added

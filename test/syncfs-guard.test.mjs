@@ -11,6 +11,7 @@ import {
   syncFileExists,
 } from "../dist/utils/syncfs.js";
 import { assertLocalPathAllowed } from "../dist/utils/localguard.js";
+import { validateDownloadTarget } from "../dist/utils/validation.js";
 
 describe("syncfs hardening", () => {
   let base, root, outside;
@@ -292,5 +293,149 @@ describe("assertLocalPathAllowed", () => {
     process.env.PROTON_DRIVE_ALLOW_SENSITIVE_PATHS = "1";
     assert.throws(() => assertLocalPathAllowed(join(home, ".ssh", "id_rsa")), /outside PROTON_DRIVE_LOCAL_ROOT/);
     assertLocalPathAllowed(join(a, "ok.txt"));
+  });
+});
+
+describe("local path guard: case, start-up files, nested upload entries, write targets", () => {
+  const KEYS = ["HOME", "PROTON_DRIVE_LOCAL_ROOT", "PROTON_DRIVE_ALLOW_SENSITIVE_PATHS", "PROTON_DRIVE_AUDIT_LOG", "PROTON_DRIVE_SYNC_PATH"];
+  const saved = {};
+  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  const setPlatform = (value) => Object.defineProperty(process, "platform", { ...realPlatform, value });
+  let base, fakeHome;
+
+  before(async () => {
+    base = await mkdtemp(join(tmpdir(), "localguard2-"));
+    fakeHome = join(base, "home");
+    await mkdir(join(fakeHome, "Documents"), { recursive: true });
+  });
+  after(() => rm(base, { recursive: true, force: true }));
+  beforeEach(() => {
+    for (const k of KEYS) saved[k] = process.env[k];
+    for (const k of KEYS.slice(1)) delete process.env[k];
+    process.env.HOME = fakeHome;
+  });
+  afterEach(() => {
+    Object.defineProperty(process, "platform", realPlatform);
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  const entries = [
+    ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".npmrc", ".netrc", ".pgpass", ".config/gcloud", ".claude", ".claude.json",
+    "Library/Keychains", "Library/Application Support/Claude", "Library/LaunchAgents", "Library/LaunchDaemons",
+    ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile", ".bash_login", ".profile",
+  ];
+
+  for (const platform of ["darwin", "win32"]) {
+    it(`${platform}: every home entry is denied in any letter case, existing or not`, async () => {
+      setPlatform(platform);
+      for (const rel of entries) {
+        const upper = rel.toUpperCase();
+        assert.throws(() => assertLocalPathAllowed(join(fakeHome, upper, "x")), /protected location|secret file/, upper);
+        assert.throws(() => assertLocalPathAllowed(join(fakeHome, upper)), /protected location|secret file/, upper);
+      }
+      for (const a of ["/ETC/passwd", "/Private/Etc/hosts", "/VAR/root/x", "/library/launchagents/x.plist"]) {
+        assert.throws(() => assertLocalPathAllowed(a), /protected location/, a);
+      }
+    });
+  }
+
+  it("an existing directory is matched through its on-disk spelling (realpath.native)", async () => {
+    setPlatform("darwin");
+    await mkdir(join(fakeHome, ".ssh"), { recursive: true });
+    assert.throws(() => assertLocalPathAllowed(join(fakeHome, ".SSH", "config")), /protected location/);
+    assert.throws(() => assertLocalPathAllowed(join(fakeHome, ".Ssh")), /protected location/);
+  });
+
+  it("linux: names stay case-sensitive", () => {
+    setPlatform("linux");
+    assertLocalPathAllowed(join(fakeHome, ".SSHX", "config"));
+    assertLocalPathAllowed(join(fakeHome, ".AWSX", "credentials"));
+  });
+
+  it("start-up files and autostart folders are denied in their normal case too", () => {
+    for (const rel of [".zshrc", ".bash_profile", "Library/LaunchAgents/evil.plist", "Library/LaunchDaemons"]) {
+      assert.throws(() => assertLocalPathAllowed(join(fakeHome, rel)), /protected location/, rel);
+    }
+  });
+
+  it("download target: the remote name is checked inside the destination folder", async () => {
+    await mkdir(join(fakeHome, "Library", "LaunchAgents"), { recursive: true });
+    assert.throws(() => validateDownloadTarget(fakeHome, ["/my-files/.zshrc"]), /protected location/);
+    assert.throws(() => validateDownloadTarget(fakeHome, ["/my-files/.ssh"]), /protected location/);
+    assert.throws(() => validateDownloadTarget(join(fakeHome, "Library"), ["/my-files/LaunchAgents"]), /protected location/);
+    assert.throws(() => validateDownloadTarget(fakeHome, ["/my-files/stuff/Library"]), /contains protected locations/);
+    assert.throws(() => validateDownloadTarget(join(fakeHome, "Library", "LaunchAgents"), ["/my-files/a.plist"]), /protected location/);
+    assert.equal(validateDownloadTarget(join(fakeHome, "Documents"), ["/my-files/report.pdf", "/photos/a.jpg"]), join(fakeHome, "Documents"));
+  });
+
+  it("the audit log file cannot be a write target but can still be read (scan)", async () => {
+    const log = join(base, "logs", "audit.jsonl");
+    process.env.PROTON_DRIVE_AUDIT_LOG = log;
+    assert.throws(() => assertLocalPathAllowed(log), /audit log/);
+    assert.throws(() => assertLocalPathAllowed(log + ".lock"), /audit log/);
+    assert.throws(() => validateDownloadTarget(join(base, "logs"), ["/my-files/audit.jsonl"]), /audit log/);
+    assertLocalPathAllowed(log, { scan: true });
+    assertLocalPathAllowed(join(base, "logs", "other.txt"));
+  });
+
+  it("a .versions snapshot folder inside the sync folder cannot be a write target", async () => {
+    const sync = join(base, "sync");
+    await mkdir(join(sync, "docs", ".versions"), { recursive: true });
+    process.env.PROTON_DRIVE_SYNC_PATH = sync;
+    assert.throws(() => assertLocalPathAllowed(join(sync, "docs", ".versions")), /\.versions/);
+    assert.throws(() => assertLocalPathAllowed(join(sync, "docs", ".VERSIONS", "a.20261101")), /\.versions/i);
+    assertLocalPathAllowed(join(sync, "docs", "a.txt"));
+    await assert.rejects(() => writeSyncFile(sync, "/my-files/docs/.versions/a.20261101T000000.000Z", "x"), /\.versions/);
+  });
+
+  describe("folder upload scan covers nested entries", () => {
+    it("rejects a nested secret-file name", async () => {
+      const dir = join(base, "up1");
+      await mkdir(join(dir, "a", "b"), { recursive: true });
+      await writeFile(join(dir, "a", "b", ".env"), "S=1");
+      assert.throws(() => assertLocalPathAllowed(dir, { scan: true, upload: true }), /protected or secret file.*a.b..env/);
+    });
+
+    it("rejects a symlink that leads out of the folder, to a protected folder or anywhere else", async () => {
+      const dir = join(base, "up2");
+      await mkdir(join(fakeHome, ".ssh"), { recursive: true });
+      await mkdir(join(dir, "n"), { recursive: true });
+      await writeFile(join(dir, "n", "ok.txt"), "x");
+      await symlink(join(fakeHome, ".ssh"), join(dir, "n", "keys"));
+      assert.throws(() => assertLocalPathAllowed(dir, { scan: true, upload: true }), /symlink that points outside/);
+      const dir2 = join(base, "up2b");
+      await mkdir(dir2);
+      await symlink(join(base, "up1"), join(dir2, "elsewhere"));
+      assert.throws(() => assertLocalPathAllowed(dir2, { scan: true, upload: true }), /symlink that points outside/);
+      const dir3 = join(base, "up2c");
+      await mkdir(dir3);
+      await symlink(join(base, "no-such-target"), join(dir3, "dangling"));
+      assert.throws(() => assertLocalPathAllowed(dir3, { scan: true, upload: true }), /symlink that points outside/);
+    });
+
+    it("with PROTON_DRIVE_LOCAL_ROOT a symlink out of the folder is rejected too", async () => {
+      const dir = join(base, "up3");
+      await mkdir(dir, { recursive: true });
+      await symlink(tmpdir(), join(dir, "out"));
+      process.env.PROTON_DRIVE_LOCAL_ROOT = base;
+      assert.throws(() => assertLocalPathAllowed(dir, { scan: true, upload: true }), /symlink that points outside/);
+    });
+
+    it("accepts a clean tree, including a symlink that stays inside it", async () => {
+      const dir = join(base, "up4");
+      await mkdir(join(dir, "docs"), { recursive: true });
+      await writeFile(join(dir, "docs", "a.txt"), "x");
+      await writeFile(join(dir, ".envrc-not"), "x");
+      await symlink(join(dir, "docs"), join(dir, "alias"));
+      assertLocalPathAllowed(dir, { scan: true, upload: true });
+    });
+
+    it("the opt-out switches the nested check off as well", async () => {
+      process.env.PROTON_DRIVE_ALLOW_SENSITIVE_PATHS = "1";
+      assertLocalPathAllowed(join(base, "up1"), { scan: true, upload: true });
+    });
   });
 });

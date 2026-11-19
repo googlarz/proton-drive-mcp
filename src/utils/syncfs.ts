@@ -171,6 +171,10 @@ export async function writeSyncFile(
     );
   }
   const full = resolveSyncPath(syncRoot, remotePath);
+  // .versions holds the pre-overwrite snapshots; a write tool must not be able to rewrite them.
+  if (relative(resolve(syncRoot), full).toLowerCase().split(sep).includes(".versions")) {
+    throw new Error(`refusing to write inside a .versions snapshot folder: ${remotePath}`);
+  }
   const realRoot = await realRootOf(syncRoot, remotePath);
   const name = basename(full);
   const parent = dirname(full);

@@ -1,4 +1,4 @@
-import { realpathSync, lstatSync, readlinkSync, statSync } from "node:fs";
+import { realpathSync, lstatSync, readlinkSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, dirname, basename, join, relative, isAbsolute, sep, delimiter } from "node:path";
 
@@ -16,12 +16,27 @@ const HOME_DENY = [
   ".claude.json",
   "Library/Keychains",
   "Library/Application Support/Claude",
+  // Autostart locations and shell start-up files: a file written here runs later with the user's rights.
+  "Library/LaunchAgents",
+  "Library/LaunchDaemons",
+  ".zshrc",
+  ".zshenv",
+  ".zprofile",
+  ".zlogin",
+  ".bashrc",
+  ".bash_profile",
+  ".bash_login",
+  ".profile",
 ];
-const ABS_DENY = ["/etc", "/private/etc", "/var/root"];
+const ABS_DENY = ["/etc", "/private/etc", "/var/root", "/Library/LaunchAgents", "/Library/LaunchDaemons"];
+const MAX_TREE_ENTRIES = 200_000;
 const NAME_DENY = [/^\.env(\..*)?$/, /^id_rsa/, /^id_ed25519/, /\.pem$/, /\.p12$/, /\.pfx$/, /\.keychain/];
 
+// macOS and Windows file systems are case-insensitive by default: ~/.SSH is ~/.ssh there, so the comparison must be too.
+const fold = (p: string): string => (process.platform === "darwin" || process.platform === "win32" ? p.toLowerCase() : p);
+
 function isInside(root: string, target: string): boolean {
-  const rel = relative(root, target);
+  const rel = relative(fold(root), fold(target));
   if (rel === "") return true;
   if (isAbsolute(rel)) return false;
   return rel !== ".." && !rel.startsWith(".." + sep);
@@ -33,7 +48,8 @@ function realResolve(p: string, depth = 0): string {
   let cur = resolve(p);
   for (;;) {
     try {
-      const real = realpathSync(cur);
+      // .native returns the on-disk spelling of existing components, not the spelling the caller typed.
+      const real = realpathSync.native(cur);
       return rest.length ? join(real, ...rest.reverse()) : real;
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
@@ -86,20 +102,74 @@ const nameDenied = (name: string): boolean => NAME_DENY.some((re) => re.test(nam
 export function isProtectedEntry(fullPath: string, name: string): boolean {
   const denied = deniedPaths();
   if (!denied) return false;
-  if (nameDenied(name)) return true;
   const lexical = resolve(fullPath);
-  const real = realResolve(lexical);
+  return isDeniedEntry(denied, name, realResolve(lexical), lexical);
+}
+
+function isDeniedEntry(denied: Set<string>, name: string, real: string, lexical: string): boolean {
+  if (nameDenied(name)) return true;
   for (const d of denied) if (isInside(d, real) || isInside(d, lexical)) return true;
   return false;
 }
 
 /**
- * `scan: true` is for operations that READ a directory recursively (sync plan, folder upload): the target must
- * not contain a protected location either. Leave it off for write destinations such as download folders.
+ * Walks a folder that is about to be uploaded: no entry may be a secret-file name or sit in a protected location, and
+ * no symlink may lead out of the folder (the upload tool would read through it). `realRoot` is already symlink-free.
  */
-export function assertLocalPathAllowed(absPath: string, opts: { scan?: boolean } = {}): void {
+function assertTreeAllowed(realRoot: string, denied: Set<string> | null, label: string): void {
+  const stack = [realRoot];
+  let seen = 0;
+  while (stack.length) {
+    const dir = stack.pop() as string;
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (++seen > MAX_TREE_ENTRIES) {
+        throw new Error(`local folder has more than ${MAX_TREE_ENTRIES} entries, too many to check for protected files: ${label}; pick a smaller folder`);
+      }
+      const full = join(dir, e.name);
+      const rel = relative(realRoot, full);
+      if (e.isSymbolicLink()) {
+        const target = realResolve(full);
+        if (!isInside(realRoot, target)) throw new Error(`local folder contains a symlink that points outside it and cannot be uploaded: ${rel} in ${label}`);
+        continue;
+      }
+      if (denied && isDeniedEntry(denied, e.name, full, full)) {
+        throw new Error(`local folder contains a protected or secret file and cannot be uploaded: ${rel} in ${label} (set PROTON_DRIVE_ALLOW_SENSITIVE_PATHS=1 to disable this check)`);
+      }
+      if (e.isDirectory()) stack.push(full);
+    }
+  }
+}
+
+/** The audit log and the sync folder's .versions snapshots must not be reachable through a local write destination. */
+function assertNotWriteProtected(lexical: string, real: string, absPath: string): void {
+  const log = process.env["PROTON_DRIVE_AUDIT_LOG"];
+  if (log && isAbsolute(log)) {
+    for (const f of [log, log + ".lock"]) {
+      const rf = realResolve(f);
+      if (isInside(rf, real) || isInside(rf, lexical)) throw new Error(`local path is the audit log and cannot be written: ${absPath}`);
+    }
+  }
+  const sync = process.env["PROTON_DRIVE_SYNC_PATH"];
+  if (sync && isAbsolute(sync)) {
+    const syncReal = realResolve(sync);
+    if (isInside(syncReal, real) && fold(relative(syncReal, real)).split(sep).includes(".versions")) {
+      throw new Error(`local path is inside a .versions snapshot folder and cannot be written: ${absPath}`);
+    }
+  }
+}
+
+/**
+ * `scan: true` is for operations that READ a directory recursively (sync plan, folder upload): the target must
+ * not contain a protected location either. `upload: true` (with `scan`) is for a folder that is handed to the CLI
+ * as a whole: it is checked entry by entry (symlinks out of it, secret-file names). `ancestors: true` is only the "contains a protected location" part, for write targets
+ * (a downloaded folder named like a parent of a protected location). Leave both off for plain write destinations.
+ */
+export function assertLocalPathAllowed(absPath: string, opts: { scan?: boolean; ancestors?: boolean; upload?: boolean } = {}): void {
   const lexical = resolve(absPath);
   const real = realResolve(lexical);
+  if (!opts.scan) assertNotWriteProtected(lexical, real, absPath);
 
   const roots = rootsEnv();
   if (roots.length > 0) {
@@ -109,6 +179,7 @@ export function assertLocalPathAllowed(absPath: string, opts: { scan?: boolean }
         `local path is outside PROTON_DRIVE_LOCAL_ROOT: ${absPath}`
       );
     }
+    if (opts.upload && isDirectory(real)) assertTreeAllowed(real, null, absPath);
     return;
   }
 
@@ -131,7 +202,7 @@ export function assertLocalPathAllowed(absPath: string, opts: { scan?: boolean }
       );
     }
   }
-  if (opts.scan && isDirectory(real)) {
+  if ((opts.scan || opts.ancestors) && isDirectory(real)) {
     for (const d of denied) {
       if (isInside(real, d) || isInside(lexical, d)) {
         throw new Error(
@@ -141,6 +212,7 @@ export function assertLocalPathAllowed(absPath: string, opts: { scan?: boolean }
       }
     }
   }
+  if (opts.upload && isDirectory(real)) assertTreeAllowed(real, denied, absPath);
 }
 
 function isDirectory(p: string): boolean {

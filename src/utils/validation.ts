@@ -1,4 +1,4 @@
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { assertLocalPathAllowed } from "./localguard.js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -92,11 +92,25 @@ export function validateFlagValue(value: unknown, label: string): string {
 }
 
 /** `scan: true` for paths that are read recursively (upload sources, sync_plan); omit for write destinations. */
-export function validateLocalPath(path: unknown, opts: { scan?: boolean } = {}): string {
+export function validateLocalPath(path: unknown, opts: { scan?: boolean; ancestors?: boolean; upload?: boolean } = {}): string {
   const p = validatePath(path);
   if (!isAbsolute(p)) throw new Error(`local path must be absolute: ${p}`);
   assertLocalPathAllowed(p, opts);
   return p;
+}
+
+/**
+ * Download destination folder. The CLI writes each item into it under its remote name, so the path the item will get
+ * (folder + remote name) must pass the same guard: a remote item named like a shell start-up file or a protected folder
+ * would otherwise land in a protected place through an allowed folder.
+ */
+export function validateDownloadTarget(folder: unknown, remotePaths: string[]): string {
+  const dir = validateLocalPath(folder);
+  for (const remote of remotePaths) {
+    const name = remote.slice(remote.lastIndexOf("/") + 1);
+    if (name) validateLocalPath(join(dir, name), { ancestors: true });
+  }
+  return dir;
 }
 
 export function validateEmail(email: unknown): string {

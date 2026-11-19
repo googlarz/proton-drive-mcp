@@ -41,12 +41,26 @@ flowchart LR
 
 | Variable | Effect |
 |---|---|
-| `PROTON_DRIVE_MODE=readonly` | Hides and refuses every tool that changes Drive or the account |
+| `PROTON_DRIVE_MODE=readonly` | Hides and refuses every tool that changes Drive or the account. Downloads to local disk stay available, but not with the `remove` strategies, which delete existing local files |
 | `PROTON_DRIVE_REMOTE_ROOTS` | Confines every Drive path argument to the listed folders |
 | `PROTON_DRIVE_AUDIT_LOG` | One tamper-evident JSON line per tool call, refusals included |
 | `PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE=1` | Keeps the previous version before an overwrite |
 
-Without them the server runs in full mode. Bulk move and bulk trash are two steps (plan, then apply), trash is reversible, and the duplicate finder never deletes.
+Without them the server runs in full mode.
+
+**Confirmation is not human approval.** Destructive and outward-facing tools take `confirmed: true`, but that is an argument the model fills in itself. Nothing ties it to a plan or to anything you said, and a model can send it on its first call. `drive_bulk_move` and `drive_bulk_trash` return a plan when called without it, but the call that applies is not checked against that plan. There is no plan token. What actually limits damage:
+
+- `PROTON_DRIVE_MODE=readonly`: the changing tools are not offered and are refused if called.
+- `PROTON_DRIVE_REMOTE_ROOTS`: the folders the model can reach on Drive.
+- `PROTON_DRIVE_AUDIT_LOG`: a record of what happened, including refused calls. It does not prevent anything.
+- Your MCP client's own tool-approval prompts. If you approve each tool call there, that is the human check.
+- If the client supports MCP elicitation, the server asks you when a `confirmed` gate refuses a call and before it applies a bulk move or bulk trash. A model that sends `confirmed: true` to any other tool is not stopped by this.
+
+Trash is reversible and the duplicate finder never deletes.
+
+## Local file checks (on by default)
+
+Tools that take a local path (`drive_upload`, `drive_download`, `drive_sync_plan`, `photos_upload`, `photos_download`) refuse credential and autostart locations such as `~/.ssh`, `~/.aws`, `~/.gnupg`, shell start-up files and `LaunchAgents`/`LaunchDaemons`, and secret-looking file names (`.env`, keys, certificates). Matching ignores letter case on macOS and Windows and follows symlinks. A download is also checked under the name the item will get inside the folder. A folder upload is checked entry by entry: a secret-looking file or a symlink that leads out of the folder refuses the whole upload. The audit log file and the `.versions` snapshot folders in the sync folder cannot be a write target. `PROTON_DRIVE_LOCAL_ROOT` limits local paths to the listed folders; `PROTON_DRIVE_ALLOW_SENSITIVE_PATHS=1` turns the name and location checks off. Limit: the files inside a downloaded folder are written by the CLI and are not inspected one by one.
 
 ## Not covered
 

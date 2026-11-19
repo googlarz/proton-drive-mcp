@@ -34,7 +34,7 @@ import {
   DriveParseError,
   NeedsConfirmationError,
 } from "./utils/errors.js";
-import { validateRemotePath, validateRemotePathList, validateLocalPath, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
+import { validateRemotePath, validateRemotePathList, validateLocalPath, validateDownloadTarget, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 import { logger } from "./utils/logger.js";
 import { cliCompatWarning } from "./utils/cliVersion.js";
 import { driveSearch, driveTree } from "./services/find.js";
@@ -1592,7 +1592,7 @@ export async function main() {
           if ((fcs === "replace" || dcs2 === "replace") && a.confirmed !== true) {
             throw new NeedsConfirmationError("drive_upload with strategy 'replace' trashes the existing remote item. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
-          const uploadLocal = validateLocalPath(a.localPath, { scan: true });
+          const uploadLocal = validateLocalPath(a.localPath, { scan: true, upload: true });
           const uploadRemote = validateRemotePath(a.remotePath);
           const uploadExtra: { snapshot?: string } = {};
           if (snapshotEnabled() && (fcs === "replace" || dcs2 === "replace")) {
@@ -1630,12 +1630,16 @@ export async function main() {
           if (!["skip", "merge", "rename", "remove"].includes(fodcs)) {
             return fail(`folderConflictStrategy must be skip, merge, rename, or remove`);
           }
+          if (mode === "readonly" && (fdcs === "remove" || fodcs === "remove")) {
+            return refuse("readonly", "drive_download with strategy 'remove' deletes existing local files and is not available in readonly mode. Use 'skip' or 'rename', or set PROTON_DRIVE_MODE=full and restart the server.");
+          }
           if ((fdcs === "remove" || fodcs === "remove") && a.confirmed !== true) {
             throw new NeedsConfirmationError("drive_download with strategy 'remove' deletes the existing LOCAL file or folder before downloading. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
+          const downloadRemote = validateRemotePath(a.remotePath);
           const downloadResult = await drive.download(
-            validateRemotePath(a.remotePath),
-            validateLocalPath(a.localPath),
+            downloadRemote,
+            validateDownloadTarget(a.localPath, [downloadRemote]),
             fdcs as FileDownloadConflictStrategy,
             fodcs as FolderDownloadConflictStrategy
           );
@@ -1949,9 +1953,12 @@ export async function main() {
         case "photos_download": {
           if (!Array.isArray(a.photoPaths) || a.photoPaths.length === 0) return fail("photoPaths must be a non-empty array of strings");
           const downloadPaths = a.photoPaths.map((p) => validateRemotePath(p));
-          const downloadFolder = validateLocalPath(a.localFolder);
+          const downloadFolder = validateDownloadTarget(a.localFolder, downloadPaths);
           const pdcs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
           if (!["skip", "rename", "remove"].includes(pdcs)) return fail("conflictStrategy must be skip, rename, or remove");
+          if (mode === "readonly" && pdcs === "remove") {
+            return refuse("readonly", "photos_download with conflictStrategy 'remove' deletes existing local files and is not available in readonly mode. Use 'skip' or 'rename', or set PROTON_DRIVE_MODE=full and restart the server.");
+          }
           if (pdcs === "remove" && a.confirmed !== true) {
             throw new NeedsConfirmationError("photos_download with conflictStrategy 'remove' deletes the existing LOCAL file before downloading. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
           }
@@ -1964,7 +1971,7 @@ export async function main() {
 
         case "photos_upload": {
           if (!Array.isArray(a.localPaths) || a.localPaths.length === 0) return fail("localPaths must be a non-empty array of strings");
-          const uploadPaths = a.localPaths.map((p) => validateLocalPath(p, { scan: true }));
+          const uploadPaths = a.localPaths.map((p) => validateLocalPath(p, { scan: true, upload: true }));
           const pucs = typeof a.conflictStrategy === "string" ? a.conflictStrategy : "skip";
           if (!["skip", "rename"].includes(pucs)) return fail("conflictStrategy must be skip or rename");
           const uploadSummary = await drive.photoUpload(uploadPaths, pucs as PhotoUploadConflictStrategy);
