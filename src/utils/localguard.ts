@@ -27,10 +27,17 @@ const HOME_DENY = [
   ".bash_profile",
   ".bash_login",
   ".profile",
+  ".zlogout",
+  ".bash_logout",
 ];
 const ABS_DENY = ["/etc", "/private/etc", "/var/root", "/Library/LaunchAgents", "/Library/LaunchDaemons"];
 const MAX_TREE_ENTRIES = 200_000;
-const NAME_DENY = [/^\.env(\..*)?$/, /^id_rsa/, /^id_ed25519/, /\.pem$/, /\.p12$/, /\.pfx$/, /\.keychain/];
+const NAME_DENY = [
+  /^\.env(\..*)?$/, /^id_rsa/, /^id_ed25519/, /^id_ecdsa/, /^id_dsa/, /\.pem$/, /\.p12$/, /\.pfx$/, /\.keychain/,
+  /^\.netrc$/, /^\.npmrc$/, /^\.pgpass$/, /^\.git-credentials$/,
+];
+// Folders that hold credentials wherever they sit: a copied ~/.ssh or ~/.aws inside an upload folder is still a credential tree.
+const SECRET_DIR_NAMES = new Set([".ssh", ".aws", ".gnupg", ".kube", ".docker", "gcloud"]);
 
 // macOS and Windows file systems are case-insensitive by default: ~/.SSH is ~/.ssh there, so the comparison must be too.
 const fold = (p: string): string => (process.platform === "darwin" || process.platform === "win32" ? p.toLowerCase() : p);
@@ -134,7 +141,7 @@ function assertTreeAllowed(realRoot: string, denied: Set<string> | null, label: 
         if (!isInside(realRoot, target)) throw new Error(`local folder contains a symlink that points outside it and cannot be uploaded: ${rel} in ${label}`);
         continue;
       }
-      if (denied && isDeniedEntry(denied, e.name, full, full)) {
+      if (denied && (isDeniedEntry(denied, e.name, full, full) || (e.isDirectory() && SECRET_DIR_NAMES.has(e.name.toLowerCase())))) {
         throw new Error(`local folder contains a protected or secret file and cannot be uploaded: ${rel} in ${label} (set PROTON_DRIVE_ALLOW_SENSITIVE_PATHS=1 to disable this check)`);
       }
       if (e.isDirectory()) stack.push(full);
@@ -142,20 +149,45 @@ function assertTreeAllowed(realRoot: string, denied: Set<string> | null, label: 
   }
 }
 
-/** The audit log and the sync folder's .versions snapshots must not be reachable through a local write destination. */
-function assertNotWriteProtected(lexical: string, real: string, absPath: string): void {
+/** True when a `.versions` folder exists anywhere under `dir`; also true when the walk gets too big to finish (fail closed). */
+function hasVersionsDir(dir: string): boolean {
+  const stack = [dir];
+  let seen = 0;
+  while (stack.length) {
+    const d = stack.pop() as string;
+    let entries;
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (++seen > MAX_TREE_ENTRIES) return true;
+      if (!e.isDirectory()) continue;
+      if (e.name.toLowerCase() === ".versions") return true;
+      stack.push(join(d, e.name));
+    }
+  }
+  return false;
+}
+
+/**
+ * The audit log and the sync folder's .versions snapshots must not be reachable through a local write destination.
+ * `contains: true` (a download target, where the CLI writes below the path) also refuses a path that holds them.
+ */
+function assertNotWriteProtected(lexical: string, real: string, absPath: string, contains: boolean): void {
   const log = process.env["PROTON_DRIVE_AUDIT_LOG"];
   if (log && isAbsolute(log)) {
     for (const f of [log, log + ".lock"]) {
       const rf = realResolve(f);
-      if (isInside(rf, real) || isInside(rf, lexical)) throw new Error(`local path is the audit log and cannot be written: ${absPath}`);
+      if (isInside(rf, real) || isInside(rf, lexical) || (contains && (isInside(real, rf) || isInside(lexical, rf)))) {
+        throw new Error(`local path is, or contains, the audit log and cannot be written: ${absPath}`);
+      }
     }
   }
   const sync = process.env["PROTON_DRIVE_SYNC_PATH"];
   if (sync && isAbsolute(sync)) {
     const syncReal = realResolve(sync);
-    if (isInside(syncReal, real) && fold(relative(syncReal, real)).split(sep).includes(".versions")) {
-      throw new Error(`local path is inside a .versions snapshot folder and cannot be written: ${absPath}`);
+    const inSync = isInside(syncReal, real);
+    if ((inSync && fold(relative(syncReal, real)).split(sep).includes(".versions")) ||
+        (contains && ((isInside(real, syncReal) && !inSync) || (inSync && isDirectory(real) && hasVersionsDir(real))))) {
+      throw new Error(`local path is, or contains, a .versions snapshot folder and cannot be written: ${absPath}`);
     }
   }
 }
@@ -163,13 +195,14 @@ function assertNotWriteProtected(lexical: string, real: string, absPath: string)
 /**
  * `scan: true` is for operations that READ a directory recursively (sync plan, folder upload): the target must
  * not contain a protected location either. `upload: true` (with `scan`) is for a folder that is handed to the CLI
- * as a whole: it is checked entry by entry (symlinks out of it, secret-file names). `ancestors: true` is only the "contains a protected location" part, for write targets
- * (a downloaded folder named like a parent of a protected location). Leave both off for plain write destinations.
+ * as a whole: it is checked entry by entry (symlinks out of it, secret-file and secret-folder names). `ancestors: true` is only
+ * the "contains a protected location" part, for write targets (a downloaded folder named like a parent of a protected
+ * location). `writeTarget: true` also refuses a path that holds the audit log or a `.versions` folder of the sync folder.
  */
-export function assertLocalPathAllowed(absPath: string, opts: { scan?: boolean; ancestors?: boolean; upload?: boolean } = {}): void {
+export function assertLocalPathAllowed(absPath: string, opts: { scan?: boolean; ancestors?: boolean; upload?: boolean; writeTarget?: boolean } = {}): void {
   const lexical = resolve(absPath);
   const real = realResolve(lexical);
-  if (!opts.scan) assertNotWriteProtected(lexical, real, absPath);
+  if (!opts.scan) assertNotWriteProtected(lexical, real, absPath, opts.writeTarget === true);
 
   const roots = rootsEnv();
   if (roots.length > 0) {
