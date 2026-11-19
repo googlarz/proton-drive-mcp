@@ -126,7 +126,7 @@ export interface DuplicateGroup {
   members: WalkNode[];
 }
 
-function keeperOf(members: WalkNode[]): WalkNode {
+export function keeperOf(members: WalkNode[]): WalkNode {
   const t = (n: WalkNode) => Date.parse(nodeTime(n) ?? "");
   return [...members].sort((a, b) => {
     const ta = Number.isFinite(t(a)) ? t(a) : Infinity, tb = Number.isFinite(t(b)) ? t(b) : Infinity;
