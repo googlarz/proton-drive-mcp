@@ -32,6 +32,13 @@ export const PROMPTS = [
     requires: ["drive_sharing_audit"],
     arguments: [],
   },
+  {
+    name: "drive-checkup",
+    title: "Drive checkup",
+    description: "Give a Proton Drive folder a health checkup: duplicates, empty folders, risky sharing and trash, with an offer to clean up that can be undone.",
+    requires: ["drive_checkup", "drive_cleanup", "drive_undo"],
+    arguments: [{ name: "path", description: "Absolute Drive path of the folder, e.g. /my-files/Documents.", required: true }],
+  },
 ] as const;
 
 const TEXTS: Record<string, (a: Record<string, string>) => string> = {
@@ -56,6 +63,15 @@ Use drive_search with the most selective name, extension and date filters the de
 Use drive_usage to find the largest folders and files, drive_find_duplicates to find redundant copies, and drive_list_trash to see what the trash holds. Finish with a short prioritised action list with estimated space saved. Do not delete or move anything; propose only.`,
   "sharing-audit": () => `Audit what I share from Proton Drive.
 Use drive_sharing_audit to list shared folders, members, pending invitations and public links. Explain the risks in plain language (for example public links without a password, editors who no longer need access, stale invitations) and suggest what to tighten. Do not revoke anything without my explicit OK.`,
+  "drive-checkup": (a) => {
+    const path = validateRemotePath(a.path);
+    if (path === "/") throw new Error("path must be a folder such as /my-files, not '/'");
+    return `Give my Proton Drive folder ${path} a checkup.
+1. Call drive_checkup for that path and summarise the result in plain language: the score, what matters most, and what each finding means. Say if the scan was incomplete.
+2. If it lists duplicates or empty folders, offer drive_cleanup for them. Everything it removes goes to the trash and can be undone. Show me the plan first; the server asks me to approve the exact list itself.
+3. Mention that drive_undo puts back what drive_cleanup (or an earlier trash, move or rename) changed, while the items are still in the trash.
+Sharing risks and large old files are for me to decide: describe them, change nothing.`;
+  },
 };
 
 export function getPromptText(name: string, args: Record<string, unknown>): string | undefined {

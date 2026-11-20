@@ -76,8 +76,58 @@ afterEach(async () => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
+describe("incremental refresh: an entry listed without a uid (1.12.0 review fix)", () => {
+  const ghost = { type: "file", name: { ok: true, value: "ghost.txt" }, activeRevision: { claimedSize: 3 } };
+  const reason = "listed without a uid (cannot be identified)";
+
+  it("is remembered with the folder's saved listing: a later pass that reuses the listing still reports it, and relisting the folder clears it", async () => {
+    await seed();
+    ageListed({ "/my-files/b": 2 * HOUR });
+    const t = small();
+    t["/my-files/b"] = [file("z.txt", 7), ghost];
+    const first = await slice(makeSvc(t).svc);
+    assert.equal(first.complete, false);
+    assert.deepEqual(first.skipped, [{ path: "/my-files/b/ghost.txt", reason }]);
+    await flushWalkIndexForTests();
+    assert.deepEqual(readIndex().entries[0].unidentified, { "/my-files/b": ["/my-files/b/ghost.txt"] });
+
+    // a new process: every listing is young, nothing is listed again, and the walk is still incomplete
+    resetWalkCacheForTests();
+    const again = makeSvc(t);
+    const second = await slice(again.svc);
+    assert.equal(second.foldersRefreshed, 0);
+    assert.equal(second.foldersReused, 4);
+    assert.equal(second.complete, false, "a reused listing that held an unidentifiable entry is not complete");
+    assert.deepEqual(second.skipped, [{ path: "/my-files/b/ghost.txt", reason }]);
+    assert.equal(count(again.calls, "/my-files/b"), 0);
+
+    // an ordinary call is not served the saved tree as complete either
+    resetWalkCacheForTests();
+    const ordinary = await walkTree(makeSvc(t).svc, "/my-files");
+    assert.equal(ordinary.complete, false);
+
+    // the entry is fixed on Drive and the folder is listed again: the flag goes
+    resetWalkCacheForTests();
+    ageListed({ "/my-files/b": 2 * HOUR });
+    const fixed = await slice(makeSvc(small()).svc);
+    assert.equal(fixed.complete, true);
+    assert.deepEqual(fixed.skipped, []);
+    await flushWalkIndexForTests();
+    assert.equal(readIndex().entries[0].unidentified, undefined);
+  });
+});
+
 describe("incremental refresh: which folders are listed", () => {
-  it("saves a listing time for every folder (not the excluded ones) in a version 2 file", async () => {
+  it("the file format version is 3 (1.11.0 reads 1 and 2 only, so it ignores a file that may hold the unidentified flag); 1 and 2 are still read, others are not", async () => {
+    await seed();
+    assert.equal(INDEX_VERSION, 3);
+    const f = readIndex();
+    assert.equal(f.version, 3);
+    for (const v of [1, 2]) { writeIndex({ ...f, version: v }); assert.ok(readIndex(), `version ${v} is still read`); }
+    for (const v of [0, 4]) { writeIndex({ ...f, version: v }); assert.equal(readIndex(), undefined, `version ${v} is not`); }
+  });
+
+  it("saves a listing time for every folder (not the excluded ones) in the current version file", async () => {
     await seed();
     const f = readIndex();
     assert.equal(f.version, INDEX_VERSION);

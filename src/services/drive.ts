@@ -127,6 +127,23 @@ function assertItemsOk(result: unknown, action: string): void {
   }
 }
 
+/** Per-item outcome of a batched CLI call that does not throw on `ok:false` (used by the undo engine, which verifies by uid anyway). */
+export interface BatchItemResult { uid?: string; ok: boolean; error?: string }
+
+function itemResults(result: unknown, action: string): BatchItemResult[] {
+  if (!Array.isArray(result)) return [];
+  return (result as Record<string, unknown>[]).map((item) => {
+    const uid = typeof item?.uid === "string" ? item.uid : undefined;
+    if (!item || item.ok !== false) return { uid, ok: true };
+    const err = (item.error ?? {}) as Record<string, unknown>;
+    const name = String(err.name ?? "unknown error");
+    const readable = READABLE_ERRORS[`${action}|${name}|${err.code}`];
+    const message = typeof err.message === "string" && err.message ? `: ${err.message}` : "";
+    const hint = name === "NodeWithSameNameExistsValidationError" ? " (an item with that name already exists at the destination)" : "";
+    return { uid, ok: false, error: readable ?? `${name}${message}${hint}` };
+  });
+}
+
 // Confirmed live: `sharing status /my-files` fails with "Error decrypting
 // session keys" — roots are not shareable nodes.
 export const ROOT_PATHS = new Set(["/my-files", "/photos", "/albums", "/trash", "/photos-trash", "/shared-with-me", "/shared-by-me", "/devices"]);
@@ -660,6 +677,19 @@ export class DriveService {
       const okCount = Array.isArray(result) ? (result as { ok?: boolean }[]).filter((i) => i && i.ok !== false).length : 0;
       throw new Error(`${(err as Error).message} [${okCount} of ${total} items succeeded; verify with drive_list]`);
     }
+  }
+
+  // One batched `filesystem restore` for already-resolved /trash/<name> paths: returns the per-item results
+  // instead of throwing on the first ok:false (the caller verifies by uid). No uid resolution happens here.
+  async restoreMany(trashPaths: string[]): Promise<BatchItemResult[]> {
+    try { return itemResults(await this.run(["filesystem", "restore", ...trashPaths]), "Restore"); } finally { invalidatePath("/"); }
+  }
+
+  // Like bulkMove but returns the per-item results instead of throwing on ok:false.
+  async moveMany(sources: string[], destinationFolder: string): Promise<BatchItemResult[]> {
+    try {
+      return itemResults(await this.run(["filesystem", "move", ...sources, destinationFolder]), "Move");
+    } finally { sources.forEach(invalidatePath); invalidatePath(destinationFolder); }
   }
 
   async restore(remotePath?: string, uid?: string): Promise<void> {

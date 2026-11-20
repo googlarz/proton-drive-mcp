@@ -90,6 +90,8 @@ const CLI_COMMAND = {
   drive_sharing_audit: "share audit",
   drive_usage: "usage [path]",
   drive_find_duplicates: "duplicates [path]",
+  drive_checkup: "checkup [path]",
+  drive_undo: "undo [--list]",
   drive_share_invite: "share invite",
   drive_share_revoke: "share revoke",
   drive_share_remove_all: "share remove-all",
@@ -112,7 +114,8 @@ const CLI_COMMAND = {
 };
 // Operate on the local sync folder via env var, so intentionally MCP-only. drive_audit_log reads the
 // MCP server's own audit log (the guard layer applies to the MCP server, not to this CLI).
-const MCP_ONLY = new Set(["drive_size", "drive_read_file", "drive_write_file", "drive_audit_log", "drive_read_many", "drive_share_expiry_report", "drive_recent_changes", "drive_content_index", "drive_search_content", "drive_refresh_index"]);
+// 1.12.0: drive_cleanup has no CLI command (the server builds the list and shows it in its own approval dialog).
+const MCP_ONLY = new Set(["drive_cleanup", "drive_size", "drive_read_file", "drive_write_file", "drive_audit_log", "drive_read_many", "drive_share_expiry_report", "drive_recent_changes", "drive_content_index", "drive_search_content", "drive_refresh_index"]);
 
 describe("CLI reachability", () => {
   let usage;

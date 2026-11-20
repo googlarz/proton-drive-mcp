@@ -60,7 +60,7 @@ describe("PROTON_DRIVE_MODE=readonly", () => {
   it("hides every mutating tool and keeps every read tool", async () => {
     const tools = await withServer({ PROTON_DRIVE_MODE: "readonly" }, (c) => c.listTools());
     assert.deepEqual(names(tools).sort(), [...READ_TOOL_NAMES].sort());
-    assert.equal(tools.length, 28);
+    assert.equal(tools.length, 29);
   });
 
   it("refuses a mutating tool at call time, with a clear message, without touching the CLI", async () => {
@@ -101,12 +101,12 @@ describe("PROTON_DRIVE_MODE=readonly", () => {
     });
   });
 
-  it("an invalid value fails closed (readonly) with one stderr warning; full still lists 55", async () => {
+  it("an invalid value fails closed (readonly) with one stderr warning; full still lists 58", async () => {
     await withServer({ PROTON_DRIVE_MODE: "bogus" }, async (c) => {
-      assert.equal((await c.listTools()).length, 28);
+      assert.equal((await c.listTools()).length, 29);
       assert.equal((c.stderr.match(/PROTON_DRIVE_MODE/g) ?? []).length, 1);
     });
-    await withServer({ PROTON_DRIVE_MODE: "full" }, async (c) => assert.equal((await c.listTools()).length, 55));
+    await withServer({ PROTON_DRIVE_MODE: "full" }, async (c) => assert.equal((await c.listTools()).length, 58));
   });
 
   it("offers only prompts whose tools are all available", async () => {
@@ -210,13 +210,13 @@ describe("PROTON_DRIVE_REMOTE_ROOTS: server", () => {
   it("every scoped tool refuses an outside path argument, before any CLI call", async () => {
     const tools = await withServer({}, (c) => c.listTools());
     await runTree(async (c, sb) => {
-      for (const t of tools.filter((x) => x.name in REMOTE_PATH_ARGS)) {
+      for (const t of tools.filter((x) => x.name in REMOTE_PATH_ARGS && REMOTE_PATH_ARGS[x.name].length > 0)) { // drive_undo has no path argument: its record is checked item by item (undo-server.test.mjs)
         const specs = REMOTE_PATH_ARGS[t.name];
         const args = {};
         for (const [k, p] of Object.entries(t.inputSchema.properties)) {
           if (!(t.inputSchema.required ?? []).includes(k) && !specs.some((s) => s.arg === k)) continue;
           const spec = specs.find((s) => s.arg === k);
-          args[k] = spec ? (spec.list ? ["/my-files/Outside/x"] : "/my-files/Outside/x") : p.enum ? p.enum[0] : p.type === "boolean" ? true : p.type === "integer" ? 1 : p.type === "array" ? ["x"] : "x";
+          args[k] = spec ? (spec.list ? ["/my-files/Outside/x"] : "/my-files/Outside/x") : p.enum ? p.enum[0] : p.type === "boolean" ? true : p.type === "integer" ? 1 : p.type === "array" ? (p.items?.enum ? [p.items.enum[0]] : ["x"]) : "x";
         }
         const r = await c.call(t.name, args);
         assert.equal(r.isError, true, t.name);

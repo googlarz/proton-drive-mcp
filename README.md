@@ -62,6 +62,48 @@ Give Claude Desktop (or any MCP client) full access to your Proton Drive and Pro
 
 ## Recipes
 
+### Checkup, cleanup, undo
+
+<!-- GIF slot: demo recording goes here (about 30 s: checkup, approve cleanup, undo). Not recorded yet, no image is shown on purpose. -->
+
+Ask: "Give /my-files/Documents a checkup." Claude calls `drive_checkup` and reports a score from 0 to 100 and what it found: exact-duplicate candidates and the space they waste, empty folders, large old files, public links without a known expiry, items shared with other accounts, sensitive-looking names inside shared items, and what sits in the trash. Say "Do it" for the safe part and the flow continues:
+
+1. `drive_cleanup` with `path` and `fixes` (`duplicates`, `empty-folders`) returns a plan and changes nothing. The server, not the assistant, builds the list from a fresh, complete scan: Claude names no files, the copy that is kept is never on the list, and items that are shared, under a shared folder or link, or whose name is already in the trash are left out and reported under `skipped`.
+2. With `confirmed: true` the server shows you the exact list in its own approval dialog, for each item the path that goes to the trash and, on the next line, the copy that is kept (`/my-files/Documents/Inbox/2024-03 (1).pdf` then `keeps: /my-files/Documents/Invoices/2024-03.pdf`), and applies it only if you approve and Drive has not changed since. It uses the same batched trash call as `drive_bulk_trash`: everything goes to the trash, nothing is deleted. Up to 50 items per call, so the dialog lists every item with its kept copy (each path with up to 600 characters, unusual characters shown as escapes); `remaining` says how many are left and Claude calls again.
+3. The result carries an undo code such as `U7K2-M9XD`. Say "undo that" and Claude calls `drive_undo`. The server asks you to approve again (always, also for a plain restore), then puts each item back in its original folder and checks every one by its id.
+
+`drive_undo` also covers `drive_bulk_trash`, `drive_trash`, `drive_bulk_move`, `drive_move` and `drive_rename`; these now record what they change (see [Undo](#undo-checkup-cleanup-and-the-undo-record)). The MCP prompt `drive-checkup` (argument `path`) runs the whole flow. On the command line: `proton-drive-cli checkup [path]` and `proton-drive-cli undo`.
+
+**Privacy.**
+- Nothing new leaves your computer. No new network call, no telemetry, no dependency.
+- Your model provider sees what the tools return. For a checkup summary that is counts, sizes, a score and at most 3 example names per finding (the result states the number as `namesInResult`); a finding page shows up to 200 names; a cleanup plan shows at most 10 sample lines.
+- The full list of items to trash is shown to you by the server in the approval dialog. It does not pass through the model.
+- The undo record is a local file with the names of the items you changed, kept 30 days (at most 50 batches).
+- No file content is read unless you ask `drive_cleanup` for `verify`, which downloads candidates to a private temporary folder, hashes them and deletes them.
+
+**Honest limits.**
+- Undo works while the items are in the trash, and only for items whose name is unique there. The CLI restores a trashed item by name, so an item whose name is already in the trash (or that shares a name with another item of the same batch) cannot be restored safely. `drive_cleanup` leaves such items out; `drive_trash` and `drive_bulk_trash` still trash them but mark them not undoable in the result.
+- Trash does not free space until you empty it, and emptying is permanent. A cleanup result does not claim freed space.
+- Nothing is overwritten on undo. If the original folder is gone or already holds an item of that name, that item is skipped with the reason.
+- The duplicate finding relies on the hash the uploader claimed. Without `verify`, `drive_cleanup` only acts on groups with the same claimed hash and size where nothing is shared; anything shared needs `verify: true`, which downloads and compares sha256.
+- The score is a conversation starter, not a measurement. Names that look sensitive are a guess from file names only.
+- `drive_checkup` walks the folder like `drive_usage` does: on a big drive the first call can answer `partial: true`; call it again. Point it at one folder, or enable the [persistent index](#persistent-index-opt-in).
+- `drive_cleanup` needs a complete, fresh listing and refuses otherwise: when the whole walk would need more than 300 folder listings (the cap on listing calls for one walk, not per folder), when a folder cannot be listed, or when an entry comes back without an id. Its walk has no time limit and it never reads the saved index, so on a big folder the plan can take longer than your client waits (a client timeout can hit before the plan returns): point it at a subfolder. Only one bulk apply (`drive_cleanup`, `drive_undo` apply, `drive_bulk_trash`, `drive_bulk_move`) runs at a time: a second one that arrives meanwhile is refused at once with "nothing was changed" (in human and strict mode without a dialog; in `model` mode a dialog may already have been shown before the call reached the lock, and that yes is not used).
+- Journalling adds one folder listing per single-item call (`drive_trash`, `drive_move`, `drive_rename`; none when a recent walk already has the item); `drive_bulk_trash` and `drive_cleanup` also list `/trash` once. Undo puts an item back only into the same folder it came from, not into a new folder that took over the old name.
+- `drive_cleanup` and `drive_undo` have not been run against a real Proton account yet. Whether Claude Desktop shows the approval dialog is not verified (the [terminal route](#human-approval-on-by-default) is the fallback), and Windows is untested.
+
+**How the score is computed.** It starts at 100. Each finding that is present takes off `min(cap, ceil(units x rate))` points, integer arithmetic only; `scoreParts` in the result shows every deduction. The lowest possible score is 5.
+
+| Finding | Units | Points per unit | Cap |
+|---|---|---|---|
+| `duplicates` | extra copies (group size minus 1, summed) | 1/2 | 15 |
+| `empty-folders` | empty folders | 1/10 | 5 |
+| `large-old` | files of at least `minSizeMB` (default 50) not changed for `olderThanDays` (default 365) | 1 | 10 |
+| `public-links` | public links without a known expiry | 5 | 20 |
+| `outside-access` | items shared with other accounts | 2 | 10 |
+| `sensitive-exposed` | sensitive-looking names in shared places | 8 | 30 |
+| `trash` | whole GiB in the trash | 1 | 5 |
+
 ### Find my scanned documents
 
 Searching by name (`drive_search`) will not find a scan called `IMG_0042.jpg`. Search by content instead:
@@ -100,6 +142,7 @@ New to this and want to stay cautious? See the [safe-use guide](docs/GUIDE.md).
 For syncing, backups and cron jobs, **use the official CLI directly**: it is simpler and that is what it is for. This project does not replace it; it needs it, and wraps it so an AI assistant can drive it. It is worth using when you want to work with your Drive by conversation:
 
 - **Things the CLI does not have** (it has no search, recursive listing, usage or content-reading commands, and Drive's end-to-end encryption rules out server-side search): `drive_search`, `drive_tree`, `drive_usage`, `drive_find_duplicates` (verified by sha256), `drive_sharing_audit`, `drive_read_content`, `drive_sync_plan`. They run locally on your computer, so encryption stays intact.
+- **Checkup, cleanup and undo:** `drive_checkup` gives a folder a health report, `drive_cleanup` trashes redundant copies from a list the server builds, and `drive_undo` puts a recorded batch back, each item checked by its id. See [Checkup, cleanup, undo](#checkup-cleanup-undo).
 - **Safe changes by an AI:** destructive or outward-facing actions need your own approval, asked by the server and not by the assistant (a dialog in your client, or a command you run in a terminal); bulk move/trash is two steps (plan first, then apply), trash is reversible, and the duplicate finder never deletes anything. A bare CLI assumes you know exactly what you are doing.
 - **Rough edges smoothed over:** the CLI reports some per-item failures with exit code 0, returns lists in random order, and can fail with `database is locked` under parallel calls. The server checks per-item results, sorts and paginates lists, and retries read-only calls.
 
@@ -111,7 +154,7 @@ What to expect: search matches names, sizes and dates, not the text of every fil
 
 - **Claude manages your Proton Drive** — list, upload, download, move, share, trash, restore
 - **Proton Photos album management** — list albums, create/delete albums, add and remove photos
-- **Companion CLI** — 45 of the 55 operations, scriptable and pipeable, works in cron and shell scripts (the two sync-folder tools, `drive_read_file` and `drive_write_file`, `drive_audit_log`, `drive_size` and the newer `drive_read_many`, `drive_share_expiry_report`, `drive_recent_changes`, `drive_content_index`, `drive_search_content` and `drive_refresh_index` are MCP-only)
+- **Companion CLI** — 47 of the 58 operations, scriptable and pipeable, works in cron and shell scripts (the two sync-folder tools, `drive_read_file` and `drive_write_file`, `drive_audit_log`, `drive_size` and the newer `drive_read_many`, `drive_share_expiry_report`, `drive_recent_changes`, `drive_content_index`, `drive_search_content`, `drive_refresh_index` and `drive_cleanup` are MCP-only)
 - **Full Proton Drive CLI command coverage** — all 32 scriptable commands of CLI 0.8.0 have a matching tool (checked against the CLI's own help; `auth login` is the one command excluded, since it's an interactive browser flow). Not every optional flag is exposed: `sharing invite --include-node-name` is deliberately off (it would put the file name in the invitation email in clear text) and the `inherited` invite role is not offered; commands that accept several paths run one path per call except bulk move and bulk trash
 - **Zero credential exposure** — auth is handled entirely by the official Proton Drive CLI; this MCP never touches your password or session token
 - **Shell injection safe** — all CLI calls pass discrete argument arrays to `spawn` (no shell), never string interpolation
@@ -325,7 +368,7 @@ proton-drive-cli deny K7Q2-M9XD     # discard a request
 ```
 
 ### Search, analytics and cleanup
-`drive_search` · `drive_tree` · `drive_usage` · `drive_find_duplicates` · `drive_sharing_audit` · `drive_sync_plan` · `drive_bulk_move` · `drive_bulk_trash`
+`drive_search` · `drive_tree` · `drive_usage` · `drive_find_duplicates` · `drive_sharing_audit` · `drive_checkup` · `drive_sync_plan` · `drive_bulk_move` · `drive_bulk_trash` · `drive_undo`
 
 ```bash
 proton-drive-cli tree /my-files --depth 2
@@ -333,6 +376,9 @@ proton-drive-cli search /my-files --ext pdf --min-size 1000000
 proton-drive-cli usage /my-files --top 20 --older-than 365
 proton-drive-cli duplicates /my-files --min-size 1000000 [--verify]
 proton-drive-cli share audit /my-files
+proton-drive-cli checkup /my-files/Documents [--finding duplicates] [--no-sharing] [--refresh] [--json]   # health report, read-only
+proton-drive-cli undo --list                                                         # recorded batches, newest first
+proton-drive-cli undo K7Q2-M9XD [--confirm] [--json]                                  # plan; --confirm applies
 proton-drive-cli sync-plan ./local /my-files/backup --direction up
 proton-drive-cli bulk-move /my-files/Archive /my-files/a.pdf /my-files/b.pdf          # plan only
 proton-drive-cli bulk-trash /my-files/old1.txt /my-files/old2.txt --confirm           # apply
@@ -343,7 +389,7 @@ proton-drive-cli index clear                                                    
 - The first walk of a large drive can take minutes (measured about 21 s per 1,200 files at the default concurrency (12); about 25 s at concurrency 8). `drive_search`, `drive_tree` and `drive_usage` stop waiting after 25 s (`PROTON_DRIVE_WALK_BUDGET_MS`, 0 = never) and return what was listed so far with `partial: true`, `continuing: true` (the walk is still running) and a `note`; the same walk keeps running in the background, so repeating the call returns the full result from cache. `drive_find_duplicates`, `drive_sharing_audit` and `drive_sync_plan` always wait for the complete walk. Later calls reuse a 5-minute in-memory cache; `refresh` bypasses it. With the opt-in persistent index, a saved copy up to 24 h old can answer first (marked `stale: true`).
 - Walks skip `.git` and `node_modules` by default.
 - With `PROTON_DRIVE_INDEX=1`, results may come from a saved index (`stale: true` = served from the saved index, not a walk made now) while a refresh runs; repeat the call or pass `refresh: true` for a fresh read. On a huge drive `drive_refresh_index` refreshes the index in resumable slices. Off by default, see [Persistent index](#persistent-index-opt-in).
-- Read-only tools (`drive_search`, `drive_tree`, `drive_usage`, `drive_find_duplicates`, `drive_sharing_audit`, `drive_share_expiry_report`, `drive_recent_changes`, `drive_sync_plan`) change nothing. `drive_bulk_move` and `drive_bulk_trash` are two-step: call without `confirmed` for the plan, then with `confirmed: true` to apply; applying still needs your approval of the exact list. Bulk trash is reversible with `drive_restore`.
+- Read-only tools (`drive_search`, `drive_tree`, `drive_usage`, `drive_find_duplicates`, `drive_checkup`, `drive_sharing_audit`, `drive_share_expiry_report`, `drive_recent_changes`, `drive_sync_plan`) change nothing. `drive_bulk_move` and `drive_bulk_trash` are two-step: call without `confirmed` for the plan, then with `confirmed: true` to apply; applying still needs your approval of the exact list. Bulk trash is reversible with `drive_restore`.
 - Duplicate detection uses the sha1 the uploader claimed, which is unverified. `verify: true` downloads the candidates and hashes them.
 - The sharing audit flags an invitee as external when the address is outside Proton domains, so Proton users on a custom domain are over-flagged.
 - Sizes are sums of file sizes, not your account quota.
@@ -412,7 +458,7 @@ proton-drive-cli share status /my-files/Projects
 
 ## Prompts
 
-The server offers four MCP prompts (also declared in the MCPB manifest): `organise-folder` (`path`), `find-files` (`description`), `storage-audit` and `sharing-audit`. In Claude Code they are listed as `/servername:promptname (MCP)`, and `/mcp__servername__promptname` also runs them. Other clients show them as prompts. A prompt is hidden when a tool it needs is outside the active tool tier: with `PROTON_DRIVE_TOOL_TIER=core` only `find-files` is offered.
+The server offers five MCP prompts (also declared in the MCPB manifest): `organise-folder` (`path`), `find-files` (`description`), `storage-audit`, `sharing-audit` and `drive-checkup` (`path`: checkup, then an offer to clean up that can be undone). In Claude Code they are listed as `/servername:promptname (MCP)`, and `/mcp__servername__promptname` also runs them. Other clients show them as prompts. A prompt is hidden when a tool it needs is outside the active tool tier: with `PROTON_DRIVE_TOOL_TIER=core` only `find-files` is offered.
 
 ---
 
@@ -437,13 +483,13 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 `drive_copy`
 
 ### Plan & bulk
-`drive_sync_plan` · `drive_bulk_move` · `drive_bulk_trash`
+`drive_sync_plan` · `drive_bulk_move` · `drive_bulk_trash` · `drive_cleanup` · `drive_undo`
 
 ### Invitations
 `drive_list_invitations` · `drive_invitation_accept` · `drive_invitation_reject` · `drive_share_leave`
 
 ### Analytics
-`drive_usage` · `drive_find_duplicates` · `drive_sharing_audit` · `drive_share_expiry_report` · `drive_recent_changes`
+`drive_usage` · `drive_find_duplicates` · `drive_checkup` · `drive_sharing_audit` · `drive_share_expiry_report` · `drive_recent_changes`
 
 ### Content search (opt-in, see [Content search](#content-search-opt-in))
 `drive_content_index` · `drive_search_content`
@@ -484,6 +530,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 | `drive_share_status` | Get sharing members and URL | `path` |
 | `drive_usage` | Storage analytics for a subtree: totals, largest files/folders, extension and media-type breakdown, old files, trash stats (sum of file sizes, not the account quota) | `path?`, `top?`, `olderThanDays?`, `refresh?` |
 | `drive_find_duplicates` | Likely duplicate groups (claimed sha1 / same size; `verify` downloads and sha256s candidates), wasted bytes, suggested keeper — never deletes | `path?`, `minSize?`, `verify?`, `maxVerifyBytes?`, `maxVerifyTotalBytes?` (default 500 MB, max 2 GB), `limit?`, `refresh?` |
+| `drive_checkup` | One-call health report for a folder: duplicates, empty folders, large old files, public links, outside access, sensitive-looking names in shared items, trash; score and at most 3 example names per finding. Changes nothing | `path?`, `finding?`, `limit?`, `offset?`, `olderThanDays?`, `minSizeMB?`, `sharing?`, `refresh?` |
 | `drive_sharing_audit` | Public links (no URL), invitees, pending invitations and risk flags for shared items (max 100) | `path?`, `refresh?` |
 | `drive_share_expiry_report` | Public links under a path with `expiresAt`, `daysLeft` and flags `expired`, `expiringSoon`, `noExpiry`, `hasPassword`, soonest first. Uses the sharing audit walk (max 100 shared items; `capped` says when more exist). Lists only links set directly on items below `path`: a link on the folder passed as `path` itself is not listed, so pass its parent. Changes nothing | `path?`, `withinDays?` (default 14), `refresh?` |
 | `drive_recent_changes` | Files added or modified since a date (`since`: ISO date or `7d`/`12h`/`2w`, default 7d), from one complete walk. With `snapshot: "diff"` or `"save"` (needs `PROTON_DRIVE_INDEX=1`): added, removed, modified and moved files against the previous snapshot of that path. See [Recent changes](#recent-changes) | `path?`, `since?`, `limit?` (default 50, max 500), `snapshot?`, `refresh?` |
@@ -500,6 +547,8 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 | `drive_sync_plan` | Read-only diff of a local folder vs a Drive folder (nothing transferred) | `localPath`, `drivePath`, `direction?` (up/down/both), `ignore?`, `compare?` (size-mtime/sha1), `limit?` |
 | `drive_bulk_move` | Move up to 200 items into an existing folder; without `confirmed` returns the plan and problems only | `sources`, `destinationFolder`, `confirmed?` (plan/apply switch: `true` applies, after you approve the list) |
 | `drive_bulk_trash` | Trash up to 200 items (recoverable); without `confirmed` returns the plan and problems only | `paths`, `confirmed?` (plan/apply switch: `true` applies, after you approve the list) |
+| `drive_cleanup` | Trash the redundant copies of exact duplicates and empty folders under a path; the server builds the list from a fresh scan and shows it to you; without `confirmed` returns the plan only | `path`, `fixes`, `verify?`, `confirmed?` (plan/apply switch) |
+| `drive_undo` | Undo a recorded trash, move or rename batch; `apply` always asks you first | `action?` (list/plan/apply), `id?` |
 | `drive_restore` | Restore from trash | `path` |
 | `drive_empty_trash` | Permanently delete all trash ⚠️ | — |
 | `drive_read_file` | Read text file from local sync folder | `path` |
@@ -552,7 +601,7 @@ The server offers four MCP prompts (also declared in the MCPB manifest): `organi
 
 ### Token cost
 
-`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` 48.5 KB (55 tools), `core` 17.9 KB (19 tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
+`tools/list` is sent to the model in every session. Measured payload (JSON bytes): `full` about 51.8 KB in `PROTON_DRIVE_APPROVAL=model` mode and about 52.9 KB in the default `human` mode (58 tools; the test budgets are 53,700 bytes in the default human mode and 52,600 in model mode, about 1.5% above the measured sizes), `core` 17.9 KB (19 tools; measured before 1.12.0, which adds no core tools). Set `PROTON_DRIVE_TOOL_TIER=core` to load only:
 
 `drive_auth_status`, `drive_version`, `drive_list`, `drive_info`, `drive_read_content`, `drive_list_trash`, `drive_search`, `drive_tree`, `drive_mkdir`, `drive_upload`, `drive_download`, `drive_rename`, `drive_move`, `drive_copy`, `drive_trash`, `drive_restore`, `drive_share_status`, `photos_list_timeline`, `photos_download`.
 
@@ -562,7 +611,7 @@ Left out of `core` (use `full`): permanent deletion (`drive_delete`, `drive_empt
 
 Since 1.11.0 a destructive or outward-facing operation runs only after a person says yes to that exact operation. The server asks, not the assistant. The assistant's own `confirmed: true` is no longer an authorisation.
 
-**What needs approval** (default mode, `human`): `drive_auth_logout`, `drive_delete`, `drive_empty_trash`, `drive_share_invite`, `drive_share_revoke`, `drive_share_set_url`, `drive_share_remove_url`, `drive_share_remove_all`, `drive_share_leave`, `drive_invitation_accept`, `drive_invitation_reject`, `photos_delete_album`, `photos_remove_from_album`, applying `drive_bulk_move` or `drive_bulk_trash`, `drive_upload` with a `replace` strategy, `drive_download` / `photos_download` with a `remove` strategy, and `drive_write_file` over an existing file. Also gated: `drive_copy`, `drive_move`, `drive_mkdir`, `drive_rename`, `drive_upload`, `drive_write_file`, `drive_trash` and `drive_restore` when a path they read from or write to is under `/shared-with-me`, because that puts your data into, or changes, a folder someone else controls.
+**What needs approval** (default mode, `human`): `drive_auth_logout`, `drive_delete`, `drive_empty_trash`, `drive_share_invite`, `drive_share_revoke`, `drive_share_set_url`, `drive_share_remove_url`, `drive_share_remove_all`, `drive_share_leave`, `drive_invitation_accept`, `drive_invitation_reject`, `photos_delete_album`, `photos_remove_from_album`, applying `drive_bulk_move`, `drive_bulk_trash` or `drive_cleanup`, applying `drive_undo` (always, also for a plain restore: undoing an old move can put files back into a shared folder), `drive_upload` with a `replace` strategy, `drive_download` / `photos_download` with a `remove` strategy, and `drive_write_file` over an existing file. Also gated: `drive_copy`, `drive_move`, `drive_mkdir`, `drive_rename`, `drive_upload`, `drive_write_file`, `drive_trash` and `drive_restore` when a path they read from or write to is under `/shared-with-me`, because that puts your data into, or changes, a folder someone else controls.
 
 **What does not** (reversible changes inside your own `/my-files`): a single `drive_trash`, `drive_restore`, `drive_move` / `drive_rename` / `drive_copy` / `drive_mkdir` inside `/my-files`, an upload that does not replace anything, album create / update / add, `photos_upload`, and `drive_write_file` to a new file. A loop of single `drive_trash` calls is therefore not stopped in the default mode; use `strict` (below) if that matters to you.
 
@@ -647,6 +696,15 @@ Scanned PDFs (no text layer) and images normally come back empty or as "unsuppor
 - **Doctor:** `proton-drive-cli doctor` reports whether OCR is off or on, which engine was found, the tesseract version and installed languages, and what is missing (for example `pdftoppm`).
 - **Guards:** `drive_read_content`, `drive_read_many` and the index tools stay read tools: available in `PROTON_DRIVE_MODE=readonly`, confined by `PROTON_DRIVE_REMOTE_ROOTS`.
 
+### Undo: checkup, cleanup and the undo record
+
+- **What is recorded.** `drive_cleanup`, `drive_trash`, `drive_bulk_trash`, `drive_bulk_move`, `drive_move` and `drive_rename` write a local record of each batch before they change Drive, and complete it afterwards. Per item it holds the Drive id (uid), the folder id, the path before (and after, for move and rename), the name and, where known, the size. It is a plain-text JSON file per batch, one folder with `0700` and files `0600`, kept 30 days or 50 batches per Proton account, whichever is less. It holds the names of the items you changed; nothing else. The result of a recorded call carries `undoId` (for example `U7K2-M9XD`) and, when some items cannot be restored reliably, `notUndoable`.
+- **Where.** An `undo` folder next to the approvals folder (`~/Library/Caches/proton-drive-mcp/undo` on macOS, `$XDG_CACHE_HOME` or `~/.cache` elsewhere), or `PROTON_DRIVE_UNDO_DIR`. Downloads and `drive_write_file` cannot write into it, and the server refuses to use it inside `PROTON_DRIVE_SYNC_PATH`. `PROTON_DRIVE_UNDO=0` switches recording off; then `drive_undo` is unavailable and `drive_cleanup` says so in its result. If the account cannot be identified, the changing tools still run and the result says that no undo was recorded.
+- **How `drive_undo` works.** `action: "list"` shows the newest 20 batches (code, time, tool, kind, item count, status; no names). `plan` (the default) shows per item whether it can be undone and why not. `apply` asks you to approve the exact list (paths to restore, `<now> -> <before>` for moves), then plans again and applies only if the result is identical. Without an `id` it takes the newest batch not yet undone; a batch can be undone once.
+- **How each item is verified.** The server finds the item by its uid: in the trash for a trash batch, at the place the batch moved it to for a move or rename. It never acts on "some item with that name". Afterwards it lists the original folder and checks the uid is back; the CLI's own success report is not taken as proof. Items whose original folder is gone or already holds an item of that name are skipped with the reason. Every path in the record is checked against `PROTON_DRIVE_REMOTE_ROOTS` at plan time, and a record from another Proton account is ignored.
+- **Limits.** Undo works while the items are in the trash and their names are unique there (the CLI restores trashed items by name only). An item whose name is already in the trash, or that appears twice in one batch, is marked not restorable. `drive_cleanup` leaves such items out of its plan, and `drive_bulk_trash` reports `notUndoable` for them. A single `drive_trash`, `drive_move` or `drive_rename` does not look at the trash when it runs and returns an `undoId` either way; the undo plan checks the live trash later and refuses an item whose name is not unique there (checked against the real CLI: with two same-named items in the trash, `restore` silently restores only one of them, which is why this check stays). Duplicate detection in `drive_checkup` and `drive_cleanup` ignores files smaller than 1 KiB (1,024 bytes), the same limit as `drive_find_duplicates`; they never appear in a plan. Emptying the trash makes trashed items unrecoverable. Records are not tamper-proof: anyone who can write your files can edit one (see the [threat model](THREAT_MODEL.md)), which is why every undo shows its real paths for approval and is verified by uid.
+- **Modes.** `drive_cleanup` and `drive_undo` are hidden and refused with `PROTON_DRIVE_MODE=readonly`. `drive_checkup` only reads and is allowed there; it is not in the `core` tool tier. With `PROTON_DRIVE_REMOTE_ROOTS` set, `drive_checkup` leaves the account-wide trash out of the report.
+
 ### Recent changes
 
 `drive_recent_changes` answers "what changed in this folder?" in two ways.
@@ -702,7 +760,7 @@ Developed and live-tested on **macOS**. CI runs the test suite on Ubuntu and mac
 
 ## Testing status
 
-Every tool group was live-tested on 2026-09-28 against a real Proton account, **except** `drive_share_leave`, `drive_invitation_accept` and `drive_invitation_reject`. Those three have never been tested against a real account, because the maintainer has no second Proton account to share from; they are only unit-tested against a fake CLI.
+Every tool group was live-tested on 2026-09-28 against a real Proton account, **except** `drive_share_leave`, `drive_invitation_accept` and `drive_invitation_reject`. Those three have never been tested against a real account, because the maintainer has no second Proton account to share from; they are only unit-tested against a fake CLI. `drive_checkup`, `drive_cleanup` and `drive_undo` (1.12.0) have not been run against a real account either; the undo journalling added to `drive_trash`, `drive_bulk_trash`, `drive_bulk_move`, `drive_move` and `drive_rename` is likewise only tested against the fake CLI.
 
 ---
 
@@ -738,12 +796,14 @@ Every tool group was live-tested on 2026-09-28 against a real Proton account, **
 | `PROTON_DRIVE_OCR_TIMEOUT_MS` | Optional | Time limit for OCR of one file, in milliseconds (default 90000, max 600000); the engine process group is killed on expiry. |
 | `PROTON_DRIVE_DEBUG` | Optional | Set to `1` to log debug lines (for example a failed background OCR warm-up) to stderr. |
 | `PROTON_DRIVE_READ_TIMEOUT_MS` | Optional | Hard time limit for parsing one `.pdf`/`.docx` in `drive_read_content`, in milliseconds (default 20000; clamped to 1-120000). On expiry the parsing worker is terminated and the call returns an error. |
-| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 55 tools) or `core` (19 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
+| `PROTON_DRIVE_TOOL_TIER` | Optional | `full` (default, all 58 tools) or `core` (19 everyday tools; see [Token cost](#token-cost)). Tools outside the active tier are hidden from `tools/list` and refused at call time. Read once at startup; an unknown value falls back to `full` with a warning on stderr. |
 | `PROTON_DRIVE_MODE` | Optional | `full` (default) or `readonly`: hide and refuse every tool that changes Drive or the account. An unknown value is treated as `readonly`, with a warning. See [Guard layer](#guard-layer-opt-in). |
 | `PROTON_DRIVE_REMOTE_ROOTS` | Optional | Drive folders (separated by `:`, or `;` on Windows) that every remote path argument must stay inside, e.g. `/my-files/Projects/X`. Tools that cannot be limited to a folder are refused while it is set. See [Guard layer](#guard-layer-opt-in). |
 | `PROTON_DRIVE_AUDIT_LOG` | Optional | Absolute path of an append-only, hash-chained JSONL audit log (`0600`). If it cannot be written, tools that change Drive are refused. Read it with `drive_audit_log`. See [Guard layer](#guard-layer-opt-in). |
 | `PROTON_DRIVE_APPROVAL` | Optional | `human` (default), `strict` or `model`: who may approve destructive and outward-facing operations. `strict` gates every tool that changes Drive; `model` restores the 1.10.1 behaviour where the assistant's `confirmed: true` is enough (warning at startup). An unknown value is treated as `strict`, with a warning. See [Human approval](#human-approval-on-by-default). |
 | `PROTON_DRIVE_APPROVAL_DIR` | Optional | Folder for terminal approvals (default: `approvals` next to the index folder, `~/Library/Caches/proton-drive-mcp/approvals` on macOS, `$XDG_CACHE_HOME` or `~/.cache` elsewhere). Created `0700`; the server refuses to use it inside `PROTON_DRIVE_SYNC_PATH`, and downloads cannot write into it. |
+| `PROTON_DRIVE_UNDO` | Optional | `0` (also `false`, `off`, `no`) switches the undo record off: `drive_undo` is then unavailable and changing tools are not recorded. Anything else leaves it on (default). See [Undo](#undo-checkup-cleanup-and-the-undo-record). |
+| `PROTON_DRIVE_UNDO_DIR` | Optional | Folder for the undo record (default: `undo` next to the approvals folder, `~/Library/Caches/proton-drive-mcp/undo` on macOS, `$XDG_CACHE_HOME` or `~/.cache` elsewhere). Created `0700`, files `0600`; holds the names of the items you changed in plain text. The server refuses to use it inside `PROTON_DRIVE_SYNC_PATH`, and downloads cannot write into it. |
 | `PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE` | Optional | `1` to copy the existing file to `.versions/<name>.<timestamp>` in its folder before `drive_write_file` (local sync copy) or `drive_upload` (`replace`, remote copy) overwrites it; the overwrite is refused if the copy fails. Replacing a folder is refused. Off by default. See [Guard layer](#guard-layer-opt-in). |
 
 ---

@@ -7,7 +7,7 @@ import { showValueStrict } from "./text.js";
 
 // ---- Operation: what is shown = what is hashed = what runs -------------------------------------------------------
 
-export type Effect = "irreversible" | "reversible" | "outward" | "local-delete";
+export type Effect = "irreversible" | "reversible" | "reversible-no-undo" | "outward" | "local-delete";
 export type FieldValue = string | number | boolean | string[] | null;
 export interface Operation {
   tool: string;
@@ -31,6 +31,8 @@ export function opHash(op: Operation): string {
 const EFFECT_LABEL: Record<Effect, string> = {
   irreversible: "PERMANENT, cannot be undone",
   reversible: "can be undone",
+  // drive_cleanup while the undo record is off or unusable: the items still go to the trash, but drive_undo cannot put them back.
+  "reversible-no-undo": "items go to the trash, nothing is deleted; undo is switched off or unavailable",
   outward: "affects other people or is visible outside your Drive",
   "local-delete": "DELETES files on THIS computer, cannot be undone",
 };
@@ -52,6 +54,8 @@ export const TOOL_TITLES: Readonly<Record<string, string>> = {
   photos_remove_from_album: "remove a photo from an album",
   drive_bulk_move: "move several items",
   drive_bulk_trash: "move several items to the trash",
+  drive_cleanup: "move redundant copies and empty folders to the trash",
+  drive_undo: "undo an earlier change (restore from the trash, move or rename back)",
   drive_upload: "upload (may replace existing items)",
   drive_download: "download (may delete existing LOCAL files or folders first)",
   photos_download: "download photos (may delete existing LOCAL files first)",
@@ -73,18 +77,26 @@ const FIELD_ORDER = [
   "path", "paths", "sources", "sourcePath", "remotePath", "destinationPath", "destinationFolder", "newName", "localPath",
   "album", "albumName", "name", "uid", "item", "inviter", "invitedFolder", "email", "role", "expiration", "replacesExistingLink", "resetSettings", "password",
   "message", "content", "fileConflictStrategy", "folderConflictStrategy", "conflictStrategy",
+  "fixes", "trash", "keeps", "id", "when", "restore", "moveBack",
 ];
 const KEY_OK = /^[A-Za-z][A-Za-z0-9_]{0,40}$/;
 const LIST_FULL_MAX = 50;
 const FOLDER_LINES_MAX = 50;
 
 const parentOf = (p: string) => p.slice(0, p.lastIndexOf("/")) || "/";
+/** The path an undo line "<now> -> <before>" is about: folder counts group by the first path, so the destination never decides the folder. */
+const leadPath = (line: string) => line.split(" -> ", 1)[0];
+
+// Lines of these lists name a path or a "<now> -> <before>" pair: each path may be long, and a hidden middle could hide where an item goes.
+const LONG_LINE: Record<string, [head: number, tail: number]> = { moveBack: [400, 200], restore: [400, 200] };
+const SHOWN_HEAD = 120, SHOWN_TAIL = 60;
 
 function renderList(key: string, items: string[]): string[] {
-  const shown = (xs: string[]) => xs.map((x) => `  - ${showValueStrict(x)}`);
+  const [head, tail] = LONG_LINE[key] ?? [SHOWN_HEAD, SHOWN_TAIL];
+  const shown = (xs: string[]) => xs.map((x) => `  - ${showValueStrict(x, head, tail)}`);
   if (items.length <= LIST_FULL_MAX) return [`${key} (${items.length}):`, ...shown(items)];
   const perFolder = new Map<string, number>();
-  for (const it of items) perFolder.set(parentOf(it), (perFolder.get(parentOf(it)) ?? 0) + 1);
+  for (const it of items) { const f = parentOf(leadPath(it)); perFolder.set(f, (perFolder.get(f) ?? 0) + 1); }
   const folders = [...perFolder].sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1));
   return [
     `${key} (${items.length}): only the first ${LIST_FULL_MAX} are listed; counts per folder first`,
@@ -125,6 +137,19 @@ function renderField(key: string, v: FieldValue): string[] {
   return [`${key}: ${showValueStrict(v)}${RECOGNISED.has(key) && typeof v === "string" ? nonAsciiNote(v) : ""}`];
 }
 
+/**
+ * drive_cleanup: `trash` (paths) and `keeps` (the kept copy of each, "" for an empty folder) are parallel lists. Each path gets a line of its
+ * own with a generous limit (600 characters before the middle is elided), so the copy that is kept is always visible. The cap of 50 items per
+ * call (CLEANUP_CAP) keeps the whole list within what is shown in full; a longer list falls back to counts per folder of the trashed paths.
+ */
+function renderCleanupList(trash: string[], keeps: string[]): string[] {
+  if (trash.length > LIST_FULL_MAX) return renderList("trash", trash);
+  return [
+    `trash (${trash.length}):`,
+    ...trash.flatMap((t, i) => [`  - ${showValueStrict(t, 400, 200)}`, keeps[i] ? `    keeps: ${showValueStrict(keeps[i], 400, 200)}` : "    (empty folder)"]),
+  ];
+}
+
 /** The text the human sees (and the store records). Every line is server-composed; values are neutralised and cannot add or reorder lines. */
 export function renderOperation(op: Operation): string {
   const title = TOOL_TITLES[op.tool];
@@ -138,7 +163,9 @@ export function renderOperation(op: Operation): string {
   for (const k of keys) if (!KEY_OK.test(k)) throw new Error(`approval: invalid field name ${showValueStrict(k)}`);
   const rank = (k: string) => { const i = FIELD_ORDER.indexOf(k); return i < 0 ? FIELD_ORDER.length : i; };
   keys.sort((x, y) => rank(x) - rank(y) || (x < y ? -1 : x > y ? 1 : 0));
-  return [`${op.tool}: ${title} (${EFFECT_LABEL[op.effect]})`, ...keys.flatMap((k) => renderField(k, shown[k]))].join("\n");
+  const cleanup = op.tool === "drive_cleanup" && Array.isArray(shown.trash) && Array.isArray(shown.keeps) && shown.keeps.length === shown.trash.length;
+  const body = (k: string): string[] => (cleanup && k === "trash" ? renderCleanupList(shown.trash as string[], shown.keeps as string[]) : cleanup && k === "keeps" ? [] : renderField(k, shown[k]));
+  return [`${op.tool}: ${title} (${EFFECT_LABEL[op.effect]})`, ...keys.flatMap(body)].join("\n");
 }
 
 // ---- Mode -------------------------------------------------------------------------------------------------------
@@ -160,12 +187,13 @@ export function resolveApprovalMode(env: string | undefined | Record<string, str
 
 // ---- Which operations need a human --------------------------------------------------------------------------------
 
-/** Default-mode gated set: the 18 gated before 1.11.0 plus drive_invitation_accept and the /shared-with-me destinations. Some entries are gated only conditionally, see requiresApproval. */
+/** Default-mode gated set: the 18 gated before 1.11.0 plus drive_invitation_accept, the /shared-with-me destinations and (1.12.0) the apply step of drive_cleanup and drive_undo. Some entries are gated only conditionally, see requiresApproval. */
 export const GATED_TOOLS: ReadonlySet<string> = new Set([
   "drive_auth_logout", "drive_delete", "drive_empty_trash", "drive_share_invite", "drive_share_revoke", "drive_share_set_url",
   "drive_share_remove_url", "drive_share_remove_all", "drive_share_leave", "drive_invitation_reject", "photos_delete_album",
   "photos_remove_from_album", "drive_bulk_move", "drive_bulk_trash", "drive_upload", "drive_download", "photos_download", "drive_write_file",
   "drive_invitation_accept", "drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_trash", "drive_restore",
+  "drive_cleanup", "drive_undo",
 ]);
 
 const ALWAYS = new Set([
@@ -173,7 +201,7 @@ const ALWAYS = new Set([
   "drive_share_remove_url", "drive_share_remove_all", "drive_share_leave", "drive_invitation_reject", "drive_invitation_accept",
   "photos_delete_album", "photos_remove_from_album",
 ]);
-const BULK = new Set(["drive_bulk_move", "drive_bulk_trash"]);
+const BULK = new Set(["drive_bulk_move", "drive_bulk_trash", "drive_cleanup"]);
 // Outward when any path the operation reads from or ends up at (either side) is under /shared-with-me.
 const SHARED_DEST = new Set(["drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_bulk_move", "drive_upload", "drive_write_file", "drive_trash", "drive_bulk_trash", "drive_restore"]);
 const PATH_ARGS = ["destinationPath", "destinationFolder", "remotePath", "path", "sourcePath", "sources", "paths"];
@@ -203,6 +231,7 @@ export function requiresApproval(tool: string, args: Record<string, unknown>, mo
   if (BULK.has(tool)) {
     return ctx.apply ?? args.confirmed === true; // a plan (no apply) changes nothing
   }
+  if (tool === "drive_undo") return ctx.apply ?? args.action === "apply"; // list and plan change nothing
   const isRemove = (...ks: string[]) => ks.some((k) => args[k] === "remove");
   if ((tool === "drive_download" && isRemove("fileConflictStrategy", "folderConflictStrategy")) || (tool === "photos_download" && isRemove("conflictStrategy"))) return true;
   if (mode === "strict") {

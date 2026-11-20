@@ -35,6 +35,11 @@ import { createApprovalStore, resolveApprovalDir, type ApprovalStore } from "./u
 import { driveSearch, driveTree } from "./services/find.js";
 import { readDriveContent } from "./services/content.js";
 import { driveUsage, driveFindDuplicates, driveSharingAudit } from "./services/analytics.js";
+import { runCheckup } from "./services/cleanupRun.js";
+import { CHECKUP_FINDINGS, type CheckupFinding, type CheckupFindingSummary, type CheckupPage, type CheckupSummary } from "./services/checkup.js";
+import { openUndoJournal, type JournalOpen } from "./services/undoRecord.js";
+import { planUndo, applyUndo, UndoError, type UndoDrive, type UndoPlanResult } from "./services/undo.js";
+import { parseRemoteRoots, pathInRoots } from "./utils/remoteroots.js";
 import { validateRemotePath, validateRemotePathList, validateLocalPath, validateDownloadTarget, validateEmail, validateMessage, validateName, validateFlagValue } from "./utils/validation.js";
 
 const drive = new DriveService();
@@ -87,6 +92,11 @@ Commands:
                                            Storage analytics: totals, largest files/folders, breakdowns, trash (sum of file sizes, not the quota)
   duplicates [path] [--min-size B] [--verify] [--max-verify-bytes B] [--max-verify-total-bytes B] [--limit N] [--refresh]
                                            Likely duplicate files; --verify downloads and hashes candidates. Never deletes.
+  checkup [path] [--finding <id>] [--no-sharing] [--refresh] [--limit N] [--offset N]
+                                           Drive health check: score, findings (duplicates, empty-folders, large-old, public-links,
+                                           outside-access, sensitive-exposed, trash). --finding lists that finding's items, paged. Read-only.
+  undo [--list] [<id>] [--confirm]         Undo a recorded change (trash, move, rename). --list shows recent batches; without --confirm
+                                           prints the plan only; --confirm applies exactly that plan (default id: newest not yet undone)
   trash empty --confirm                    Permanently delete all trash
   restore <path>|--uid <uid>               Restore from trash (uid from 'trash list')
   invitation list                          List pending invitations
@@ -223,6 +233,111 @@ function listApprovals(store: ApprovalStore) {
   if (jsonMode) { console.log(JSON.stringify(rows)); return; }
   if (rows.length === 0) { console.log("No pending approvals."); return; }
   for (const r of rows) console.log(`${r.code}  ${r.status.padEnd(8)}  ${r.tool}  expires in ${Math.floor(r.expiresInSeconds / 60)}m${String(r.expiresInSeconds % 60).padStart(2, "0")}s  ${r.summary}`);
+}
+
+function fmtBytes(n: number | undefined): string {
+  if (n === undefined) return "?";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${i === 0 ? v : v.toFixed(1)} ${u[i]}`;
+}
+
+function findingLine(f: CheckupFindingSummary): string[] {
+  const size = f.bytes !== undefined ? `, ${fmtBytes(f.bytes)}` : "";
+  const fix = f.fix === "drive_cleanup" ? `fix: ask the assistant (drive_cleanup)${f.fixableCount !== undefined ? `, ${f.fixableCount} fixable` : ""}` : f.fix === "manual" ? "fix: manual" : "";
+  const lines = [`  [${f.severity}] ${f.id.padEnd(18)} ${String(f.count).padStart(5)}${size}${fix ? `  (${fix})` : ""}`];
+  for (const s of f.samples.slice(0, 3)) lines.push(`        ${s}`);
+  return lines;
+}
+
+/** Readable text for a drive_checkup summary or one finding page. */
+export function formatCheckup(data: CheckupSummary | (CheckupPage & { path: string; caveats?: string[] })): string {
+  const out: string[] = [];
+  if ("findings" in data) {
+    const sc = data.scanned;
+    out.push(`Drive checkup of ${data.path}: score ${data.score}/100`);
+    out.push(`Scanned ${sc.files} files, ${sc.folders} folders, ${fmtBytes(sc.bytes)}${sc.complete ? "" : " (incomplete)"}${sc.partial ? " (partial: run again in a minute)" : ""}`);
+    out.push("");
+    for (const f of data.findings) out.push(...findingLine(f));
+    out.push(`  trash: ${data.trash.count} items, ${fmtBytes(data.trash.bytes)}`);
+  } else {
+    out.push(`${data.finding} in ${data.path}: ${data.total} total, showing ${data.items.length} from offset ${data.offset}`);
+    for (const it of data.items) out.push(`  ${it.path}${typeof it.size === "number" ? `  (${fmtBytes(it.size)})` : ""}`);
+    if (data.nextOffset !== undefined) out.push(`More: --offset ${data.nextOffset}`);
+    if (data.note) out.push(data.note);
+  }
+  for (const c of data.caveats ?? []) out.push(`Note: ${c}`);
+  return out.join("\n");
+}
+
+async function checkupCommand(sub: string | undefined) {
+  const finding = getFlag("--finding");
+  if (finding !== undefined && !(CHECKUP_FINDINGS as readonly string[]).includes(finding)) {
+    console.error(`--finding must be one of: ${CHECKUP_FINDINGS.join(", ")}`);
+    process.exit(1);
+  }
+  const data = await runCheckup(drive, {
+    path: pathOrRoot(sub),
+    finding: finding as CheckupFinding | undefined,
+    limit: intFlag("--limit"),
+    offset: intFlag("--offset"),
+    sharing: !args.includes("--no-sharing"),
+    refresh: args.includes("--refresh"),
+    skipTrash: parseRemoteRoots(process.env.PROTON_DRIVE_REMOTE_ROOTS) !== null,
+  });
+  if (jsonMode) console.log(JSON.stringify(data));
+  else console.log(formatCheckup(data as CheckupSummary));
+}
+
+export interface UndoIO { stdout: { write(s: string): unknown }; stderr: { write(s: string): unknown } }
+
+function formatUndoPlan(p: UndoPlanResult): string {
+  const out = [`Undo plan for ${p.id}: ${p.tool} (${p.kind}), ${p.when}, status ${p.status}`];
+  if (p.restore.length) out.push(`Would restore from trash (${p.restore.length}):`, ...p.restore.map((x) => `  ${x}`));
+  if (p.moveBack.length) out.push(`Would move back (${p.moveBack.length}):`, ...p.moveBack.map((x) => `  ${x}`));
+  const skipped = p.items.filter((i) => !i.restorable);
+  if (skipped.length) out.push(`Cannot restore (${skipped.length}):`, ...skipped.map((i) => `  ${i.path}: ${i.reason ?? "not restorable"}`));
+  out.push(`Restorable: ${p.restorableCount} of ${p.items.length}`);
+  return out.join("\n");
+}
+
+/**
+ * `undo [--list] [<id>] [--confirm]`; returns the exit code. The CLI is a human tool outside the guard layer, so --confirm is the approval
+ * (as for bulk-trash). With --confirm the plan is printed, then applied with the fingerprint of that printed plan: applyUndo re-plans and
+ * refuses when anything differs.
+ */
+export async function undoCommand(
+  d: UndoDrive, jo: JournalOpen, o: { list: boolean; id?: string; confirm: boolean; json: boolean; isPathAllowed?: (p: string) => boolean }, io: UndoIO,
+): Promise<number> {
+  if (!jo.journal) { io.stderr.write(`${jo.reason}\n`); return 1; }
+  const journal = jo.journal;
+  try {
+    if (o.list) {
+      const r = await planUndo(d, journal, { action: "list" });
+      if (o.json) io.stdout.write(`${JSON.stringify(r)}\n`);
+      else if (r.batches.length === 0) io.stdout.write("No recorded batches.\n");
+      else for (const b of r.batches) io.stdout.write(`${b.id}  ${b.when}  ${b.tool}  ${b.kind}  ${b.items} item(s)  ${b.status}\n`);
+      return 0;
+    }
+    const plan = await planUndo(d, journal, { action: "plan", id: o.id, isPathAllowed: o.isPathAllowed });
+    if (!o.confirm) {
+      io.stdout.write(o.json ? `${JSON.stringify({ applied: false, ...plan })}\n` : `${formatUndoPlan(plan)}\n`);
+      io.stderr.write("Plan only. Pass --confirm to apply.\n");
+      return 0;
+    }
+    if (!o.json) io.stdout.write(`${formatUndoPlan(plan)}\n`);
+    const result = await applyUndo(d, journal, { id: plan.id, expectedFingerprint: plan.fingerprint, isPathAllowed: o.isPathAllowed });
+    if (o.json) io.stdout.write(`${JSON.stringify({ applied: true, plan, result })}\n`);
+    else {
+      io.stdout.write(`Undone ${result.undone} item(s)${result.alreadyInPlace ? `, ${result.alreadyInPlace} already in place` : ""}; batch ${result.id} is now ${result.status}.\n`);
+      for (const f of result.failed) io.stdout.write(`  not restored: ${f.path}: ${f.reason}\n`);
+    }
+    return result.status === "undone" ? 0 : 1;
+  } catch (e) {
+    io.stderr.write(`${e instanceof UndoError || e instanceof Error ? e.message : String(e)}\n`);
+    return 1;
+  }
 }
 
 function setupClaudeDesktop() {
@@ -549,6 +664,20 @@ async function run() {
         refresh: args.includes("--refresh"),
       }));
       break;
+
+    case "checkup":
+      await checkupCommand(sub);
+      break;
+
+    case "undo": {
+      const roots = parseRemoteRoots(process.env.PROTON_DRIVE_REMOTE_ROOTS);
+      const id = sub && !sub.startsWith("--") ? sub : rest.find((r) => !r.startsWith("--"));
+      process.exitCode = await undoCommand(drive, await openUndoJournal(drive), {
+        list: args.includes("--list"), id, confirm: args.includes("--confirm"), json: jsonMode,
+        isPathAllowed: roots ? (p) => pathInRoots(p, roots, true) : undefined,
+      }, process);
+      break;
+    }
 
     case "trash":
       if (sub === "empty") {

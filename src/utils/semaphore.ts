@@ -7,6 +7,19 @@ export class Semaphore {
     this.free = capacity;
   }
 
+  /** Takes a slot only if one is free right now (never waits); returns its one-shot release function, or undefined when all are taken. */
+  tryAcquire(): (() => void) | undefined {
+    if (this.free <= 0) return undefined;
+    this.free--;
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      const next = this.waiters.shift();
+      if (next) next(); else this.free++;
+    };
+  }
+
   /** Resolves with a one-shot release function; rejects (without taking a slot) if `signal` aborts while queued. */
   acquire(signal?: AbortSignal): Promise<() => void> {
     if (signal?.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));

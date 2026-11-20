@@ -4,7 +4,7 @@
   "display_name": "Proton Drive",
   "version": "0.0.0",
   "description": "Give Claude access to your Proton Drive: list, upload, download, share and manage end-to-end encrypted files via the official proton-drive CLI.",
-  "long_description": "Upload, download, search, share, move, trash and manage your Proton Drive files and photos from Claude Desktop. This extension wraps the official proton-drive CLI, so files stay end-to-end encrypted and nothing goes through a third-party relay.\n\nDestructive or outward-facing actions (deleting, sharing, public links, replacing files) need your approval, asked by the extension itself. If Claude Desktop cannot show that question, the action is refused until you approve it in a terminal with proton-drive-cli approve. Requires the official proton-drive CLI to be installed and signed in (run `proton-drive auth login` once). Enter the path to the CLI in the settings field below: run `which proton-drive` in a terminal (usually ~/.local/bin/proton-drive).",
+  "long_description": "Upload, download, search, share, move, trash and manage your Proton Drive files and photos from Claude Desktop. This extension wraps the official proton-drive CLI, so files stay end-to-end encrypted and nothing goes through a third-party relay.\n\nA folder checkup reports duplicates, empty folders, risky sharing and trash; a cleanup moves redundant copies to the trash from a list the server builds, and an undo puts recorded changes back while the items are still in the trash. Destructive or outward-facing actions (deleting, sharing, public links, replacing files) need your approval, asked by the extension itself. If Claude Desktop cannot show that question, the action is refused until you approve it in a terminal with proton-drive-cli approve. Requires the official proton-drive CLI to be installed and signed in (run `proton-drive auth login` once). Enter the path to the CLI in the settings field below: run `which proton-drive` in a terminal (usually ~/.local/bin/proton-drive).",
   "author": {
     "name": "googlarz",
     "url": "https://github.com/googlarz"
@@ -192,6 +192,14 @@
       "description": "Trash many items on Proton Drive (recoverable); returns a plan first, applies only with confirmed=true."
     },
     {
+      "name": "drive_cleanup",
+      "description": "Trash redundant duplicate copies and empty folders under a path; nothing is deleted. The server builds the list from a fresh scan (you name no files), shows it for approval and trashes only if Drive is unchanged. Returns a plan without confirmed=true."
+    },
+    {
+      "name": "drive_undo",
+      "description": "Undo a recorded batch (cleanup, trash, bulk trash, move, bulk move, rename): restores items from the trash or moves them back, each verified by id; nothing is overwritten. Works while items are in the trash and names are unique there. Applying always asks the user."
+    },
+    {
       "name": "drive_restore",
       "description": "Restore a trashed file or folder back to its original Proton Drive path."
     },
@@ -288,6 +296,10 @@
       "description": "Find likely duplicate files in Proton Drive (claimed sha1, same size, or hash-verified); suggests a keeper, never deletes."
     },
     {
+      "name": "drive_checkup",
+      "description": "Health report for a folder in one call: exact-duplicate candidates, empty folders, large old files, public links, outside access, sensitive-looking names in shared items, trash. Score 0-100 and at most 3 example paths per finding. Names, sizes, dates and sharing only; changes nothing."
+    },
+    {
       "name": "drive_sharing_audit",
       "description": "Audit public links, invitees and risk flags across shared items in Proton Drive."
     },
@@ -346,6 +358,14 @@
       "name": "sharing-audit",
       "description": "Review what is shared from your Proton Drive and explain the risks.",
       "text": "Audit what I share from Proton Drive.\nUse drive_sharing_audit to list shared folders, members, pending invitations and public links. Explain the risks in plain language (for example public links without a password, editors who no longer need access, stale invitations) and suggest what to tighten. Do not revoke anything without my explicit OK."
+    },
+    {
+      "name": "drive-checkup",
+      "description": "Give a Proton Drive folder a health checkup: duplicates, empty folders, risky sharing and trash, with an offer to clean up that can be undone.",
+      "arguments": [
+        "path"
+      ],
+      "text": "Give my Proton Drive folder ${arguments.path} a checkup.\n1. Call drive_checkup for that path and summarise the result in plain language: the score, what matters most, and what each finding means. Say if the scan was incomplete.\n2. If it lists duplicates or empty folders, offer drive_cleanup for them. Everything it removes goes to the trash and can be undone. Show me the plan first; the server asks me to approve the exact list itself.\n3. Mention that drive_undo puts back what drive_cleanup (or an earlier trash, move or rename) changed, while the items are still in the trash.\nSharing risks and large old files are for me to decide: describe them, change nothing."
     }
   ],
   "compatibility": {

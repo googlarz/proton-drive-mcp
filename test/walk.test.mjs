@@ -48,6 +48,52 @@ const clearWalkEnv = () => { for (const k of ["PROTON_DRIVE_WALK_TTL_MS", "PROTO
 beforeEach(() => { resetWalkCacheForTests(); invalidatePath("/"); clearWalkEnv(); });
 afterEach(async () => { abortBackgroundRefreshes(); await flushWalkIndexForTests(); resetWalkCacheForTests(); clearWalkEnv(); });
 
+describe("walkTree: fresh and unidentifiable entries (1.12.0 review fixes)", () => {
+  it("two overlapping walks of the same folder share one run by default; fresh starts its own and the older one stops filling the cache", async () => {
+    const shared = makeSvc(small(), { delay: 30 });
+    const [x, y] = await Promise.all([walkTree(shared.svc, "/my-files", { refresh: true }), (async () => { await sleep(10); return walkTree(shared.svc, "/my-files", { refresh: true }); })()]);
+    assert.equal(x.nodes.length, y.nodes.length);
+    assert.equal(shared.stats.calls.length, 4, "joined: the folders were listed once");
+    resetWalkCacheForTests();
+    const own = makeSvc(small(), { delay: 30 });
+    const first = walkTree(own.svc, "/my-files", { refresh: true });
+    await sleep(10);
+    const second = walkTree(own.svc, "/my-files", { refresh: true, fresh: true });
+    const [a, b] = await Promise.all([first, second]);
+    assert.equal(a.complete && b.complete, true);
+    assert.equal(own.stats.calls.length, 8, "fresh: every folder listed again by a walk of its own");
+    assert.equal(own.stats.calls.filter((c) => c === "/my-files/a").length, 2);
+  });
+
+  it("R2-4: a walk that nobody waits for any more (it returned partial) stops listing when a fresh walk replaces it, and never writes the cache", async () => {
+    const tree = { "/my-files": Array.from({ length: 8 }, (_, i) => folder(`f${i}`, i)) };
+    for (let i = 0; i < 8; i++) tree[`/my-files/f${i}`] = [file(`x${i}.txt`, 1)];
+    const { svc, stats } = makeSvc(tree, { delay: 30 });
+    const partial = await walkTree(svc, "/my-files", { refresh: true, concurrency: 1, budgetMs: 40 });
+    assert.equal(partial.partial, true, "the first caller got a partial result and left; its walk goes on in the background");
+    const before = stats.calls.length;
+    const full = await walkTree(svc, "/my-files", { refresh: true, fresh: true, concurrency: 1, budgetMs: 0 });
+    assert.equal(full.complete, true);
+    assert.equal(full.nodes.length, 16);
+    await sleep(400); // long enough for the abandoned walk to have finished all its listings if it had not been stopped
+    assert.ok(stats.calls.length - before <= 9 + 2, `the superseded walk kept listing: ${stats.calls.length - before} calls after it was replaced`);
+    const cached = await walkTree(svc, "/my-files");
+    assert.equal(cached.fromCache, true);
+    assert.equal(cached.complete, true);
+  });
+
+  it("an entry listed without a uid is reported as skipped (the walk is incomplete), not dropped silently", async () => {
+    const tree = small();
+    tree["/my-files/b"] = [file("z.txt", 7), { type: "file", name: { ok: true, value: "ghost.txt" }, activeRevision: { claimedSize: 3 } }];
+    const { svc } = makeSvc(tree);
+    const r = await walkTree(svc, "/my-files");
+    assert.equal(r.complete, false);
+    assert.deepEqual(r.skipped, [{ path: "/my-files/b/ghost.txt", reason: "listed without a uid (cannot be identified)" }]);
+    assert.ok(!r.nodes.some((n) => n.path.endsWith("ghost.txt")));
+    assert.ok(r.nodes.some((n) => n.path === "/my-files/b/z.txt"), "the identifiable entries are still there");
+  });
+});
+
 describe("walkTree", () => {
   it("collects every node with full metadata, excluding .git by default", async () => {
     const { svc, stats } = makeSvc(small());

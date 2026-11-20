@@ -12,6 +12,18 @@
 //                     (missing entry -> "Item not found" exit 1; a string entry is written to stderr, exit 1). Other commands print "[]".
 //   FAKE_INFO         fs mode: path to a JSON file {"<path>": node}; `filesystem info <path>` prints that node (missing -> "Node not found" exit 1).
 //                     FAKE_FAIL_CMD makes `filesystem <that subcommand>` (e.g. copy) fail with "boom". Everything else prints "[]".
+//   FAKE_STATE        drive mode (stateful in-memory-on-disk Drive for the undo engine / cleanup tests): path to a JSON file
+//                     {"nodes": {"<uid>": {uid, parentUid, name, type: "file"|"folder", size?, trashTime?}}}; the root folder is uid "root"
+//                     (served as /my-files). Supports `filesystem` list | info | trash | restore | move | rename with the real CLI's rules:
+//                     /trash/<name> resolves to the FIRST trashed node of that name, restore/move report per-item {uid, ok, error} with exit 0,
+//                     a missing path fails the whole call (exit 1) before anything is applied, tests may edit the state file between calls.
+//                     Optional per-node fields: sha1 (claimedDigests.sha1), mtime (claimedModificationTime), mediaType, shared / sharedByUrl (the
+//                     isShared / isSharedByUrl listing flags), sharing (the raw `sharing status` payload, default {}) and noUid (listed without a uid).
+//                     A node "swm" (name shared-with-me, parentUid null) serves /shared-with-me.
+//   FAKE_FAIL_UIDS         drive mode: comma list of uids whose restore/move reports ok:false (exit 0)
+//   FAKE_FAIL_TRASH_UIDS   drive mode: comma list of uids whose trash reports ok:false (exit 0); the others are trashed
+//   FAKE_FAIL_LIST_UIDS    drive mode: comma list of folder uids whose `filesystem list` fails (exit 1), to simulate a folder the walk cannot read
+//   FAKE_LIE_UIDS          drive mode: comma list of uids whose restore/move reports ok:true but changes nothing
 //   FAKE_COUNTER      locked-then-json: file holding the number of calls so far
 //   FAKE_LOCKED_TIMES locked-then-json: how many calls fail with "database is locked" (default 2)
 //   FAKE_TRANSIENT_KIND   transient-then-json: ratelimit | timeout | reset | retryafter | notfound (counter via FAKE_COUNTER)
@@ -185,6 +197,116 @@ switch (mode) {
       process.stdout.write("[]\n");
     }
     process.exit(0);
+    break;
+  }
+  case "drive": {
+    const statePath = process.env.FAKE_STATE;
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    const nodes = state.nodes;
+    const csv = (v) => new Set((v ?? "").split(",").filter(Boolean));
+    const failUids = csv(process.env.FAKE_FAIL_UIDS);
+    const lieUids = csv(process.env.FAKE_LIE_UIDS);
+    const save = () => writeFileSync(statePath, JSON.stringify(state));
+    const fail = (msg) => { process.stderr.write(msg + "\n"); process.exit(1); };
+    const out = (v) => { process.stdout.write(JSON.stringify(v) + "\n"); process.exit(0); };
+    const live = (n) => n.trashTime === undefined;
+    const splitPath = (p) => {
+      const parts = []; let cur = "";
+      for (let i = 1; i < p.length; i++) {
+        if (p[i] === "/" && p[i - 1] !== "\\") { parts.push(cur); cur = ""; } else cur += p[i];
+      }
+      parts.push(cur);
+      return parts.map((x) => x.replace(/\\\//g, "/"));
+    };
+    const kids = (uid) => Object.values(nodes).filter((n) => n.parentUid === uid && live(n));
+    const resolve = (p) => {
+      const parts = splitPath(p);
+      if (parts[0] === "trash") return parts.length === 2 ? Object.values(nodes).find((n) => !live(n) && n.name === parts[1]) : undefined;
+      // /my-files is the node "root"; /shared-with-me is the node "swm" when a test defines one.
+      let cur = parts[0] === "my-files" ? nodes.root : parts[0] === "shared-with-me" ? nodes.swm : undefined;
+      if (!cur) return undefined;
+      for (const part of parts.slice(1)) {
+        cur = kids(cur.uid).find((n) => n.name === part);
+        if (!cur) return undefined;
+      }
+      return cur;
+    };
+    const asItem = (n) => ({
+      uid: n.noUid ? undefined : n.uid, parentUid: n.parentUid, name: { ok: true, value: n.name }, type: n.type,
+      activeRevision: n.type === "file"
+        ? { claimedSize: n.size ?? 0, ...(n.mtime ? { claimedModificationTime: n.mtime } : {}), ...(n.sha1 ? { claimedDigests: { sha1: n.sha1 } } : {}) }
+        : undefined,
+      ...(n.mediaType ? { mediaType: n.mediaType } : {}),
+      isShared: n.shared === true, isSharedByUrl: n.sharedByUrl === true,
+      ...(n.trashTime ? { trashTime: n.trashTime } : {}),
+    });
+    const err = (name, code, message) => ({ name, code, message });
+    const [group, sub, ...rest] = argv.filter((a) => a !== "--json");
+    const failTrashUids = csv(process.env.FAKE_FAIL_TRASH_UIDS);
+    if (group === "sharing" && sub === "status") {
+      const node = resolve(rest[0]);
+      if (!node) fail(`Node not found: ${rest[0]}`);
+      out(node.sharing ?? {});
+    }
+    if (group !== "filesystem") out([]);
+    if (sub === "list") {
+      const p = rest[0];
+      if (p === "/") out([{ path: "/my-files" }, { path: "/trash" }]);
+      if (p === "/trash") out(Object.values(nodes).filter((n) => !live(n)).map(asItem));
+      const node = resolve(p);
+      if (!node || node.type !== "folder") fail(`Item not found: ${p}`);
+      if (csv(process.env.FAKE_FAIL_LIST_UIDS).has(node.uid)) fail(`injected list failure: ${p}`);
+      out(kids(node.uid).map(asItem));
+    } else if (sub === "info") {
+      const node = resolve(rest[0]);
+      if (!node) fail(`Node not found: ${rest[0]}`);
+      out(asItem(node));
+    } else if (sub === "trash") {
+      const targets = rest.map((p) => resolve(p) ?? fail(`Item not found: ${p}`));
+      const results = targets.map((n) => {
+        if (failTrashUids.has(n.uid)) return { uid: n.uid, ok: false, error: err("APICodeError", 2999, "injected failure") };
+        n.trashTime = "2026-11-19T10:00:00Z";
+        return { uid: n.uid, ok: true };
+      });
+      save();
+      out(results);
+    } else if (sub === "restore") {
+      const targets = rest.map((p) => resolve(p) ?? fail(`Item not found: ${p}`));
+      const results = targets.map((n) => {
+        if (failUids.has(n.uid)) return { uid: n.uid, ok: false, error: err("APICodeError", 2999, "injected failure") };
+        if (lieUids.has(n.uid)) return { uid: n.uid, ok: true };
+        const parent = nodes[n.parentUid];
+        if (!parent || !live(parent)) return { uid: n.uid, ok: false, error: err("APICodeError", 2511, "parent in trash") };
+        if (kids(parent.uid).some((k) => k.name === n.name)) return { uid: n.uid, ok: false, error: err("NodeWithSameNameExistsValidationError", 2500, "name taken") };
+        delete n.trashTime;
+        return { uid: n.uid, ok: true };
+      });
+      save();
+      out(results);
+    } else if (sub === "move") {
+      const dstPath = rest[rest.length - 1];
+      const dst = resolve(dstPath);
+      if (!dst || dst.type !== "folder") fail(`Item not found: ${dstPath}`);
+      const targets = rest.slice(0, -1).map((p) => resolve(p) ?? fail(`Item not found: ${p}`));
+      const results = targets.map((n) => {
+        if (failUids.has(n.uid)) return { uid: n.uid, ok: false, error: err("APICodeError", 2999, "injected failure") };
+        if (lieUids.has(n.uid)) return { uid: n.uid, ok: true };
+        if (kids(dst.uid).some((k) => k.name === n.name)) return { uid: n.uid, ok: false, error: err("NodeWithSameNameExistsValidationError", 2500, "name taken") };
+        n.parentUid = dst.uid;
+        return { uid: n.uid, ok: true };
+      });
+      save();
+      out(results);
+    } else if (sub === "rename") {
+      const node = resolve(rest[0]);
+      if (!node) fail(`Item not found: ${rest[0]}`);
+      if (kids(node.parentUid).some((k) => k.name === rest[1])) fail(`NodeWithSameNameExistsValidationError: ${rest[1]}`);
+      node.name = rest[1];
+      save();
+      out(asItem(node));
+    } else {
+      out([]);
+    }
     break;
   }
   case "size-legacy":

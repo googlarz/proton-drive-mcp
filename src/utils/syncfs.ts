@@ -1,6 +1,7 @@
 import { open, mkdir, realpath, lstat, stat, copyFile } from "node:fs/promises";
 import { constants as fsc } from "node:fs";
 import { join, resolve, dirname, basename, relative, isAbsolute, sep } from "node:path";
+import { assertWriteTargetAllowed } from "./localguard.js";
 
 const READ_LIMIT = 1 * 1024 * 1024; // 1 MB — prevent context overflow
 const WRITE_LIMIT = 5 * 1024 * 1024; // 5 MB — cap content written via MCP
@@ -185,6 +186,7 @@ export async function writeSyncFile(
   if (relative(resolve(syncRoot), full).toLowerCase().split(sep).includes(".versions")) {
     throw new Error(`refusing to write inside a .versions snapshot folder: ${remotePath}`);
   }
+  assertWriteTargetAllowed(full); // before anything is created: not the audit log, the approvals folder or the undo journal folder
   const realRoot = await realRootOf(syncRoot, remotePath);
   const name = basename(full);
   const parent = dirname(full);
@@ -196,6 +198,7 @@ export async function writeSyncFile(
   assertInside(realRoot, realParent, remotePath);
 
   const target = join(realParent, name);
+  assertWriteTargetAllowed(target); // the same check on the resolved location (a symlinked folder)
   try {
     if ((await lstat(target)).isSymbolicLink()) {
       throw new Error(`refusing to write through a symlink: ${remotePath}`);

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { resolve, dirname, basename, join, relative, isAbsolute, sep, delimiter } from "node:path";
 
 import { resolveApprovalDir } from "./approvalStore.js";
+import { resolveUndoDir } from "./undoJournal.js";
 
 const HOME_DENY = [
   ".ssh",
@@ -191,12 +192,13 @@ function assertNotWriteProtected(lexical: string, real: string, absPath: string,
       if (contains && (isInside(real, rf) || isInside(lexical, rf))) throw new Error(`the item would be written over a folder that holds the audit log, which cannot be written: ${absPath}`);
     }
   }
-  // The approvals folder holds the human's yes/no records: no local write may reach it, equal it, or (for write targets) contain it.
-  const approvals = realResolve(resolveApprovalDir(process.env));
-  const approvalsLex = resolve(resolveApprovalDir(process.env));
-  for (const a of new Set([approvals, approvalsLex])) {
-    if (isInside(a, real) || isInside(a, lexical)) throw new Error(`local path is the approvals folder and cannot be written: ${absPath}`);
-    if (contains && (isInside(real, a) || isInside(lexical, a))) throw new Error(`the item would be written over a folder that holds the approvals folder, which cannot be written: ${absPath}`);
+  // The approvals folder holds the human's yes/no records and the undo journal what `drive_undo` puts back: no local write may
+  // reach either, equal it, or (for write targets) contain it.
+  for (const [dir, label] of [[resolveApprovalDir(process.env), "approvals folder"], [resolveUndoDir(process.env), "undo journal folder"]] as const) {
+    for (const a of new Set([realResolve(dir), resolve(dir)])) {
+      if (isInside(a, real) || isInside(a, lexical)) throw new Error(`local path is the ${label} and cannot be written: ${absPath}`);
+      if (contains && (isInside(real, a) || isInside(lexical, a))) throw new Error(`the item would be written over a folder that holds the ${label}, which cannot be written: ${absPath}`);
+    }
   }
   const sync = process.env["PROTON_DRIVE_SYNC_PATH"];
   if (sync && isAbsolute(sync)) {
@@ -211,15 +213,32 @@ function assertNotWriteProtected(lexical: string, real: string, absPath: string,
   }
 }
 
-/** Startup check: the approvals folder must not sit inside the sync folder (it would sync to Drive and be editable with drive_write_file). */
-export function assertApprovalDirUsable(dir: string, env: Record<string, string | undefined> = process.env): void {
+function assertOutsideSyncFolder(dir: string, env: Record<string, string | undefined>, message: string): void {
   const sync = env["PROTON_DRIVE_SYNC_PATH"];
   if (!sync || !isAbsolute(sync)) return;
   const d = realResolve(dir);
   const s = realResolve(sync);
-  if (isInside(s, d) || isInside(resolve(sync), resolve(dir))) {
-    throw new Error("The approvals folder (PROTON_DRIVE_APPROVAL_DIR) must be outside PROTON_DRIVE_SYNC_PATH (the sync folder is uploaded and can be edited with drive_write_file).");
-  }
+  if (isInside(s, d) || isInside(resolve(sync), resolve(dir))) throw new Error(message);
+}
+
+/**
+ * For a file that a tool is about to write (drive_write_file): refuses the audit log, a .versions snapshot folder, the approvals folder and
+ * the undo journal folder, whether or not they sit inside the sync folder (the startup check only covers a configured sync path; this
+ * covers every write, so a journal can never be planted through the sync folder, for example when the sync folder is $HOME).
+ */
+export function assertWriteTargetAllowed(absPath: string): void {
+  const lexical = resolve(absPath);
+  assertNotWriteProtected(lexical, realResolve(lexical), absPath, false);
+}
+
+/** Startup check: the approvals folder must not sit inside the sync folder (it would sync to Drive and be editable with drive_write_file). */
+export function assertApprovalDirUsable(dir: string, env: Record<string, string | undefined> = process.env): void {
+  assertOutsideSyncFolder(dir, env, "The approvals folder (PROTON_DRIVE_APPROVAL_DIR) must be outside PROTON_DRIVE_SYNC_PATH (the sync folder is uploaded and can be edited with drive_write_file).");
+}
+
+/** Same for the undo journal folder (PROTON_DRIVE_UNDO_DIR): a synced journal could be rewritten with drive_write_file to steer `drive_undo`. */
+export function assertUndoDirUsable(dir: string, env: Record<string, string | undefined> = process.env): void {
+  assertOutsideSyncFolder(dir, env, "The undo journal folder (PROTON_DRIVE_UNDO_DIR) must be outside PROTON_DRIVE_SYNC_PATH (the sync folder is uploaded and can be edited with drive_write_file).");
 }
 
 /**

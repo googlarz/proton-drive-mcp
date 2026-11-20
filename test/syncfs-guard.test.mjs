@@ -10,7 +10,7 @@ import {
   writeSyncFile,
   syncFileExists,
 } from "../dist/utils/syncfs.js";
-import { assertLocalPathAllowed, assertApprovalDirUsable } from "../dist/utils/localguard.js";
+import { assertLocalPathAllowed, assertApprovalDirUsable, assertUndoDirUsable } from "../dist/utils/localguard.js";
 import { validateDownloadTarget } from "../dist/utils/validation.js";
 
 describe("syncfs hardening", () => {
@@ -297,7 +297,7 @@ describe("assertLocalPathAllowed", () => {
 });
 
 describe("local path guard: case, start-up files, nested upload entries, write targets", () => {
-  const KEYS = ["HOME", "PROTON_DRIVE_LOCAL_ROOT", "PROTON_DRIVE_ALLOW_SENSITIVE_PATHS", "PROTON_DRIVE_AUDIT_LOG", "PROTON_DRIVE_SYNC_PATH", "PROTON_DRIVE_APPROVAL_DIR", "XDG_CACHE_HOME"];
+  const KEYS = ["HOME", "PROTON_DRIVE_LOCAL_ROOT", "PROTON_DRIVE_ALLOW_SENSITIVE_PATHS", "PROTON_DRIVE_AUDIT_LOG", "PROTON_DRIVE_SYNC_PATH", "PROTON_DRIVE_APPROVAL_DIR", "PROTON_DRIVE_UNDO_DIR", "XDG_CACHE_HOME"];
   const saved = {};
   const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   const setPlatform = (value) => Object.defineProperty(process, "platform", { ...realPlatform, value });
@@ -315,6 +315,7 @@ describe("local path guard: case, start-up files, nested upload entries, write t
     process.env.HOME = fakeHome;
     // keep the default approvals folder (under HOME) out of the way of tests that download into HOME
     process.env.PROTON_DRIVE_APPROVAL_DIR = join(base, "default-approvals-elsewhere");
+    process.env.PROTON_DRIVE_UNDO_DIR = join(base, "default-undo-elsewhere");
   });
   afterEach(() => {
     Object.defineProperty(process, "platform", realPlatform);
@@ -458,6 +459,74 @@ describe("local path guard: case, start-up files, nested upload entries, write t
     assertApprovalDirUsable(join(base, "elsewhere", "approvals"), env);
     assertApprovalDirUsable(join(base, "sync3-sibling"), env);
     assertApprovalDirUsable(join(sync, "in", "approvals"), {});
+  });
+
+  // 1.12.0: the undo journal folder gets the same protection as the approvals folder.
+  it("the undo journal folder (PROTON_DRIVE_UNDO_DIR) cannot be written, held, or reached through a symlink", async () => {
+    const t = join(base, "undo1");
+    const ud = join(t, "store", "undo");
+    await mkdir(ud, { recursive: true });
+    await mkdir(join(t, "sibling"), { recursive: true });
+    process.env.PROTON_DRIVE_UNDO_DIR = ud;
+    assert.throws(() => validateDownloadTarget(ud, ["/my-files/a.txt"]), /undo journal folder/);
+    assert.throws(() => validateDownloadTarget(join(t, "store"), ["/my-files/undo"]), /undo journal folder/);
+    assert.throws(() => validateDownloadTarget(t, ["/my-files/store"]), /undo journal folder/);
+    assert.throws(() => validateDownloadTarget(t, ["/photos/"]), /undo journal folder/);
+    assert.throws(() => assertLocalPathAllowed(join(ud, "K7Q2-M9XD.json")), /undo journal folder/);
+    assert.throws(() => assertLocalPathAllowed(ud), /undo journal folder/);
+    assertLocalPathAllowed(ud, { scan: true }); // reading stays possible
+    assert.equal(validateDownloadTarget(join(t, "sibling"), ["/my-files/a.txt"]), join(t, "sibling"));
+    const link = join(t, "sibling", "link");
+    await symlink(ud, link);
+    assert.throws(() => validateDownloadTarget(link, ["/my-files/a.txt"]), /undo journal folder/);
+    assert.throws(() => assertLocalPathAllowed(join(link, "x.json")), /undo journal folder/);
+  });
+
+  it("the default undo folder is protected (faked through HOME, mac and linux layouts)", async () => {
+    const h = join(base, "home6");
+    await mkdir(h, { recursive: true });
+    process.env.HOME = h;
+    delete process.env.PROTON_DRIVE_UNDO_DIR;
+    const def = process.platform === "darwin"
+      ? join(h, "Library", "Caches", "proton-drive-mcp", "undo")
+      : join(h, ".cache", "proton-drive-mcp", "undo");
+    await mkdir(def, { recursive: true });
+    assert.throws(() => validateDownloadTarget(def, ["/my-files/a.txt"]), /undo journal folder/);
+    assert.throws(() => validateDownloadTarget(dirname(def), ["/my-files/undo"]), /undo journal folder/);
+    assert.equal(validateDownloadTarget(join(h, "Documents"), ["/my-files/a.txt"]), join(h, "Documents"));
+  });
+
+  it("drive_write_file's target (writeSyncFile) can never be the undo journal or approvals folder, or lie inside them, whatever the sync path is", async () => {
+    const sync = join(base, "sync5");
+    const undo = join(sync, "state", "undo");
+    const appr = join(sync, "state", "approvals");
+    await mkdir(undo, { recursive: true });
+    await mkdir(appr, { recursive: true });
+    process.env.PROTON_DRIVE_UNDO_DIR = undo;
+    process.env.PROTON_DRIVE_APPROVAL_DIR = appr;
+    await assert.rejects(() => writeSyncFile(sync, "/my-files/state/undo/ABCD-EFGH.json", "{}"), /undo journal folder/);
+    await assert.rejects(() => writeSyncFile(sync, "/my-files/state/undo/tmp/x.json", "{}"), /undo journal folder/);
+    await assert.rejects(() => writeSyncFile(sync, "/my-files/state/approvals/pending/X.json", "{}"), /approvals folder/);
+    await assert.rejects(() => stat(join(undo, "ABCD-EFGH.json")), /ENOENT/);
+    // a symlinked folder that leads into the journal folder is caught on the resolved location
+    await symlink(undo, join(sync, "state", "link"));
+    await assert.rejects(() => writeSyncFile(sync, "/my-files/state/link/ABCD-EFGH.json", "{}"), /undo journal folder/);
+    // ordinary files in the sync folder, even next to them, are still written
+    await writeSyncFile(sync, "/my-files/state/notes.txt", "hello");
+    assert.equal(await readFile(join(sync, "state", "notes.txt"), "utf8"), "hello");
+  });
+
+  it("assertUndoDirUsable refuses a folder inside the sync folder only", async () => {
+    const sync = join(base, "sync4");
+    await mkdir(join(sync, "in"), { recursive: true });
+    const env = { PROTON_DRIVE_SYNC_PATH: sync };
+    assert.throws(() => assertUndoDirUsable(join(sync, "in", "undo"), env), /PROTON_DRIVE_UNDO_DIR.*outside PROTON_DRIVE_SYNC_PATH/);
+    assert.throws(() => assertUndoDirUsable(sync, env), /outside PROTON_DRIVE_SYNC_PATH/);
+    const viaLink = join(base, "sync4-link");
+    await symlink(sync, viaLink);
+    assert.throws(() => assertUndoDirUsable(join(viaLink, "undo"), env), /outside PROTON_DRIVE_SYNC_PATH/);
+    assertUndoDirUsable(join(base, "elsewhere", "undo"), env);
+    assertUndoDirUsable(join(sync, "in", "undo"), {});
   });
 
   it("a .versions snapshot folder inside the sync folder cannot be a write target", async () => {

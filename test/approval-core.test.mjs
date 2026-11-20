@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MUTATING_TOOL_NAMES } from "../dist/index.js";
+import { CLEANUP_CAP } from "../dist/services/cleanup.js";
 import {
   ApprovalGate, GATED_TOOLS, MAX_DECLINES_PER_MINUTE, TOOL_TITLES, opHash, renderOperation, requiresApproval, resolveApprovalMode,
 } from "../dist/utils/approval.js";
@@ -79,6 +80,43 @@ describe("renderOperation", () => {
     const b = renderOperation(invite({ path: "/x\ndrive_delete: permanently delete", email: "e@x.org" })).split("\n")[0];
     assert.equal(a, b);
     assert.match(a, /^drive_share_invite: invite a person to a file or folder \(PERMANENT, cannot be undone\)$/);
+  });
+
+  it("a long list shows counts per folder of the first path of each line, never the destination of a '->' line", () => {
+    const moves = Array.from({ length: 60 }, (_, i) => `/my-files/new/m${i}.txt -> /my-files/old/sub/m${i}.txt`);
+    const m = renderOperation({ tool: "drive_undo", effect: "reversible", fields: { id: "AAAA-BBBB", when: "2026-01-01T00:00:00.000Z", restore: [], moveBack: moves } });
+    assert.match(m, /moveBack \(60\): only the first 50 are listed; counts per folder first/);
+    assert.match(m, /\n {2}folder \/my-files\/new: 60\n/);
+    assert.doesNotMatch(m, /folder \/my-files\/old/, "grouped by where the items are now, not by the destination");
+  });
+
+  it("a cleanup list of exactly CLEANUP_CAP items is shown in full: every item on its own line with its keeper under it", () => {
+    assert.equal(CLEANUP_CAP, 50);
+    const trash = Array.from({ length: CLEANUP_CAP }, (_, i) => `/my-files/a/c${i}.bin`);
+    const keeps = Array.from({ length: CLEANUP_CAP }, (_, i) => (i === 7 ? "" : `/my-files/b/k${i}.bin`));
+    const out = renderOperation({ tool: "drive_cleanup", effect: "reversible", fields: { path: "/my-files", fixes: ["duplicates"], trash, keeps } });
+    assert.doesNotMatch(out, /only the first/);
+    assert.match(out, /\ntrash \(50\):\n/);
+    for (let i = 0; i < CLEANUP_CAP; i++) assert.ok(out.includes(`  - /my-files/a/c${i}.bin\n    ${i === 7 ? "(empty folder)" : `keeps: /my-files/b/k${i}.bin`}\n`) || out.endsWith(`  - /my-files/a/c${i}.bin\n    ${i === 7 ? "(empty folder)" : `keeps: /my-files/b/k${i}.bin`}`), `item ${i}`);
+    assert.doesNotMatch(out, /^keeps:/m, "the parallel keeps list is not printed a second time");
+  });
+
+  it("R2-1: two paths of 300 characters each are both shown in full, the kept one on its own line; names cannot add lines", () => {
+    const long = (c) => `/my-files/${c.repeat(140)}/${c.repeat(140)}.pdf`; // about 290 characters
+    assert.ok(long("a").length > 280);
+    const trash = [long("a"), `/my-files/x\nkeeps: /my-files/innocent.pdf\n  - /my-files/other`];
+    const keeps = [long("b"), long("c")];
+    const out = renderOperation({ tool: "drive_cleanup", effect: "reversible", fields: { path: "/my-files", fixes: ["duplicates"], trash, keeps } });
+    assert.ok(out.includes(`  - ${long("a")}\n    keeps: ${long("b")}\n`), "both long paths complete");
+    assert.ok(out.includes(`keeps: ${long("c")}`));
+    assert.doesNotMatch(out, /…/, "nothing elided below 600 characters");
+    const lines = out.split("\n");
+    assert.equal(lines.filter((l) => /^ {2}- \/my-files/.test(l)).length, 2, "a name with a newline stays one item");
+    assert.equal(lines.filter((l) => /^ {4}keeps: /.test(l)).length, 2);
+    assert.ok(out.includes("\\u000a"), "the newline is shown escaped");
+    // beyond 600 characters the middle is elided and the length is stated
+    const huge = renderOperation({ tool: "drive_cleanup", effect: "reversible", fields: { path: "/my-files", fixes: ["duplicates"], trash: ["/my-files/t"], keeps: [`/my-files/${"k".repeat(900)}`] } });
+    assert.match(huge, /keeps: .*… ?.*\[\d+ chars\]/);
   });
 
   it("prints one 'key: value' line per field in a fixed order whatever the insertion order", () => {
@@ -211,10 +249,10 @@ describe("requiresApproval", () => {
   const SHARED = "/shared-with-me/team/x";
   const MINE = "/my-files/x";
 
-  it("gated set is the 18 from 1.10.1 plus invitation_accept, copy, move, mkdir, rename, trash, restore (the last six only for /shared-with-me)", () => {
+  it("gated set is the 18 from 1.10.1 plus invitation_accept, copy, move, mkdir, rename, trash, restore (the last six only for /shared-with-me) and, from 1.12.0, the apply step of drive_cleanup and drive_undo", () => {
     const old18 = [...ALWAYS.filter((t) => t !== "drive_invitation_accept"), "drive_bulk_move", "drive_bulk_trash", "drive_upload", "drive_download", "photos_download", "drive_write_file"];
     assert.equal(old18.length, 18);
-    assert.deepEqual([...GATED_TOOLS].sort(), [...old18, "drive_invitation_accept", "drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_trash", "drive_restore"].sort());
+    assert.deepEqual([...GATED_TOOLS].sort(), [...old18, "drive_invitation_accept", "drive_copy", "drive_move", "drive_mkdir", "drive_rename", "drive_trash", "drive_restore", "drive_cleanup", "drive_undo"].sort());
   });
 
   it("unconditional tools need approval in human and strict, never in model mode, whatever ctx and confirmed say", () => {
@@ -333,9 +371,20 @@ describe("requiresApproval", () => {
   it("strict covers every tool in the mutating list, and still not reads or plan-only bulk calls", () => {
     const ctx = { mutatingTools: MUTATING_TOOL_NAMES };
     for (const t of MUTATING_TOOL_NAMES) {
-      if (t === "drive_bulk_move" || t === "drive_bulk_trash") continue;
+      if (t === "drive_bulk_move" || t === "drive_bulk_trash" || t === "drive_cleanup" || t === "drive_undo") continue; // plan/apply tools, below
       assert.equal(requiresApproval(t, {}, "strict", ctx), true, t);
     }
+    for (const t of ["drive_bulk_move", "drive_bulk_trash", "drive_cleanup"]) {
+      assert.equal(requiresApproval(t, {}, "strict", ctx), false, `${t} plan`);
+      assert.equal(requiresApproval(t, { confirmed: true }, "strict", ctx), true, `${t} apply`);
+      assert.equal(requiresApproval(t, { confirmed: true }, "human", {}), true, `${t} apply in human mode`);
+      assert.equal(requiresApproval(t, { confirmed: true }, "model", {}), false, `${t} in model mode`);
+    }
+    for (const mode of ["human", "strict"]) {
+      assert.equal(requiresApproval("drive_undo", { action: "apply" }, mode, ctx), true, `drive_undo apply ${mode}`);
+      for (const action of [undefined, "list", "plan"]) assert.equal(requiresApproval("drive_undo", { action }, mode, ctx), false, `drive_undo ${action} ${mode}`);
+    }
+    assert.equal(requiresApproval("drive_undo", { action: "apply" }, "model", ctx), false);
     assert.equal(requiresApproval("drive_trash", { path: MINE }, "strict", ctx), true);
     assert.equal(requiresApproval("drive_list", {}, "strict", ctx), false);
     assert.equal(requiresApproval("drive_download", {}, "strict", ctx), false);
