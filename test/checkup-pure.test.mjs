@@ -220,19 +220,29 @@ describe("checkupFindingPage", () => {
 });
 
 describe("performance", () => {
-  it("50k nodes finish well under 2 s", () => {
+  // A scaling check, not an absolute time: a quadratic regression makes 4x the nodes take ~16x as long, while a slow or busy CI
+  // machine slows both sizes alike. The absolute 2 s / 10 s limits flaked on shared macOS runners.
+  const build = (dirs) => {
     const nodes = [];
-    for (let i = 0; i < 1000; i++) {
+    for (let i = 0; i < dirs; i++) {
       nodes.push(d(`/my-files/d${i}`, i % 50 === 0 ? { isShared: true } : {}));
       for (let j = 0; j < 49; j++) nodes.push(f(`/my-files/d${i}/f${j}${j % 7 === 0 ? " tax" : ""}.dat`, (j % 10) * MB + 1, { sha1: j % 5 === 0 ? "h" + (j % 3) : undefined, mtime: j % 3 === 0 ? old : recent, parentUid: `u/my-files/d${i}` }));
     }
-    assert.equal(nodes.length, 50_000);
-    const shuffled = shuffle(nodes, 7);
+    return shuffle(nodes, 7);
+  };
+  const time = (nodes) => {
     const t0 = performance.now();
-    const s = run(shuffled);
-    const page = checkupFindingPage(shuffled, "sensitive-exposed", { now: NOW, limit: 200 });
-    const ms = performance.now() - t0;
-    assert.ok(ms < 10_000, `took ${ms} ms`); // a regression guard against quadratic code, loose enough for a slow CI machine
-    assert.ok(s.findings.length > 0 && page.total > 0);
+    const s = run(nodes);
+    const page = checkupFindingPage(nodes, "sensitive-exposed", { now: NOW, limit: 200 });
+    return { ms: performance.now() - t0, s, page };
+  };
+  it("50k nodes scale roughly linearly (4x the nodes is far from 16x the time)", () => {
+    const small = build(250), big = build(1000);
+    assert.equal(big.length, 50_000);
+    time(small); // warm up the JIT
+    const a = time(small), b = time(big);
+    assert.ok(b.s.findings.length > 0 && b.page.total > 0);
+    const ratio = b.ms / Math.max(a.ms, 5);
+    assert.ok(ratio < 12, `4x nodes took ${ratio.toFixed(1)}x the time (${a.ms.toFixed(0)} ms -> ${b.ms.toFixed(0)} ms)`);
   });
 });

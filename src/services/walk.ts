@@ -171,7 +171,13 @@ export function parentPath(path: string): string {
 }
 
 const isUnder = (path: string, ancestor: string) => ancestor === "/" || path === ancestor || path.startsWith(ancestor + "/");
-const normalizeRoot = (p: string) => (p.length > 1 ? p.replace(/\/+$/, "") || "/" : p);
+/** Strip trailing slashes with a plain loop (a `/\/+$/` regex is flagged as polynomial on uncontrolled input). */
+function normalizeRoot(p: string): string {
+  if (p.length <= 1) return p;
+  let end = p.length;
+  while (end > 0 && p[end - 1] === "/") end--;
+  return end === 0 ? "/" : p.slice(0, end);
+}
 const byPath = (a: WalkNode, b: WalkNode) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0);
 
 /** A folder at the depth limit that we would have listed had the limit been higher. */
