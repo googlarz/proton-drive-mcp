@@ -49,6 +49,16 @@ const SECRET_UNDER = new Map<string, string[]>([[".docker", ["config.json"]], ["
 // macOS and Windows file systems are case-insensitive by default: ~/.SSH is ~/.ssh there, so the comparison must be too.
 const fold = (p: string): string => (process.platform === "darwin" || process.platform === "win32" ? p.toLowerCase() : p);
 
+/**
+ * "~" and "~/..." mean the home folder ("~user" is left alone). Must run before the guard checks so they see the real
+ * location. Plain concatenation: the rest of the path is treated exactly like a typed absolute path.
+ */
+export function expandHome(path: string): string {
+  if (path !== "~" && !path.startsWith("~/")) return path;
+  const home = homedir();
+  return isAbsolute(home) ? home + path.slice(1) : path;
+}
+
 function isInside(root: string, target: string): boolean {
   const rel = relative(fold(root), fold(target));
   if (rel === "") return true;

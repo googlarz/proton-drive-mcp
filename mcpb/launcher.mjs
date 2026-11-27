@@ -2,7 +2,7 @@
 // as "" (or leave the "${user_config.*}" placeholder). The server treats an empty
 // PROTON_DRIVE_BIN as a real (broken) binary path, so drop such values first.
 // An empty or unfilled PROTON_DRIVE_APPROVAL must mean the server default (human), never a value that is read as an unknown mode.
-for (const key of ["PROTON_DRIVE_BIN", "PROTON_DRIVE_SYNC_PATH", "PROTON_DRIVE_REMOTE_ROOTS", "PROTON_DRIVE_AUDIT_LOG", "PROTON_DRIVE_APPROVAL"]) {
+for (const key of ["PROTON_DRIVE_BIN", "PROTON_DRIVE_SYNC_PATH", "PROTON_DRIVE_REMOTE_ROOTS", "PROTON_DRIVE_AUDIT_LOG", "PROTON_DRIVE_APPROVAL", "PROTON_DRIVE_UNDO"]) {
   const v = process.env[key];
   if (v !== undefined && (v.trim() === "" || v.includes("${user_config."))) delete process.env[key];
 }

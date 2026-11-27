@@ -1,9 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./errors.js";
 
-// An empty value counts as unset: some clients pass "" for an optional setting.
-const CLI_BINARY = process.env["PROTON_DRIVE_BIN"] || "proton-drive";
 const DEFAULT_TIMEOUT_MS = 60_000;
 // Upload and download transfer actual file bytes — use a much longer timeout.
 const TRANSFER_TIMEOUT_MS = 30 * 60_000; // 30 minutes
@@ -24,6 +25,64 @@ export function timeoutFor(args: string[]): number {
     return TRANSFER_TIMEOUT_MS;
   }
   return DEFAULT_TIMEOUT_MS;
+}
+
+// An empty value counts as unset: some clients pass "" for an optional setting.
+const configuredBinary = (): string | undefined => {
+  const v = process.env["PROTON_DRIVE_BIN"];
+  return v?.trim() ? v : undefined;
+};
+
+// A binary nobody asked for by path is only run when other users cannot replace it: a regular executable file (symlinks
+// followed) that is not world-writable, in folders (of the link and of its target) that are not world-writable either.
+// Group-writable is accepted: Homebrew's bin folders are writable by the admin group.
+function isSafeExecutable(file: string): boolean {
+  try {
+    const st = statSync(file);
+    if (!st.isFile()) return false;
+    if (process.platform === "win32") return true;
+    accessSync(file, constants.X_OK);
+    return [st, statSync(dirname(file)), statSync(dirname(realpathSync(file)))].every((s) => (s.mode & 0o002) === 0);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The CLI to run when PROTON_DRIVE_BIN is not set: PATH first, then the usual install folders (Claude Desktop starts
+ * servers with a minimal PATH). Only absolute folders are searched, so nothing is ever picked up from the current directory.
+ * `viaFallback` is true when it was found outside PATH.
+ */
+export function findDriveCli(
+  opts: { path?: string; home?: string; wellKnownDirs?: string[] } = {}
+): { path: string; viaFallback: boolean } | undefined {
+  const home = opts.home ?? homedir();
+  const wellKnown = opts.wellKnownDirs ?? wellKnownCliDirs(home);
+  const name = process.platform === "win32" ? "proton-drive.exe" : "proton-drive";
+  const search = (dirs: string[]) => dirs.filter((d) => isAbsolute(d)).map((d) => join(d, name)).find(isSafeExecutable);
+  const onPath = search((opts.path ?? process.env["PATH"] ?? "").split(delimiter));
+  if (onPath) return { path: onPath, viaFallback: false };
+  const fallback = search(wellKnown);
+  return fallback ? { path: fallback, viaFallback: true } : undefined;
+}
+
+export function wellKnownCliDirs(home: string = homedir()): string[] {
+  // A relative or empty HOME must not turn into a folder under the current directory.
+  return [...(isAbsolute(home) ? [join(home, ".local", "bin")] : []), "/opt/homebrew/bin", "/usr/local/bin"];
+}
+
+/** The command a user types in a terminal to sign in; the full path when a bare `proton-drive` might not be found. */
+export function signInCommand(): string {
+  const configured = configuredBinary();
+  const found = configured ? undefined : findDriveCli();
+  const path = configured ?? (found?.viaFallback ? found.path : undefined);
+  return path && isAbsolute(path) ? `'${path.replace(/'/g, `'\\''`)}' auth login` : "proton-drive auth login";
+}
+
+/** The "not found" / "cannot be run" error for the binary that failed to start (`undefined`: nothing was found). */
+export function cliLaunchError(binary: string | undefined = configuredBinary()): DriveCliNotFoundError {
+  if (!binary) return new DriveCliNotFoundError();
+  return new DriveCliNotFoundError({ path: binary, exists: !isAbsolute(binary) ? false : existsSync(binary) });
 }
 
 // Per-request context: lets the MCP dispatch hand the request's AbortSignal to
@@ -106,8 +165,15 @@ function execCli(args: string[], timeoutMs: number): Promise<{ stdout: string; s
     let outBytes = 0;
     let errBytes = 0;
 
+    // Resolved per call, so a CLI installed after the server started is picked up.
+    const binary = configuredBinary() ?? findDriveCli()?.path;
+    if (!binary) {
+      reject(cliLaunchError(undefined));
+      return;
+    }
+
     // stdin is ignored: the CLI must never sit waiting on an interactive prompt.
-    const child = spawn(CLI_BINARY, args, {
+    const child = spawn(binary, args, {
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -172,8 +238,8 @@ function execCli(args: string[], timeoutMs: number): Promise<{ stdout: string; s
 // the MCP client, and buried the real cause. Build the message from the CLI's
 // own output instead. Confirmed live: some failures write the actual cause
 // ("ENOENT: no such file ...") to *stdout* and only a "=====" banner to stderr.
-function describeFailure(e: ExecError): string {
-  const stderr = stripAnsi(e.stderr ?? "");
+function describeFailure(e: ExecError, args: string[]): string {
+  const stderr = redactSecrets(stripAnsi(e.stderr ?? ""));
   const stdout = stripAnsi(e.stdout ?? "");
 
   const lines: string[] = [];
@@ -206,14 +272,20 @@ function describeFailure(e: ExecError): string {
         else if (typeof o["message"] === "string") push(o["message"]);
       }
     } catch {
-      push(trimmedOut);
+      // Unparsable sharing output can hold the link password in any shape: never repeat it.
+      if (args[0] !== "sharing") push(redactSecrets(trimmedOut));
     }
   }
 
-  let text = lines.slice(0, 8).join("\n");
+  let text = redactSecrets(lines.slice(0, 8).join("\n"));
   if (!text) {
     const code = typeof e.code === "number" ? ` (exit ${e.code})` : "";
-    text = e.signal ? `CLI was terminated by ${e.signal}` : `CLI failed with no output${code}`;
+    const binary = configuredBinary() ?? findDriveCli()?.path;
+    text = e.signal
+      ? `CLI was terminated by ${e.signal}`
+      : `CLI failed with no output${code}. The program that was run is "${binary}". If that is not the proton-drive tool, ` +
+        `fix the "proton-drive CLI path" setting (Claude Desktop > Settings > Extensions > Proton Drive; PROTON_DRIVE_BIN elsewhere) ` +
+        "with the path printed by `which proton-drive`.";
   }
   text = text.replace(/(--(?:password|message)[= ])\S+/g, "$1***");
   return text.length > MAX_ERROR_CHARS ? text.slice(0, MAX_ERROR_CHARS) + "…" : text;
@@ -224,6 +296,7 @@ function describeFailure(e: ExecError): string {
 function normalizeExecError(err: unknown, args: string[]): never {
   if (
     err instanceof DriveCliError ||
+    err instanceof DriveCliNotFoundError ||
     err instanceof DriveNotAuthenticatedError ||
     err instanceof DriveParseError
   ) {
@@ -236,8 +309,9 @@ function normalizeExecError(err: unknown, args: string[]): never {
     throw new DriveCliError("Cancelled by client", "");
   }
 
-  if (e.code === "ENOENT") {
-    throw new DriveCliNotFoundError();
+  // The program never started: missing, a folder, not executable, wrong format.
+  if (e.code === "ENOENT" || e.syscall?.startsWith("spawn")) {
+    throw cliLaunchError(configuredBinary() ?? findDriveCli()?.path);
   }
 
   if (e.killed === true || e.code === "ETIMEDOUT") {
@@ -250,10 +324,10 @@ function normalizeExecError(err: unknown, args: string[]): never {
   }
 
   if (isAuthError(`${e.stderr ?? ""}\n${e.stdout ?? ""}`)) {
-    throw new DriveNotAuthenticatedError();
+    throw new DriveNotAuthenticatedError(signInCommand());
   }
 
-  throw new DriveCliError(describeFailure(e), "");
+  throw new DriveCliError(describeFailure(e, args), "");
 }
 
 // The CLI sometimes prints ANSI/progress noise before the JSON, so fall back to
@@ -270,7 +344,38 @@ function parseJsonLoose(raw: string): unknown {
     tried++;
     try { return JSON.parse(lines.slice(i).join("\n")); } catch { /* next candidate */ }
   }
+  const value = parseBeforeTrailer(lines);
+  if (value !== undefined) return value;
   throw new Error("no JSON found");
+}
+
+const MAX_TRAILING_LINES = 3;
+// A line that could belong to a JSON document; anything else after a complete value is a notice such as "Update available".
+const JSON_LIKE_LINE = /^[{}[\]",:]/;
+
+const isTrailer = (lines: string[]): boolean => {
+  const text = lines.map((l) => l.trim()).filter(Boolean);
+  return text.length <= MAX_TRAILING_LINES && text.every((l) => !JSON_LIKE_LINE.test(l));
+};
+
+// JSON followed by a notice. Only the first line that opens a JSON value is tried: starting further down could return an
+// inner value of a cut-off document.
+function parseBeforeTrailer(lines: string[]): unknown {
+  const start = lines.findIndex((l) => /^\s*[{[]/.test(l));
+  if (start < 0) return undefined;
+  for (let end = lines.length - 1; end > start; end--) {
+    if (!isTrailer(lines.slice(end))) return undefined;
+    try { return JSON.parse(lines.slice(start, end).join("\n")); } catch { /* keep trimming */ }
+  }
+  return undefined;
+}
+
+// Sharing output carries the public link and its password; keep both out of errors and logs.
+const SECRET_VALUE_RE = /(["']?\b(?:customPassword|password|url)["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"?|'(?:\\.|[^'\\])*'?|[^\s,}\]]+)/gi;
+const PUBLIC_LINK_RE = /https?:\/\/drive\.proton\.(?:me|black)\/urls\/[^\s"']*/gi;
+
+function redactSecrets(text: string): string {
+  return text.replace(PUBLIC_LINK_RE, "***").replace(SECRET_VALUE_RE, '$1"***"');
 }
 
 // Transient failures seen live (several clients on one CLI session, slow API):
@@ -360,7 +465,7 @@ export async function runDrive(args: string[]): Promise<unknown> {
     // valid JSON, we honour it even when warnings appear on stderr.
     if (!raw) {
       if (stderr && stderr.trim() && isAuthError(stderr)) {
-        throw new DriveNotAuthenticatedError();
+        throw new DriveNotAuthenticatedError(signInCommand());
       }
       return null;
     }
@@ -371,14 +476,17 @@ export async function runDrive(args: string[]): Promise<unknown> {
     // JSON.stringify(undefined) is the JS value undefined, so console.log
     // prints the literal 5 characters "undefined", not valid JSON. Confirmed
     // live against the real CLI (v0.8.0). Treat it the same as empty stdout.
-    if (raw === "undefined") {
+    const [firstLine, ...rest] = raw.split(/\r?\n/);
+    if (firstLine === "undefined" && isTrailer(rest)) {
       return null;
     }
 
     try {
       return parseJsonLoose(raw);
     } catch {
-      const snippet = stripAnsi(raw).slice(0, 200).replace(/\s+/g, " ");
+      const snippet = args[0] === "sharing"
+        ? "(output hidden: sharing commands can print link passwords)"
+        : redactSecrets(stripAnsi(raw)).slice(0, 200).replace(/\s+/g, " ");
       try { process.stderr.write(`[proton-drive-mcp] parse error: ${snippet}\n`); } catch { /* ignore EPIPE */ }
       throw new DriveParseError(`Failed to parse CLI output as JSON: ${snippet}`);
     }
@@ -393,7 +501,7 @@ export async function runDriveRaw(args: string[]): Promise<string> {
   try {
     const { stdout, stderr } = await execCliWithRetry(args, args);
     if (!stdout.trim() && stderr && stderr.trim() && isAuthError(stderr)) {
-      throw new DriveNotAuthenticatedError();
+      throw new DriveNotAuthenticatedError(signInCommand());
     }
     return stdout;
   } catch (err) {
@@ -406,7 +514,9 @@ export async function runDriveRaw(args: string[]): Promise<string> {
 // is present and real errors will surface on the first actual tool call.
 export async function checkCliAvailable(): Promise<{ available: boolean; reason?: string }> {
   return new Promise((resolve) => {
-    const child = spawn(CLI_BINARY, ["version"], {
+    const binary = configuredBinary() ?? findDriveCli()?.path;
+    if (!binary) return resolve({ available: false, reason: "not_found" });
+    const child = spawn(binary, ["version"], {
       detached: process.platform !== "win32",
       stdio: ["ignore", "ignore", "ignore"],
     });

@@ -2,6 +2,7 @@ import { accessSync, constants, copyFileSync, existsSync, mkdirSync, readFileSyn
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { findDriveCli } from "./subprocess.js";
 
 export const SERVER_KEY = "proton-drive-mcp";
 
@@ -48,9 +49,10 @@ export function resolveBinary(cmd: string): string | undefined {
   return undefined;
 }
 
-/** The proton-drive CLI the server would use: PROTON_DRIVE_BIN, else PATH lookup. */
+/** The proton-drive CLI the server would use: PROTON_DRIVE_BIN, else the server's auto-detection. */
 export function resolveDriveCli(): string | undefined {
-  return resolveBinary(process.env["PROTON_DRIVE_BIN"] || "proton-drive");
+  const bin = process.env["PROTON_DRIVE_BIN"];
+  return bin?.trim() ? resolveBinary(bin) : findDriveCli()?.path;
 }
 
 /** dist/index.js of this package, located relative to this module (not the cwd). */

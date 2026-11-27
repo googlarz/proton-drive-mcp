@@ -27,7 +27,7 @@ import {
 } from "./services/drive.js";
 import { PROMPTS, getPromptText } from "./prompts.js";
 import { isMainModule } from "./utils/isMainModule.js";
-import { checkCliAvailable, runDriveRaw, callContext, killAllChildren } from "./utils/subprocess.js";
+import { checkCliAvailable, cliLaunchError, signInCommand, runDriveRaw, callContext, killAllChildren } from "./utils/subprocess.js";
 import {
   DriveCliNotFoundError,
   DriveCliError,
@@ -210,7 +210,7 @@ const TOOLS = [
   {
     name: "drive_auth_status",
     description:
-      "Check whether the Proton Drive CLI has an authenticated session. Returns {authenticated: boolean}. The CLI has no status command, so this probes by resolving /my-files (a real, lightweight call). Does not expose the account email. All other drive_* tools except drive_version need a valid session.",
+      "Check whether the Proton Drive CLI has an authenticated session. Returns {authenticated, approvalMode}. The CLI has no status command, so this probes by resolving /my-files (a lightweight call). Does not expose the account email. All other drive_* tools except drive_version need a valid session.",
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
   },
@@ -1592,7 +1592,13 @@ export async function main(options: MainOptions = {}) {
   if (auditProblem) logger.warn(`PROTON_DRIVE_AUDIT_LOG cannot be written (${auditProblem}): tools that change Drive are refused until it can.`);
   // PROTON_DRIVE_APPROVAL: who may approve destructive and outward-facing operations (human by default; see utils/approval.ts).
   const { mode: apMode, warning: approvalWarning } = resolveApprovalMode(process.env);
-  if (approvalWarning) logger.warn(approvalWarning);
+  // A typo such as "off" falls back to the strictest mode: say so, here and in drive_auth_status.
+  const approvalRaw = (process.env.PROTON_DRIVE_APPROVAL ?? "").trim().toLowerCase();
+  const approvalHint = apMode === "strict" && approvalRaw !== "strict"
+    ? 'The approval setting value is not recognised, so the strictest mode ("strict": every change asks you) is active. ' +
+      'Set "Who approves destructive operations" in Claude Desktop > Settings > Extensions > Proton Drive (or PROTON_DRIVE_APPROVAL) to human, strict or model, then restart Claude.'
+    : undefined;
+  if (approvalWarning) logger.warn(approvalHint ? `${approvalWarning} ${approvalHint}` : approvalWarning);
   // Tool texts follow the mode: model mode keeps the 1.10.1 wording and schemas, human/strict stop telling the model to pass confirmed.
   const TOOL_DEFS = buildToolDefs(apMode !== "model");
   const tierDefs = tier === "core" ? TOOL_DEFS.filter((t) => CORE_TOOL_NAMES.has(t.name)) : TOOL_DEFS;
@@ -1810,7 +1816,15 @@ export async function main(options: MainOptions = {}) {
     try {
       switch (name) {
         case "drive_auth_status":
-          return ok(await drive.authStatus());
+          {
+            const status = await drive.authStatus();
+            return ok({
+              ...status,
+              approvalMode: apMode,
+              ...(approvalHint ? { approvalHint } : {}),
+              ...(status.authenticated ? {} : { signInHint: new DriveNotAuthenticatedError(signInCommand()).message }),
+            });
+          }
 
         case "drive_auth_logout": {
           legacyNeed("drive_auth_logout", "ends the stored Proton Drive session for every client on this machine.");
@@ -2707,9 +2721,7 @@ export async function main(options: MainOptions = {}) {
   // up: tools/list works and each call returns a clear error.
   void checkCliAvailable().then((cliCheck) => {
     if (!cliCheck.available) {
-      logger.error(cliCheck.reason === "not_executable"
-        ? "proton-drive CLI found but not executable. Run: chmod +x $(which proton-drive)"
-        : "proton-drive CLI not found. Download from https://proton.me/download/drive/cli/index.html, or set PROTON_DRIVE_BIN to its absolute path (find it with `which proton-drive`).");
+      logger.error(cliLaunchError().message);
     } else {
       // One stderr line (the logger never writes stdout); best effort, never fatal.
       runDriveRaw(["version"]).then((t) => { const w = cliCompatWarning(t); if (w) logger.warn(w); }, () => {});
