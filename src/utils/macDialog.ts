@@ -31,17 +31,19 @@ export function nativeDialogEnabled(env: Record<string, string | undefined>, pla
 const MIN_SECONDS = 10;
 /** Some clients give up on a tool call after about 60 s, so by default the dialog must be over before then. */
 const CALL_BUDGET_MS = 45_000;
+/** Less than this is too short to read a question: use the terminal route instead. */
+const MIN_BUDGET_SECONDS = 20;
 
 /**
  * How long the dialog may wait. PROTON_DRIVE_DIALOG_TIMEOUT (seconds, clamped to 10..110) when set to a number; otherwise
- * what is left of 45 s since the tool call started, or null when under 10 s are left (no dialog: use the terminal route).
+ * what is left of 45 s since the tool call started, or null when under 20 s are left (no dialog: use the terminal route).
  */
 export function dialogTimeoutSeconds(env: Record<string, string | undefined>, elapsedMs = 0): number | null {
   const raw = (env.PROTON_DRIVE_DIALOG_TIMEOUT ?? "").trim();
   const n = Number(raw);
   if (raw !== "" && Number.isFinite(n)) return Math.min(110, Math.max(MIN_SECONDS, Math.round(n)));
   const left = Math.floor((CALL_BUDGET_MS - elapsedMs) / 1000);
-  return left >= MIN_SECONDS ? left : null;
+  return left >= MIN_BUDGET_SECONDS ? left : null;
 }
 
 function readAnswer(error: ExecFileException | null, stdout: string, stderr: string): DialogAnswer {

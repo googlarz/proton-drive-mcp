@@ -5,7 +5,8 @@ import { showValueStrict } from "./text.js";
 
 export function describeOperation(op: Operation): string {
   const v = { ...op.fields, ...(op.display ?? {}) };
-  const quote = (x: string) => `"${showValueStrict(x, 60, 30).replace(/"/g, '\\"')}"`;
+  // A double quote inside a name is shown as a single one, so a name can never close its own quotes.
+  const quote = (x: string) => `"${showValueStrict(x, 60, 30).replace(/"/g, "'")}"`;
   /** The last part of a path, quoted; the whole path is in the details below the sentence. */
   const name = (key: string, otherwise = "an item") => {
     const x = v[key];

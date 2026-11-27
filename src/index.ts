@@ -1754,13 +1754,13 @@ export async function main(options: MainOptions = {}) {
     // only (the uid stays in the hashed fields); a failed lookup is shown as such and never blocks or approves anything.
     const NOT_RESOLVED = "(name not resolved)";
     const trashedItem = async (uid: string): Promise<Record<string, FieldValue>> => {
-      try { const hit = (await drive.listTrash()).find((f) => f.uid === uid); return { item: hit ? hit.path : NOT_RESOLVED }; }
+      try { const hit = (await drive.listTrash({ requireOutput: false })).find((f) => f.uid === uid); return { item: hit ? hit.path : NOT_RESOLVED }; }
       catch { return { item: NOT_RESOLVED }; }
     };
     // What drive_empty_trash would delete (/trash only: the CLI's empty-trash leaves /photos-trash alone). Names are shown,
     // the digest binds the approval to these exact items.
     const emptyTrashOperation = async (): Promise<Operation> => {
-      const items = await drive.listTrash();
+      const items = await drive.listTrash({ requireOutput: true });
       return {
         tool: "drive_empty_trash", effect: "irreversible",
         fields: {
@@ -2443,7 +2443,7 @@ export async function main(options: MainOptions = {}) {
               }
             }
             if (replacesExistingLink) {
-              const { shareUrlRole: was, sharePasswordProtected: hadPassword, shareUrlExpiresAt: expired } = before;
+              const { shareUrlRole: was, sharePasswordProtected: wasProtected, shareUrlExpiresAt: expired } = before;
               // An omitted role keeps the link's role: it is never changed silently.
               if (roleArg === undefined) {
                 if (was !== "viewer" && was !== "editor") {
@@ -2452,10 +2452,10 @@ export async function main(options: MainOptions = {}) {
                 role = was;
               }
               current = {
-                digest: digest(canonical([was ?? null, hadPassword ?? false, expired ?? null])),
+                digest: digest(canonical([was ?? null, wasProtected ?? false, expired ?? null])),
                 changes: {
                   roleChange: `${was ?? "unknown"} -> ${role}`,
-                  passwordChange: `${hadPassword ? "set" : "not set"} -> ${password ? (hadPassword ? "set (replaced)" : "set") : hadPassword ? "not set (REMOVED)" : "not set"}`,
+                  passwordChange: `${wasProtected ? "set" : "not set"} -> ${password ? (wasProtected ? "set (replaced)" : "set") : wasProtected ? "not set (REMOVED)" : "not set"}`,
                   expirationChange: `${expired ?? "not set"} -> ${expiration ?? (expired ? "not set (REMOVED)" : "not set")}`,
                 },
               };

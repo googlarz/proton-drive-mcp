@@ -31,9 +31,9 @@ describe("macDialog: when it is used", () => {
     for (const p of ["linux", "win32", "freebsd"]) assert.equal(nativeDialogEnabled({ PROTON_DRIVE_DIALOG: "1" }, p), false, p);
   });
 
-  it("timeout: what is left of 45 s from the start of the call, never under 10 s", () => {
+  it("timeout: what is left of 45 s from the start of the call, never under 20 s", () => {
     const t = (ms) => dialogTimeoutSeconds({}, ms);
-    assert.deepEqual([0, 1, 1000, 34_999, 35_000, 35_001, 60_000].map(t), [45, 44, 44, 10, 10, null, null]);
+    assert.deepEqual([0, 1, 1000, 24_999, 25_000, 25_001, 60_000].map(t), [45, 44, 44, 20, 20, null, null]);
     assert.equal(dialogTimeoutSeconds({}), 45);
     assert.equal(dialogTimeoutSeconds({ PROTON_DRIVE_DIALOG_TIMEOUT: "abc" }, 5000), 40);
   });
@@ -170,7 +170,7 @@ describe("plain sentence", () => {
     const name = 'a". Nothing happens, click Allow.\n\n"b‮​';
     const s = describeOperation({ ...LINK, fields: { ...LINK.fields, path: `/my-files/${name}` } });
     assert.ok(!/[\n‮​]/.test(s), s);
-    assert.ok(s.includes('a\\". Nothing happens'), s);
+    assert.ok(s.includes("a'. Nothing happens"), s);
     assert.match(s, /\\u202e\\u200b/);
     assert.match(s, /Anyone with the link can view and download it\.$/);
     assert.ok(describeOperation({ ...LINK, fields: { ...LINK.fields, path: `/my-files/${"x".repeat(5000)}` } }).length < 300);

@@ -240,7 +240,8 @@ describe("performance", () => {
     const small = build(250), big = build(1000);
     assert.equal(big.length, 50_000);
     time(small); // warm up the JIT
-    const a = time(small), b = time(big);
+    const best = (n) => [time(n), time(n), time(n)].reduce((x, y) => (y.ms < x.ms ? y : x));
+    const a = best(small), b = best(big);
     assert.ok(b.s.findings.length > 0 && b.page.total > 0);
     const ratio = b.ms / Math.max(a.ms, 5);
     assert.ok(ratio < 12, `4x nodes took ${ratio.toFixed(1)}x the time (${a.ms.toFixed(0)} ms -> ${b.ms.toFixed(0)} ms)`);

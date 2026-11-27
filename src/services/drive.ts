@@ -645,9 +645,9 @@ export class DriveService {
   // Confirmed live: two trashed items with the same name both list as
   // /trash/<name>, so restore/delete by that path is ambiguous. uid (and the
   // trash time, when the CLI provides it) let the caller tell them apart.
-  async listTrash(): Promise<DriveFile[]> {
-    // An empty trash lists as []: no output at all is a failed listing, never "nothing there".
-    return (await this.listEntries("/trash", { includeUid: true, requireOutput: true })).map((e) => e.file);
+  // requireOutput: before a permanent delete, no output at all is a failed listing, never "nothing there".
+  async listTrash(opts: { requireOutput?: boolean } = {}): Promise<DriveFile[]> {
+    return (await this.listEntries("/trash", { includeUid: true, ...opts })).map((e) => e.file);
   }
 
   async trash(remotePath: string): Promise<void> {
