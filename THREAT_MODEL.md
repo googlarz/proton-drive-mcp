@@ -36,7 +36,7 @@ flowchart LR
 
 1. **MCP client to server.** Anyone who can call the server's tools acts as the logged-in user. Run it only for clients you trust, on machines you trust.
 2. **File content and names to the model.** Both are untrusted input. A file can contain text that tries to instruct the model (prompt injection). The tool descriptions tell the model to treat returned text as data, which reduces but does not remove the risk.
-3. **Server to CLI.** The CLI is always started with an argument array (`spawn`, no shell), never through a command string.
+3. **Server to CLI.** The CLI is always started with an argument array (`spawn`, no shell), never through a command string. Without `PROTON_DRIVE_BIN` it is searched for in `PATH`, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`: absolute folders only, and a world-writable file or folder is skipped (group-writable is accepted).
 
 ## Controls (MCP server only; the approval gate is on by default, the rest are opt-in)
 
@@ -76,7 +76,7 @@ If no channel exists, the call is refused.
 - **A model with a shell.** If the client gives the model a terminal (Claude Code's Bash tool, Desktop Commander and similar), it can run the official `proton-drive` CLI directly, outside this server. Nothing here can stop that. Deny it in the client; the README has an example rule for Claude Code. That rule is a pattern match, not a complete barrier. The same holds for the terminal route: `proton-drive-cli approve` requires an interactive terminal, but a model with a shell could run it under a pseudo-terminal and type `yes` itself, so the example also denies `approve` (`Bash(*proton-drive-cli approve*)`, `Bash(*proton-drive-cli*approve*)`). On macOS a model with a shell or screen control, running in an app that has Accessibility permission, could also press "Allow" in the server's dialog.
 - Copying files into a folder under `/my-files` that is already shared or has a public link: the destination's sharing state is not checked. `PROTON_DRIVE_REMOTE_ROOTS` limits where the model can write.
 - What a person approves without reading. Short, fixed-format prompts help; they do not make the decision.
-- Whether a given client shows the dialog at all. Claude Code in a terminal does. For Claude Desktop this is not verified; a client that cannot elicit gets the macOS dialog or the terminal route. That the macOS dialog appears when the server was started by a desktop app has not been verified on a screen either. A client that declares elicitation but errors, or cancels in under 1 second, gets the macOS dialog (on macOS) and otherwise the terminal route; one that cancels more slowly gets the terminal route (both fail closed: a person still has to say yes). A client that auto-declines explicitly makes gated tools unusable there; use `model` knowingly.
+- Whether a given client shows the dialog at all. Claude Code in a terminal does. Claude Desktop showed no client dialog in the author's use; a client that cannot elicit gets the macOS dialog or the terminal route. The macOS dialog has not yet been verified on a screen. A client that declares elicitation but errors, or cancels in under 1 second, gets the macOS dialog (on macOS) and otherwise the terminal route; one that cancels more slowly gets the terminal route (both fail closed: a person still has to say yes). A client that auto-declines explicitly makes gated tools unusable there; use `model` knowingly.
 
 **What is not gated in the default mode.** Reversible changes inside your own `/my-files`: a single `drive_trash`, `drive_restore`, `drive_move` / `drive_rename` / `drive_copy` / `drive_mkdir` inside `/my-files`, an upload that overwrites nothing (file strategy `skip` or `rename` and folder strategy other than `replace`; `create-new-revision` and `replace` are gated, also combined with a folder `merge`), album create / update / add, `photos_upload`, and `drive_write_file` to a new file. Paths under `/shared-with-me` are gated for all of these, and so is `drive_invitation_accept`. `drive_restore` by `uid` alone is not gated either (reversible, accepted risk; `strict` covers it, and shows the item's path when it can look it up). A loop of single `drive_trash` calls is not stopped in the default mode; trash is recoverable for a limited time (the retention period is not verified here).
 
@@ -110,7 +110,7 @@ Trash is reversible and the duplicate finder never deletes.
 - The sensitive-names finding is a guess from file names against a fixed word list; it misses and misflags.
 - Sharing details come from the same audit as `drive_sharing_audit` and look at the first 100 shared items; the result says when it was capped.
 - An item changed by someone else after your batch (moved again, renamed) is skipped by undo, not forced back.
-- Whether Claude Desktop shows the approval question is not verified; the terminal route is the fallback. Windows is untested. The new tools have not been run against a real Proton account.
+- Claude Desktop showed no client dialog in the author's use; the macOS dialog (not yet verified on screen) and the terminal route are the fallbacks. Windows is untested. A live test of these tools passed on 2026-11-20 on a scratch folder with CLI 0.9.0, using terminal approvals; approval dialog clicks were not verified.
 
 ## Local file checks (on by default)
 

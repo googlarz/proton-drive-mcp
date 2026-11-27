@@ -95,7 +95,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
 
   const shown = JSON.stringify({ mcpServers: { [SERVER_KEY]: buildNpxEntry(located.path) } }, null, 2);
-  const claudeCode = `claude mcp add --env PROTON_DRIVE_BIN=${shellQuote(located.path)} proton-drive -- npx -y proton-drive-mcp`;
+  const claudeCode = `claude mcp add proton-drive --env PROTON_DRIVE_BIN=${shellQuote(located.path)} -- npx -y proton-drive-mcp`;
   json["claudeCode"] = claudeCode;
 
   let ok = doctorOk;

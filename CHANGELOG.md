@@ -1,23 +1,38 @@
 # Changelog
 
-## Unreleased
+## 1.13.0 — 2026-11-27
+
+### Added
+- A native macOS approval dialog for clients that cannot show one. Order: the client's dialog; else, on macOS, a dialog shown by the server (the same call waits 55 s; only "Allow" approves, "Don't Allow" is the default); else the terminal command `proton-drive-cli approve <code>` (needs Node.js). `PROTON_DRIVE_DIALOG=0` switches the macOS dialog off, `PROTON_DRIVE_DIALOG_TIMEOUT` sets the wait (10 to 110 s). The audit log records the channel as `dialog`. The dialog has not yet been verified on screen.
+- The CLI is found automatically when `PROTON_DRIVE_BIN` is empty: `PATH`, then `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`. Only absolute folders are searched, and a world-writable file or folder is skipped. The server, `doctor`, `init` and `setup-claude-desktop` use the same lookup.
+- `drive_auth_status` also returns `approvalMode`, `approvalHint` (only when the approval setting is not recognised and `strict` is active) and `signInHint` (only when not signed in).
+- Claude Desktop extension setting "Keep an undo record" (`PROTON_DRIVE_UNDO`, on by default).
+- A leading `~/` in local path arguments means your home folder; the local path guard checks the expanded path.
 
 ### Security
-- `drive_empty_trash` lists the trash before asking: item count, total bytes and every name are part of the approval, and nothing is deleted if the trash changed meanwhile. A trash too large to list in full is refused. `/photos-trash` is not emptied, and the approval says so.
+- `drive_empty_trash` lists the trash before asking: item count, total bytes and every name are part of the approval, and nothing is deleted if the trash changed meanwhile. A trash too large to list in full is refused. In `model` mode this applies when the server asks you, not when the assistant sends `confirmed: true`. `/photos-trash` is not emptied, and the approval says so.
 - `drive_upload` with `create-new-revision` needs approval (`confirmed: true` in `model` mode), like `replace`.
-- `drive_share_set_url` keeps an existing link's role when `role` is omitted, and the approval shows current and new role, password (set or not set) and expiry, naming removals.
-- The approval checkbox starts unticked.
-- The native dialog counts non-ASCII characters as two columns; anything that would hide an item or part of a value in a destructive approval goes to the terminal route, which lists everything.
-- A failed or instantly cancelled client dialog is followed by the macOS dialog before the terminal route. A pending macOS dialog is closed when the client disconnects.
+- `drive_share_set_url` keeps an existing link's role when `role` is omitted (a new link is `viewer`), refuses if that role cannot be read, and the approval shows current and new role, password (set or not set) and expiry, naming removals. `set-url` still replaces all link settings. The companion CLI `share set-url` is unchanged: its role defaults to `viewer`.
+- The approval checkbox (unticked at the start, as before) is now labelled "Tick to allow. Leaving it unticked refuses."
+- In both dialogs and the terminal record, anything that must show every item is never partly hidden: the macOS dialog counts non-ASCII characters as two columns, and a text that does not fit goes to the terminal route, which lists everything.
+- A client dialog that fails, or is cancelled in under 1 second, is followed by the macOS dialog before the terminal route. A pending macOS dialog is closed when the request is cancelled or the client disconnects.
 - `model` mode: a person's Decline is final (`approval_declined`), and that tool asks again even with `confirmed: true`.
 - Trashing from `/photos` is no longer described as undoable.
+- Link passwords and link URLs are removed from CLI error messages.
 - Batch trash, restore, delete and empty-trash get a timeout that grows with the item count (at most 10 minutes); an interrupted change reports an unknown outcome instead of suggesting nothing was applied.
 
 ### Fixed
+- "CLI not found", "wrong CLI path" and "not signed in" errors now name the extension setting (or `PROTON_DRIVE_BIN`) and the one command to run.
+- CLI output with a short trailing notice after the JSON is still read.
 - `drive_undo` reads the folders it needs up to 4 at a time instead of one after another, both while planning and while verifying.
-- The undo journal reads each item's uid from a fresh listing of its folder, no longer from a walk up to 5 minutes old. A single `drive_trash`, `drive_move` or `drive_rename` therefore always costs one folder listing.
+- The undo journal reads each item's uid from a fresh listing of its folder, no longer from a walk up to 5 minutes old. A single `drive_trash`, `drive_move` or `drive_rename` therefore costs one folder listing (none for a trashed photo).
 - Single-item changes no longer push a bulk record out of the undo journal: bulk records (several items, `drive_cleanup`, `drive_bulk_*`) and single-item records are each capped at 50 per account (30-day limit unchanged).
 - Trashing a photo no longer returns an `undoId` that could not work: photos go to `/photos-trash`, so they are counted in `notUndoable` with a note.
+
+### Docs
+- Approval is described with its three channels. Claude Desktop showed no client dialog in the author's use.
+- The 1.12.0 note that checkup, cleanup and undo were never run on a real account is superseded: a live test passed on 2026-11-20 on a scratch folder with CLI 0.9.0, using terminal approvals. Clicking an approval dialog was not verified, and sharing tools were not live-tested through the server. The 1.13.0 changes above have not been live-tested.
+- Corrected the `claude mcp add` argument order in the README, the global-install config, tested CLI versions (0.8.x and 0.9.x) and CLI coverage (`takeout run` of CLI 0.9.0 has no tool).
 
 ## 1.12.0 — 2026-11-20
 
