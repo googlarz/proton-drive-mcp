@@ -82,7 +82,7 @@ export interface UndoJournalOptions {
   now?: () => number;
   /** Default 30 days. */
   maxAgeMs?: number;
-  /** Default 50 (per account). */
+  /** Default 50, per account and per class: bulk and single-item batches each have this many slots. */
   maxBatches?: number;
   /** Default true. Pass `undoEnabled(process.env)`; false gives the no-op journal (begin returns null, nothing touches disk). */
   enabled?: boolean;
@@ -112,7 +112,10 @@ export interface UndoJournal {
    * The check-and-write is not atomic across processes; the real guard against a double restore is the uid check in the engine.
    */
   markUndone(id: string, status?: "undone" | "partial"): boolean;
-  /** Removes batches older than maxAgeMs and, per account, all but the newest maxBatches; returns how many files it removed. */
+  /**
+   * Removes batches older than maxAgeMs and, per account, all but the newest maxBatches bulk and the newest maxBatches single-item
+   * batches; returns how many files it removed.
+   */
   purge(): number;
 }
 
@@ -282,6 +285,11 @@ const DISABLED: UndoJournal = {
   purge: () => 0,
 };
 
+/** A bulk record (several items, or written by drive_cleanup or a bulk tool) is not evicted by single-item calls. */
+function isBulk(tool: string, items: number): boolean {
+  return items > 1 || tool === "drive_cleanup" || tool.startsWith("drive_bulk_");
+}
+
 export function createUndoJournal(opts: UndoJournalOptions): UndoJournal {
   if (opts.enabled === false) return DISABLED;
   const dir = opts.dir;
@@ -314,8 +322,8 @@ export function createUndoJournal(opts: UndoJournalOptions): UndoJournal {
 
   const expired = (b: UndoBatch, t: number) => b.createdAt + maxAgeMs <= t;
 
-  /** `reserve`: slots to leave free (begin passes 1 so the batch it is about to write still fits under the cap). */
-  function purgeNow(t: number, reserve = 0): number {
+  /** `incoming`: the class of the batch begin is about to write, which gets one slot left free so it still fits under the cap. */
+  function purgeNow(t: number, incoming?: boolean): number {
     let removed = 0;
     const live: UndoBatch[] = [];
     for (const { batch, path } of readAll()) {
@@ -331,7 +339,10 @@ export function createUndoJournal(opts: UndoJournalOptions): UndoJournal {
       if (batch.account === account) live.push(batch);
     }
     live.sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : -1));
-    for (const b of live.slice(Math.max(0, maxBatches - reserve))) if (unlinkQuiet(file(b.id))) removed++;
+    for (const bulk of [true, false]) {
+      const keep = Math.max(0, maxBatches - (incoming === bulk ? 1 : 0));
+      for (const b of live.filter((x) => isBulk(x.tool, x.items.length) === bulk).slice(keep)) if (unlinkQuiet(file(b.id))) removed++;
+    }
     try {
       for (const n of readdirSync(tmpDir)) {
         const p = join(tmpDir, n);
@@ -371,7 +382,7 @@ export function createUndoJournal(opts: UndoJournalOptions): UndoJournal {
       const clean = validateItems(items);
       ready();
       const t = now();
-      try { purgeNow(t, 1); } catch { /* retention is best effort; never block a journal write */ }
+      try { purgeNow(t, isBulk(tool, clean.length)); } catch { /* retention is best effort; never block a journal write */ }
       for (let attempt = 0; attempt < 50; attempt++) {
         const id = newId();
         const batch: UndoBatch = { v: 1, id, account, createdAt: t, tool, kind, status: "pending", items: clean };
