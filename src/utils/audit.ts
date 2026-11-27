@@ -13,7 +13,7 @@ export interface AuditEntry {
   outcome: "ok" | "error" | "refused";
   code?: string;
   /** Present on `ok` entries of operations a human (or, in model mode, the assistant's own confirmed=true) approved. `op` is the first 16 hex of the operation hash. Entries from before 1.11.0 have none. */
-  approval?: { channel: "elicitation" | "cli" | "model"; op: string; code?: string };
+  approval?: { channel: "elicitation" | "dialog" | "cli" | "model"; op: string; code?: string };
   durationMs: number;
   prev: string;
   hash: string;

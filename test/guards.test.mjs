@@ -647,7 +647,7 @@ describe("PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE", () => {
       assert.deepEqual(cli(sb).map((a) => a[1]), ["info", "info", "create-folder", "copy", "upload"]);
     });
     await withFs({ "/my-files/Docs/old.txt": file }, {}, async (c, sb, { local }) => {
-      await c.call("drive_upload", { localPath: join(local, "old.txt"), remotePath: "/my-files/Docs", fileConflictStrategy: "create-new-revision" });
+      await c.call("drive_upload", { localPath: join(local, "old.txt"), remotePath: "/my-files/Docs", fileConflictStrategy: "create-new-revision", confirmed: true });
       assert.deepEqual(cli(sb).map((a) => a[1]), ["upload"]);
     });
   });
@@ -742,13 +742,14 @@ describe("startup: stdout stays pure JSON-RPC with every guard configured", () =
 });
 
 describe("startup: PROTON_DRIVE_AUDIT_LOG inside PROTON_DRIVE_SYNC_PATH", () => {
-  const start = async (sync, audit) => {
+  // A refusal must be waited for: slow runners need more than a second to exit.
+  const start = async (sync, audit, waitMs = 15_000) => {
     const sb = makeSandbox();
     const p = spawn(process.execPath, [DIST_INDEX], { env: fakeEnv("json", sb, { PROTON_DRIVE_SYNC_PATH: sync, PROTON_DRIVE_AUDIT_LOG: audit }), stdio: ["pipe", "pipe", "pipe"] });
     let err = "";
     p.stderr.on("data", (d) => { err += d; });
     const exited = new Promise((r) => p.on("exit", r));
-    await Promise.race([exited, sleep(1500)]);
+    await Promise.race([exited, sleep(waitMs)]);
     const code = p.exitCode;
     p.stdin.end();
     await exited;

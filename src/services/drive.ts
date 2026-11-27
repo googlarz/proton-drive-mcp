@@ -13,7 +13,7 @@ import type {
   TransferSummary,
   UploadResult,
 } from "../types/index.js";
-import { runDrive as defaultRunDrive, runDriveRaw as defaultRunDriveRaw } from "../utils/subprocess.js";
+import { runDrive as defaultRunDrive, runDriveRaw as defaultRunDriveRaw, type RunOptions } from "../utils/subprocess.js";
 import { DriveCliError, DriveNotAuthenticatedError, DriveParseError } from "../utils/errors.js";
 import { validateName } from "../utils/validation.js";
 import { invalidatePath } from "./walk.js";
@@ -25,7 +25,7 @@ function invalidateTrashAnd(path: string): void {
   invalidatePath("/photos-trash");
 }
 
-type Runner = (args: string[]) => Promise<unknown>;
+type Runner = (args: string[], opts?: RunOptions) => Promise<unknown>;
 type RawRunner = (args: string[]) => Promise<string>;
 
 // CLI v0.8.0 split the old unified --conflict-strategy into separate
@@ -271,8 +271,9 @@ export class DriveService {
 
   // list() plus each item's raw CLI node, for callers (the tree walker) that need
   // fields DriveFile drops: uid chain, revision mtime, claimed sha1, share flags.
-  async listEntries(remotePath: string, opts: { includeUid?: boolean; type?: "file" | "folder" } = {}): Promise<{ item: Record<string, unknown>; file: DriveFile }[]> {
+  async listEntries(remotePath: string, opts: { includeUid?: boolean; type?: "file" | "folder"; requireOutput?: boolean } = {}): Promise<{ item: Record<string, unknown>; file: DriveFile }[]> {
     const result = await this.run(opts.type ? ["filesystem", "list", "-t", opts.type, remotePath] : ["filesystem", "list", remotePath]);
+    if (result === null && opts.requireOutput) throw new DriveParseError(`The CLI returned no output when listing ${remotePath}.`);
     if (result === null) return [];
     if (!Array.isArray(result)) throw new DriveParseError(`Expected array from list, got: ${JSON.stringify(result).slice(0, 100)}`);
     // The CLI's order changes between calls and callers page by re-listing, so
@@ -644,8 +645,10 @@ export class DriveService {
   // Confirmed live: two trashed items with the same name both list as
   // /trash/<name>, so restore/delete by that path is ambiguous. uid (and the
   // trash time, when the CLI provides it) let the caller tell them apart.
+  // An empty trash lists as [] (the real CLI does that for empty listings), so no output at all is a failed listing.
+  // Callers rely on it for uniqueness checks and before permanent deletes.
   async listTrash(): Promise<DriveFile[]> {
-    return this.list("/trash", { includeUid: true });
+    return (await this.listEntries("/trash", { includeUid: true, requireOutput: true })).map((e) => e.file);
   }
 
   async trash(remotePath: string): Promise<void> {
@@ -667,8 +670,9 @@ export class DriveService {
     try {
       result = await this.run(args);
     } catch (err) {
-      // A failure of the whole call (e.g. a missing source) is rejected by the CLI before anything is applied.
-      if (err instanceof Error) err.message += " [the batch call failed; the CLI normally rejects a whole batch before applying anything, but list the folders before retrying]";
+      // A failure of the whole call (e.g. a missing source) is rejected by the CLI before anything is applied. An interrupted
+      // call is different: its message already says the outcome is unknown.
+      if (err instanceof Error && !(err instanceof DriveCliError && err.interrupted)) err.message += " [the batch call failed; the CLI normally rejects a whole batch before applying anything, but list the folders before retrying]";
       throw err;
     }
     try {
@@ -735,8 +739,10 @@ export class DriveService {
     return target;
   }
 
-  async emptyTrash(): Promise<void> {
-    try { await this.run(["filesystem", "empty-trash"]); } finally { invalidatePath("/trash"); invalidatePath("/photos-trash"); }
+  /** `items`: how many the caller saw in the trash; sizes the timeout. */
+  async emptyTrash(items?: number): Promise<void> {
+    const args = ["filesystem", "empty-trash"];
+    try { await (items === undefined ? this.run(args) : this.run(args, { items })); } finally { invalidatePath("/trash"); invalidatePath("/photos-trash"); }
   }
 
   // The destination is the target PARENT folder (unlike move). `newName` maps to

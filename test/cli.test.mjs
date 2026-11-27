@@ -108,6 +108,30 @@ describe("argument validation", () => {
     assert.match(r.stderr, /Invalid role/);
     assert.equal(r.calls.length, 0);
   });
+  const LINK = (role) => ({ env: { FAKE_STDOUT: JSON.stringify({ protonInvitations: [], nonProtonInvitations: [], members: [], urlAccess: { url: "https://drive.proton.me/urls/x", ...(role ? { role } : {}) } }) } });
+  const setUrlCall = (r) => r.calls.map((c) => c.argv ?? c).find((a) => a.includes("set-url"));
+
+  it("share set-url without --role keeps the existing link's role", async () => {
+    const r = await runCli(["share", "set-url", "/my-files/a"], LINK("editor"));
+    assert.equal(r.code, 0, r.stderr);
+    const a = setUrlCall(r);
+    assert.equal(a[a.indexOf("--role") + 1], "editor");
+  });
+
+  it("share set-url without --role makes a new link viewer", async () => {
+    const r = await runCli(["share", "set-url", "/my-files/a"], { env: { FAKE_STDOUT: JSON.stringify({ protonInvitations: [], nonProtonInvitations: [], members: [] }) } });
+    assert.equal(r.code, 0, r.stderr);
+    const a = setUrlCall(r);
+    assert.equal(a[a.indexOf("--role") + 1], "viewer");
+  });
+
+  it("share set-url without --role refuses when the existing role cannot be read", async () => {
+    const r = await runCli(["share", "set-url", "/my-files/a"], LINK(undefined));
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /--role/);
+    assert.equal(setUrlCall(r), undefined);
+  });
+
   it("share set-url rejects --role admin", async () => {
     const r = await runCli(["share", "set-url", "/my-files/a", "--role", "admin"]);
     assert.equal(r.code, 1);

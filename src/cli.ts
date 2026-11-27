@@ -18,7 +18,7 @@ import {
   type PhotoDownloadConflictStrategy,
 } from "./services/drive.js";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./utils/errors.js";
-import { checkCliAvailable } from "./utils/subprocess.js";
+import { checkCliAvailable, cliLaunchError } from "./utils/subprocess.js";
 import { runDoctor, formatDoctor } from "./utils/doctor.js";
 import { runInit } from "./utils/init.js";
 import { buildEntry, defaultConfigPath, isDirectory, resolveDriveCli, writeEntry, SERVER_KEY } from "./utils/claudeConfig.js";
@@ -345,7 +345,7 @@ function setupClaudeDesktop() {
   const rawSync = getFlag("--sync-path");
   const cliPath = resolveDriveCli();
   if (!cliPath) {
-    console.error("Error: proton-drive CLI not found. Install it from https://proton.me/download/drive/cli/index.html, or set PROTON_DRIVE_BIN to its absolute path (`which proton-drive`).");
+    console.error(`Error: ${cliLaunchError().message}`);
     process.exit(1);
   }
   const syncPath = rawSync !== undefined ? resolve(rawSync) : undefined;
@@ -430,9 +430,7 @@ async function run() {
 
   const cliCheck = await checkCliAvailable();
   if (!cliCheck.available) {
-    const msg = cliCheck.reason === "not_executable"
-      ? "Error: proton-drive CLI found but not executable.\nRun: chmod +x $(which proton-drive)"
-      : "Error: proton-drive CLI not found in PATH.\nDownload from https://proton.me/download/drive/cli/index.html, or set PROTON_DRIVE_BIN to its absolute path (find it with `which proton-drive`).";
+    const msg = `Error: ${cliLaunchError().message}`;
     console.error(msg);
     process.exit(1);
   }
@@ -620,7 +618,8 @@ async function run() {
           (removeAll.publicLink ? " A public link is still active — remove it with: share remove-url <path>" : ""));
       } else if (sub === "set-url") {
         const setUrlPath = requirePath(rest[0], "share set-url <path> [--role] [--password] [--expiration]");
-        const roleRaw = getFlag("--role") ?? "viewer";
+        const roleFlag = getFlag("--role");
+        let roleRaw = roleFlag ?? "viewer";
         if (!["viewer", "editor"].includes(roleRaw)) {
           console.error(`Invalid --role value: ${roleRaw}. Must be viewer or editor.`);
           process.exit(1);
@@ -629,6 +628,17 @@ async function run() {
         const rawExpiration = getFlag("--expiration");
         const password = rawPassword ? validateFlagValue(rawPassword, "password") : undefined;
         const expiration = rawExpiration ? validateFlagValue(rawExpiration, "expiration") : undefined;
+        if (roleFlag === undefined) {
+          // An omitted role keeps the existing link's role: it is never changed silently.
+          const before = await drive.shareStatus(setUrlPath);
+          if (before.shareUrl !== undefined || before.sharePasswordProtected !== undefined) {
+            if (before.shareUrlRole !== "viewer" && before.shareUrlRole !== "editor") {
+              console.error("This path already has a public link whose role could not be read, so it cannot be kept. Pass --role viewer or --role editor.");
+              process.exit(1);
+            }
+            roleRaw = before.shareUrlRole;
+          }
+        }
         print(await drive.shareSetUrl(setUrlPath, roleRaw as "viewer" | "editor", password, expiration));
       } else if (sub === "remove-url") {
         const removeUrlPath = requirePath(rest[0], "share remove-url <path>");

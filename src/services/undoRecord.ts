@@ -1,6 +1,6 @@
 import type { DriveService } from "./drive.js";
 import { splitRemotePath, unescapeName } from "./drive.js";
-import { currentAccountKey, cachedNode } from "./walk.js";
+import { currentAccountKey } from "./walk.js";
 import { pool } from "./analytics.js";
 import { createUndoJournal, resolveUndoDir, undoEnabled, type UndoItem, type UndoJournal, type UndoKind } from "../utils/undoJournal.js";
 import { assertUndoDirUsable } from "../utils/localguard.js";
@@ -50,15 +50,13 @@ export const IN_TRASH_REASON = "a same-named item is already in the trash or twi
 export interface Found { uid: string; parentUid?: string; name: string; size?: number }
 
 /**
- * uid, parent uid, name and size of each path. A walk still in the memory cache answers first (no CLI call); otherwise the item is read
- * from its parent folder's listing (one listing per folder). Paths not found are left out.
+ * uid, parent uid, name and size of each path, read from a fresh listing of its parent folder (one listing per folder). Never from the walk
+ * cache: an item replaced since the walk would be journalled under its old uid. Paths not found are left out.
  */
 async function lookup(drive: DriveService, paths: string[]): Promise<Map<string, Found>> {
   const out = new Map<string, Found>();
   const byParent = new Map<string, string[]>();
   for (const p of paths) {
-    const hit = cachedNode(p);
-    if (hit) { out.set(p, { uid: hit.uid, parentUid: hit.parentUid, name: unescapeName(splitRemotePath(p).name), size: hit.size }); continue; }
     const { parent } = splitRemotePath(p);
     byParent.set(parent, [...(byParent.get(parent) ?? []), p]);
   }
@@ -89,6 +87,9 @@ export interface BatchSpec {
   /** Say in the result that journalling is switched off (drive_cleanup, whose answer promises an undo code); the older tools stay silent about it. */
   reportOff?: boolean;
 }
+
+/** drive_undo only lists /trash; a trashed photo goes to /photos-trash. */
+export const PHOTO_TRASH_REASON = "trashed photos go to /photos-trash, which drive_undo cannot restore from";
 
 export interface Batch {
   /** Fields to merge into the tool result: undoId, notUndoable and the notes. Empty when journalling is off. */
@@ -121,8 +122,11 @@ export async function beginBatch(drive: DriveService, jo: JournalOpen, spec: Bat
     return { ...NONE, report: () => ({ undo: `undo not recorded: ${why}` }) };
   };
   try {
-    const sorted = [...new Set(spec.paths)].filter((p) => !spec.to || spec.to(p) !== p).sort();
-    if (sorted.length === 0) return NONE;
+    const changing = [...new Set(spec.paths)].filter((p) => !spec.to || spec.to(p) !== p).sort();
+    const sorted = changing.filter((p) => spec.kind !== "trash" || !p.startsWith("/photos/"));
+    const photos = changing.length - sorted.length;
+    const photoNote = `${photos} item(s) not undoable: ${PHOTO_TRASH_REASON}`;
+    if (sorted.length === 0) return photos ? { ...NONE, report: () => ({ notUndoable: photos, undo: photoNote }) } : NONE;
     const known = spec.known ?? new Map<string, Found>();
     const found = await lookup(drive, sorted.filter((p) => !known.has(p)));
     for (const p of sorted) { const k = known.get(p); if (k) found.set(p, k); }
@@ -150,9 +154,11 @@ export async function beginBatch(drive: DriveService, jo: JournalOpen, spec: Bat
     if (!begun) return NONE;
     const id = begun.id;
     const unrecorded = sorted.length - items.length;
-    const notUndoable = items.filter((i) => !i.restorable).length;
+    const unreliable = items.filter((i) => !i.restorable).length;
+    const notUndoable = unreliable + photos;
     const notes: string[] = [];
-    if (notUndoable > 0) notes.push(`${notUndoable} of ${items.length} item(s) cannot be undone reliably: ${IN_TRASH_REASON}`);
+    if (unreliable > 0) notes.push(`${unreliable} of ${items.length} item(s) cannot be undone reliably: ${IN_TRASH_REASON}`);
+    if (photos > 0) notes.push(photoNote);
     if (unrecorded > 0) notes.push(`${unrecorded} item(s) could not be looked up and are not in the undo record`);
     return {
       uids: items.map((i) => i.uid),

@@ -28,7 +28,7 @@
 //   FAKE_LOCKED_TIMES locked-then-json: how many calls fail with "database is locked" (default 2)
 //   FAKE_TRANSIENT_KIND   transient-then-json: ratelimit | timeout | reset | retryafter | notfound (counter via FAKE_COUNTER)
 //   FAKE_TRANSIENT_TIMES  transient-then-json: how many calls fail first (default 1)
-//   FAKE_STDOUT       payload printed in json / ansi-prefixed-json mode (default "[]")
+//   FAKE_STDOUT       payload printed in json / ansi-prefixed-json mode (default "[]"; json mode then lists one item in /trash)
 //   FAKE_SLEEP_MS     delay before answering in json mode
 //   FAKE_PIDFILE      hang mode appends {role,pid,argv0} lines (child + grandchild)
 //   FAKE_CLI_VERSION  version text override for `version` (default: CLI 0.8.0 / SDK 0.21.0 text; set verbatim, e.g. "garbage")
@@ -68,7 +68,10 @@ const payload = process.env.FAKE_STDOUT ?? "[]";
 switch (mode) {
   case "json": {
     const ms = Number(process.env.FAKE_SLEEP_MS ?? 0);
-    setTimeout(() => { process.stdout.write(payload + "\n"); process.exit(0); }, ms);
+    // Without FAKE_STDOUT the trash holds one item: an empty one is never asked about or emptied.
+    const oneTrashed = process.env.FAKE_STDOUT === undefined && argv[0] === "filesystem" && argv[1] === "list" && argv[2] === "/trash";
+    const reply = oneTrashed ? '[{"name":"old.txt","uid":"u1","type":"file"}]' : payload;
+    setTimeout(() => { process.stdout.write(reply + "\n"); process.exit(0); }, ms);
     break;
   }
   case "shuffle": {

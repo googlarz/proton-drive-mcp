@@ -49,7 +49,7 @@ describe("init: output", () => {
     const block = r.stdout.slice(r.stdout.indexOf("{\n"), r.stdout.lastIndexOf("}\n") + 1);
     assert.deepEqual(JSON.parse(block), { mcpServers: { "proton-drive-mcp": NPX_ENTRY } });
     // Claude Code line.
-    assert.ok(r.stdout.includes(`claude mcp add --env PROTON_DRIVE_BIN='${FAKE_CLI}' proton-drive -- npx -y proton-drive-mcp`));
+    assert.ok(r.stdout.includes(`claude mcp add proton-drive --env PROTON_DRIVE_BIN='${FAKE_CLI}' -- npx -y proton-drive-mcp`));
     assert.ok(!existsSync(join(d, "sub")));
   });
 
@@ -70,7 +70,7 @@ describe("init: output", () => {
     assert.equal(j.cliPath, FAKE_CLI);
     assert.deepEqual(j.claudeDesktop.entry, NPX_ENTRY);
     assert.equal(j.claudeDesktop.action, "dry-run");
-    assert.match(j.claudeCode, /^claude mcp add --env PROTON_DRIVE_BIN=/);
+    assert.match(j.claudeCode, /^claude mcp add proton-drive --env PROTON_DRIVE_BIN=/);
   });
 
   it("quotes the CLI path for the shell in single quotes (nothing expands, not even `!`)", async () => {
