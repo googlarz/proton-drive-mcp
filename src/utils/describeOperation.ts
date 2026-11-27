@@ -20,14 +20,23 @@ export function describeOperation(op: Operation): string {
   };
   const replacing = ["fileConflictStrategy", "folderConflictStrategy", "conflictStrategy"].some((k) => v[k] === "replace");
   const removing = ["fileConflictStrategy", "folderConflictStrategy", "conflictStrategy"].some((k) => v[k] === "remove");
-  const replaced = replacing ? " Items with the same name in Proton Drive may be replaced." : "";
+  const revising = v.fileConflictStrategy === "create-new-revision";
+  const replaced = (replacing ? " Items with the same name in Proton Drive may be replaced." : "") +
+    (revising ? " Files with the same name in Proton Drive are overwritten with a new version." : "");
+  /** Photos go to a separate trash this server cannot undo from; "reversible-no-undo" adds its own sentence below. */
+  const restorable = (text: string) => (op.effect === "reversible-no-undo" ? "" : text);
   const localDelete = removing ? " Files or folders on this computer with the same name are deleted first. This cannot be undone." : "";
 
   const sentence = ((): string => {
     switch (op.tool) {
       case "drive_auth_logout": return "Sign this computer out of Proton Drive. Nothing works with your Drive until you sign in again.";
       case "drive_delete": return `Permanently delete ${v.path ? name("path") : name("item")} from the trash. This cannot be undone.`;
-      case "drive_empty_trash": return "Permanently delete everything in the trash. This cannot be undone.";
+      case "drive_empty_trash": {
+        const base = "Permanently delete everything in the trash. This cannot be undone.";
+        if (typeof v.itemCount !== "number") return base;
+        const folders = Array.isArray(v.trashItems) && v.trashItems.some((n) => n.endsWith("/"));
+        return `${base} The trash holds ${v.itemCount} item(s)${folders ? "; folders (ending in /) are deleted with everything inside, which the byte total leaves out" : ""}. The photos trash is not emptied.`;
+      }
       case "drive_share_invite": {
         const may = v.role === "admin" ? "view, change and share it" : v.role === "editor" ? "view and change it" : "view it";
         return `Invite ${who("email")} to ${name("path")}. They will be able to ${may}, and they get an email right away.`;
@@ -36,7 +45,9 @@ export function describeOperation(op: Operation): string {
       case "drive_share_set_url": {
         const link = v.password === true ? "the link and the password" : "the link";
         const may = v.role === "editor" ? "view, download and change it" : "view and download it";
-        return `${v.replacesExistingLink === true ? "Change the" : "Create a"} public link to ${name("path")}. Anyone with ${link} can ${may}.`;
+        const changes = typeof v.roleChange === "string"
+          ? ` Role: ${who("roleChange")}. Password: ${who("passwordChange")}. Expiry: ${who("expirationChange")}.` : "";
+        return `${v.replacesExistingLink === true ? "Change the" : "Create a"} public link to ${name("path")}.${changes} Anyone with ${link} can ${may}.`;
       }
       case "drive_share_remove_url": return `Turn off the public link to ${name("path")}. The link stops working.`;
       case "drive_share_remove_all": return `Remove every member and pending invitation from ${name("path")}. A public link, if there is one, stays active.`;
@@ -46,7 +57,7 @@ export function describeOperation(op: Operation): string {
       case "photos_delete_album": return `Delete the album ${name("albumPath", "(unnamed)")}. This cannot be undone. Your own photos stay in your timeline.`;
       case "photos_remove_from_album": return `Remove the photo ${name("photoPath")} from the album ${name("albumPath", "(unnamed)")}.`;
       case "drive_bulk_move": return `Move ${items("moves")} into ${whole("destinationFolder")}.`;
-      case "drive_bulk_trash": return `Move ${items("paths")} to the trash. You can restore them from the trash.`;
+      case "drive_bulk_trash": return `Move ${items("paths")} to the trash.${restorable(" You can restore them from the trash.")}`;
       case "drive_cleanup": return `Move ${items("trash", "redundant item")} (extra copies and empty folders) to the trash.`;
       case "drive_undo": {
         const n = (k: string) => (Array.isArray(v[k]) ? (v[k] as string[]).length : 0);
@@ -62,7 +73,7 @@ export function describeOperation(op: Operation): string {
       case "drive_move": return `Move ${name("sourcePath")} to ${whole("destinationPath")}.`;
       case "drive_mkdir": return `Create the folder ${name("path")}.`;
       case "drive_rename": return `Rename ${name("path")} to ${whole("newName", "a new name")}.`;
-      case "drive_trash": return `Move ${name("path")} to the trash. You can restore it from the trash.`;
+      case "drive_trash": return `Move ${name("path")} to the trash.${restorable(" You can restore it from the trash.")}`;
       case "drive_restore": return `Restore ${v.path ? name("path") : name("item")} from the trash.`;
       case "photos_create_album": return `Create the photo album ${name("name", "(unnamed)")}.`;
       case "photos_update_album": return `Change the photo album ${name("albumPath", "(unnamed)")}.`;

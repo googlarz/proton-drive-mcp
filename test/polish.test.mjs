@@ -242,7 +242,8 @@ describe("elicitation for gated tools", () => {
       const r = await client.callTool({ name: "drive_empty_trash", arguments: {} });
       assert.equal(r.isError, true);
       assert.match(text(r), /declined/);
-      assert.deepEqual(nonVersionCalls(sb.argvLog), []);
+      // drive_empty_trash lists the trash before asking; nothing else may run
+      assert.deepEqual(nonVersionCalls(sb.argvLog).filter((a) => a[1] !== "list"), []);
     });
     await withClient({}, null, async (client, sb) => {
       // No capability: `confirmed` is no longer required, and the call is refused with a terminal approval code instead.
@@ -258,7 +259,8 @@ describe("elicitation for gated tools", () => {
       const r = await client.callTool({ name: "drive_empty_trash", arguments: { confirmed: true } });
       assert.equal(r.isError, true);
       assert.match(text(r), /failed or timed out/);
-      assert.deepEqual(nonVersionCalls(sb.argvLog), []);
+      // drive_empty_trash lists the trash before asking; nothing else may run
+      assert.deepEqual(nonVersionCalls(sb.argvLog).filter((a) => a[1] !== "list"), []);
     });
   });
 

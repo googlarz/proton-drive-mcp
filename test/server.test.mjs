@@ -179,7 +179,9 @@ describe("conditional confirmed gates", () => {
     const plain = s.calls().at(-1);
     assert.equal((plain.argv ?? plain).includes("--skip-thumbnails"), false);
   });
-  for (const strat of ["skip", "create-new-revision", "rename"]) {
+  it("drive_upload fileConflictStrategy=create-new-revision is refused without confirmed", () => refused("drive_upload", { ...up, fileConflictStrategy: "create-new-revision" }));
+  it("drive_upload create-new-revision runs with confirmed:true", () => allowed("drive_upload", { ...up, fileConflictStrategy: "create-new-revision", confirmed: true }));
+  for (const strat of ["skip", "rename"]) {
     it(`drive_upload fileConflictStrategy=${strat} needs no confirmation`, () => allowed("drive_upload", { ...up, fileConflictStrategy: strat }));
   }
   it("drive_upload with defaults needs no confirmation", () => allowed("drive_upload", up));
@@ -495,7 +497,8 @@ describe("CLI output handling and error sanitization", () => {
 
   it("masks --password even when the CLI itself echoes its argv on stderr", () =>
     withServer("fail-stderr-echo", {}, async (c) => {
-      const r = await c.call("drive_share_set_url", { path: P, password: SECRET, resetSettings: true, confirmed: true });
+      // role given: nothing has to be read first, so the failing call is set-url itself
+      const r = await c.call("drive_share_set_url", { path: P, role: "viewer", password: SECRET, resetSettings: true, confirmed: true });
       assert.equal(r.isError, true);
       assert.ok(!r.text.includes(SECRET), `password leaked: ${r.text}`);
       assert.match(r.text, /--password \*\*\*/);

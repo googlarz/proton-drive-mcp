@@ -55,8 +55,8 @@ import { driveReadMany } from "./services/readMany.js";
 import { driveContentIndex, driveSearchContent } from "./services/contentIndex.js";
 import { snapshotBeforeOverwrite, snapshotLocalBeforeOverwrite, snapshotEnabled, type Snapshot } from "./services/snapshot.js";
 import { AuditLog, auditLogInside, redactArgs, canonical, type AuditEntry } from "./utils/audit.js";
-import { ApprovalGate, requiresApproval, resolveApprovalMode, underShared, type ApprovalMode, type Effect, type Elicit, type FieldValue, type GateContext, type Operation } from "./utils/approval.js";
-import { createApprovalStore, resolveApprovalDir, type ApprovalStore } from "./utils/approvalStore.js";
+import { ApprovalGate, NO_RETRY, approvalSummary, opHash, requiresApproval, resolveApprovalMode, terminalSummary, underPhotos, underShared, type ApprovalMode, type Effect, type Elicit, type ElicitResult, type FieldValue, type GateContext, type Operation } from "./utils/approval.js";
+import { createApprovalStore, resolveApprovalDir, MAX_SUMMARY_CHARS, type ApprovalStore } from "./utils/approvalStore.js";
 import { askMacDialog, dialogTimeoutSeconds, nativeDialogEnabled, type DialogExec } from "./utils/macDialog.js";
 import { assertApprovalDirUsable, assertUndoDirUsable } from "./utils/localguard.js";
 import { resolveUndoDir, undoEnabled } from "./utils/undoJournal.js";
@@ -145,6 +145,8 @@ const fieldsOf = (o: Record<string, FieldValue | undefined>): Record<string, Fie
   Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Record<string, FieldValue>;
 /** "outward" when something ends up in /shared-with-me, else the given default. */
 const effectFor = (dflt: Effect, paths: string[]): Effect => (paths.some(underShared) ? "outward" : dflt);
+/** Trash: items from the photo timeline cannot be undone, so the approval must not say they can. */
+const trashEffect = (paths: string[]): Effect => effectFor(paths.some(underPhotos) ? "reversible-no-undo" : "reversible", paths);
 
 function paginate<T>(all: T[], a: Record<string, unknown>, defaultLimit: number) {
   const limit = typeof a.limit === "number" ? a.limit : defaultLimit;
@@ -350,7 +352,7 @@ const TOOLS = [
           type: "string",
           enum: ["skip", "create-new-revision", "rename", "replace"],
           description:
-            "'skip' keeps the existing remote file (default). 'create-new-revision' uploads as a new version, keeping history. 'rename' uploads under a unique name. 'replace' trashes the remote file first — confirm with user.",
+            "'skip' keeps the existing remote file (default). 'create-new-revision' overwrites with a new version, keeping history. 'rename' uploads under a unique name. 'replace' trashes the remote file first — confirm with user.",
         },
         folderConflictStrategy: {
           type: "string",
@@ -710,7 +712,7 @@ const TOOLS = [
         role: {
           type: "string",
           enum: ["viewer", "editor"],
-          description: "Access level for anyone with the link. Defaults to 'viewer' if omitted.",
+          description: "Access level for anyone with the link. Omitted: an existing link keeps its role, a new one is 'viewer'.",
         },
         password: {
           type: "string",
@@ -1305,7 +1307,7 @@ const CONFIRM_ALWAYS = new Set([
   "drive_bulk_move", "drive_bulk_trash", "drive_cleanup",
 ]);
 const CONFIRM_CONDITIONAL: Record<string, string> = {
-  drive_upload: "when fileConflictStrategy or folderConflictStrategy is 'replace' (it trashes the existing remote item)",
+  drive_upload: "when a conflict strategy is 'replace' or 'create-new-revision' (overwrites existing items)",
   drive_download: "when fileConflictStrategy or folderConflictStrategy is 'remove' (it deletes the existing LOCAL file or folder)",
   photos_download: "when conflictStrategy is 'remove' (it deletes the existing LOCAL file)",
   drive_write_file: "when the file already exists (it would be overwritten)",
@@ -1370,6 +1372,8 @@ const HUMAN_DESCRIPTION_EDITS: Record<string, [from: string, to: string]> = {
   drive_cleanup: ["With confirmed=true: trashes only if the user approved.", "With confirmed=true the server first asks the user to approve the exact list, and trashes nothing if Drive changed meanwhile."],
 };
 const BULK_TOOLS = new Set(["drive_bulk_move", "drive_bulk_trash", "drive_cleanup"]);
+/** Tools whose model-mode question is asked by their own code. */
+const ASKS_ITSELF = new Set([...BULK_TOOLS, "drive_undo", "drive_empty_trash"]);
 
 function buildToolDefs(humanApproval: boolean): ToolDef[] {
   return TOOLS.map((t) => {
@@ -1557,21 +1561,6 @@ const GetPromptLooseSchema = GetPromptRequestSchema.extend({
   params: GetPromptRequestSchema.shape.params.extend({ arguments: CallToolRequestSchema.shape.params.shape.arguments }),
 });
 
-async function elicitApproval(server: Server, message: string, signal?: AbortSignal): Promise<boolean> {
-  try {
-    const res = await server.elicitInput(
-      {
-        message,
-        requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Approve this action", default: true } }, required: ["approve"] },
-      },
-      { timeout: 120_000, signal },
-    );
-    return res.action === "accept" && res.content?.approve === true;
-  } catch {
-    return false;
-  }
-}
-
 export interface MainOptions {
   /** Test seam for the native dialog. Only code that imports main() can set it: no environment variable, flag or setting does. */
   dialog?: { platform: NodeJS.Platform; exec: DialogExec };
@@ -1610,14 +1599,29 @@ export async function main(options: MainOptions = {}) {
   const declinedAt: number[] = [];
   const MAX_DECLINED_PER_MINUTE = 5;
   const canElicit = () => !!server.getClientCapabilities()?.elicitation?.form;
-  // Returns true only when the human approved. Never prompts when the client cannot, or when over budget.
-  const askApproval = async (message: string): Promise<boolean> => {
+  // Model mode's own question. "accept" only when the human approved; "suppressed" when over budget (nobody is asked).
+  const askApproval = async (message: string): Promise<ElicitResult | "suppressed"> => {
     const now = Date.now();
     while (declinedAt.length && now - declinedAt[0] > 60_000) declinedAt.shift();
-    if (declinedAt.length >= MAX_DECLINED_PER_MINUTE) return false;
-    const approved = await elicitApproval(server, message, callContext.getStore()?.signal);
-    if (!approved) declinedAt.push(now);
-    return approved;
+    if (declinedAt.length >= MAX_DECLINED_PER_MINUTE) return "suppressed";
+    const answer = await elicitHuman(message, callContext.getStore()?.signal);
+    if (answer !== "accept") declinedAt.push(now);
+    return answer;
+  };
+  // Tools the user said no to (model mode): from then on confirmed=true alone does not run them, the user is asked again.
+  const humanDeclined = new Set<string>();
+  /** undefined when the user approved; otherwise the refusal. A decline is final: it never turns into "call again with confirmed=true". */
+  const modelAnswer = (tool: string, answer: ElicitResult | "suppressed"): ToolResult | undefined => {
+    if (answer === "accept") { humanDeclined.delete(tool); return undefined; }
+    if (answer === "decline") {
+      humanDeclined.add(tool);
+      return refuse("approval_declined", `The user declined ${tool}. Nothing was changed. ${NO_RETRY}`);
+    }
+    if (answer === "suppressed") {
+      humanDeclined.add(tool);
+      return refuse("approval_unavailable", `${tool} was not run: too many approval requests were declined or failed in the last minute, so the user is not being asked again for now. ${NO_RETRY}`);
+    }
+    return refuse("approval_unavailable", `${tool} was not run: the user did not approve (the question was closed or failed). Nothing was changed. ${NO_RETRY}`);
   };
 
   const server = new Server(
@@ -1631,7 +1635,7 @@ export async function main(options: MainOptions = {}) {
       const res = await server.elicitInput(
         {
           message: summary,
-          requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Approve this action", default: true } }, required: ["approve"] },
+          requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Tick to allow. Leaving it unticked refuses.", default: false } }, required: ["approve"] },
         },
         { timeout: 120_000, signal },
       );
@@ -1666,8 +1670,10 @@ export async function main(options: MainOptions = {}) {
   };
   // Channel 2: the server's own macOS dialog, for a client that cannot elicit.
   const dialogSeconds = dialogTimeoutSeconds(process.env);
+  // Aborted once the client is gone: a dialog still on screen then closes and cannot approve anything.
+  const clientGone = new AbortController();
   const nativeDialog = nativeDialogEnabled(process.env, options.dialog?.platform ?? process.platform)
-    ? (text: string, signal?: AbortSignal) => askMacDialog(text, { seconds: dialogSeconds, signal, exec: options.dialog?.exec })
+    ? (text: string, signal?: AbortSignal) => askMacDialog(text, { seconds: dialogSeconds, signal: signal ? AbortSignal.any([signal, clientGone.signal]) : clientGone.signal, exec: options.dialog?.exec })
     : undefined;
   const gate = new ApprovalGate({
     mode: apMode,
@@ -1748,6 +1754,21 @@ export async function main(options: MainOptions = {}) {
       try { const hit = (await drive.listTrash()).find((f) => f.uid === uid); return { item: hit ? hit.path : NOT_RESOLVED }; }
       catch { return { item: NOT_RESOLVED }; }
     };
+    // What drive_empty_trash would delete (/trash only: the CLI's empty-trash leaves /photos-trash alone). Names are shown,
+    // the digest binds the approval to these exact items.
+    const emptyTrashOperation = async (): Promise<Operation> => {
+      const items = await drive.listTrash();
+      items.sort((x, y) => x.name.localeCompare(y.name) || ((x.uid ?? "") < (y.uid ?? "") ? -1 : 1));
+      return {
+        tool: "drive_empty_trash", effect: "irreversible",
+        fields: {
+          itemCount: items.length,
+          totalBytes: items.reduce((sum, f) => sum + (f.size ?? 0), 0),
+          trashItems: items.map((f) => (f.type === "folder" ? `${f.name}/` : f.name)),
+          listingDigest: digest(canonical(items.map((f) => [f.uid ?? null, f.name, f.type, f.size ?? null, f.trashedAt ?? null]))),
+        },
+      };
+    };
     const invitation = async (uid: string): Promise<Record<string, FieldValue>> => {
       try {
         const hit = (await drive.listInvitations()).find((i) => i.uid === uid);
@@ -1800,6 +1821,12 @@ export async function main(options: MainOptions = {}) {
           return refuse("audit", `${name} refused: the audit log (PROTON_DRIVE_AUDIT_LOG) cannot be written, so changes are blocked. Reads still work.`);
         }
       }
+    }
+
+    // The user declined this tool earlier (model mode): the assistant's confirmed=true no longer speaks for them.
+    if (apMode === "model" && a.confirmed === true && humanDeclined.has(name) && !ASKS_ITSELF.has(name) && canElicit()) {
+      const no = modelAnswer(name, await askApproval(`${name} needs your approval. You declined it earlier.\n${describeArgs(a)}`));
+      if (no) return no;
     }
 
     // One batch that trashes, moves or restores many items runs at a time, from plan to journal. A second apply that arrives meanwhile is
@@ -1876,8 +1903,11 @@ export async function main(options: MainOptions = {}) {
             return fail(`folderConflictStrategy must be skip, merge, rename, or replace`);
           }
           const replacing = fcs === "replace" || dcs2 === "replace";
-          if (replacing && apMode === "model" && a.confirmed !== true) {
-            throw new NeedsConfirmationError("drive_upload with strategy 'replace' trashes the existing remote item. Describe this to the user, get their explicit OK, then call again with confirmed=true.");
+          // A new revision overwrites the existing file's content too (whatever the folder strategy); snapshots stay tied to 'replace'.
+          const overwrites = replacing || fcs === "create-new-revision";
+          if (overwrites && apMode === "model" && a.confirmed !== true) {
+            const what = replacing ? "'replace' trashes the existing remote item" : "'create-new-revision' overwrites the content of existing remote files";
+            throw new NeedsConfirmationError(`drive_upload with strategy ${what}. Describe this to the user, get their explicit OK, then call again with confirmed=true.`);
           }
           const uploadLocal = validateLocalPath(a.localPath, { scan: true, upload: true });
           const uploadRemote = validateRemotePath(a.remotePath);
@@ -1895,7 +1925,7 @@ export async function main(options: MainOptions = {}) {
               effect: effectFor("reversible", [uploadRemote, uploadTarget]),
               fields: { localPath: uploadLocal, remotePath: uploadRemote, fileConflictStrategy: fcs, folderConflictStrategy: dcs2, skipThumbnails },
             },
-            gateNeeded(replacing, { fileConflictStrategy: fcs, folderConflictStrategy: dcs2 }, { resultingPaths: [uploadRemote, uploadTarget] }),
+            gateNeeded(overwrites, { fileConflictStrategy: fcs, folderConflictStrategy: dcs2 }, { resultingPaths: [uploadRemote, uploadTarget] }),
           );
           if (uploadDenied) return uploadDenied;
           if (snapshotUpload && fcs === "replace") {
@@ -2113,7 +2143,7 @@ export async function main(options: MainOptions = {}) {
 
         case "drive_trash": {
           const trashPath = validateRemotePath(a.path);
-          const denied = await requireApproval({ tool: name, effect: effectFor("reversible", [trashPath]), fields: { path: trashPath } }, gateNeeded(false, {}, { sourcePaths: [trashPath] }));
+          const denied = await requireApproval({ tool: name, effect: trashEffect([trashPath]), fields: { path: trashPath } }, gateNeeded(false, {}, { sourcePaths: [trashPath] }));
           if (denied) return denied;
           const trashBatch = await beginBatch(drive, await getJournal(), { tool: name, kind: "trash", paths: [trashPath] });
           try { await drive.trash(trashPath); } catch (err) { await trashBatch.settleAfterError(); throw err; }
@@ -2143,9 +2173,8 @@ export async function main(options: MainOptions = {}) {
           }
           if (movePlan.problems.length) return fail(`drive_bulk_move not applied, nothing moved: ${JSON.stringify(movePlan.problems)}`);
           if (apMode === "model") {
-            if (canElicit() && !(await askApproval(bulkPrompt("drive_bulk_move", "Move", sources, destFolder)))) {
-              return fail("drive_bulk_move not applied, nothing moved: the user did not approve.");
-            }
+            const no = canElicit() ? modelAnswer(name, await askApproval(bulkPrompt("drive_bulk_move", "Move", sources, destFolder))) : undefined;
+            if (no) return no;
           } else {
             const movedTo = resultingPaths(name, { sources, destinationFolder: destFolder });
             const denied = await requireApproval({
@@ -2176,11 +2205,10 @@ export async function main(options: MainOptions = {}) {
           }
           if (trashPlan.problems.length) return fail(`drive_bulk_trash not applied, nothing trashed: ${JSON.stringify(trashPlan.problems)}`);
           if (apMode === "model") {
-            if (canElicit() && !(await askApproval(bulkPrompt("drive_bulk_trash", "Trash", trashPaths)))) {
-              return fail("drive_bulk_trash not applied, nothing trashed: the user did not approve.");
-            }
+            const no = canElicit() ? modelAnswer(name, await askApproval(bulkPrompt("drive_bulk_trash", "Trash", trashPaths))) : undefined;
+            if (no) return no;
           } else {
-            const denied = await requireApproval({ tool: name, effect: effectFor("reversible", trashPaths), fields: { paths: trashPlan.plan.map((p) => p.source) } }, true);
+            const denied = await requireApproval({ tool: name, effect: trashEffect(trashPaths), fields: { paths: trashPlan.plan.map((p) => p.source) } }, true);
             if (denied) return denied;
             const again = planBulkTrash(trashPaths, await loadListing(drive, foldersToList(trashPaths)));
             if (canonical(again) !== canonical(trashPlan)) {
@@ -2214,9 +2242,8 @@ export async function main(options: MainOptions = {}) {
           if (a.confirmed !== true) return ok({ applied: false, ...planView, next: applyNext + more });
           const cleanupPaths = cleanupPlan.items.map((i) => i.path);
           if (apMode === "model") {
-            if (canElicit() && !(await askApproval(bulkPrompt("drive_cleanup", "Trash", cleanupPaths)))) {
-              return fail("drive_cleanup not applied, nothing trashed: the user did not approve.");
-            }
+            const no = canElicit() ? modelAnswer(name, await askApproval(bulkPrompt("drive_cleanup", "Trash", cleanupPaths))) : undefined;
+            if (no) return no;
           } else {
             // Without a working undo record the dialog must not promise "can be undone".
             const cleanupEffect = (await getJournal()).journal ? "reversible" : "reversible-no-undo";
@@ -2274,9 +2301,8 @@ export async function main(options: MainOptions = {}) {
               return refuse("nothing_restorable", `Nothing in batch ${undoPlan.id} can be undone${why ? ` (${why})` : ""}.`);
             }
             if (apMode === "model") {
-              if (canElicit() && !(await askApproval(bulkPrompt("drive_undo", "Restore or move back", [...undoPlan.restore, ...undoPlan.moveBack])))) {
-                return fail("drive_undo not applied, nothing changed: the user did not approve.");
-              }
+              const no = canElicit() ? modelAnswer(name, await askApproval(bulkPrompt("drive_undo", "Restore or move back", [...undoPlan.restore, ...undoPlan.moveBack]))) : undefined;
+              if (no) return no;
             } else {
               // Outward when anything is restored or moved from or into /shared-with-me: every destination (the item paths) and every move source.
               const undoPaths = [...undoPlan.items.filter((i) => i.restorable).map((i) => i.path), ...undoPlan.restore, ...undoPlan.moveBack];
@@ -2309,15 +2335,33 @@ export async function main(options: MainOptions = {}) {
         }
 
         case "drive_empty_trash": {
-          if (apMode === "model" && a.confirmed !== true) {
+          // Model mode with a client that can ask: the user sees the listed items, like in the other modes.
+          const askModel = apMode === "model" && canElicit() && (a.confirmed !== true || humanDeclined.has(name));
+          if (apMode === "model" && a.confirmed !== true && !askModel) {
             throw new NeedsConfirmationError(
               "drive_empty_trash requires confirmed=true. " +
               "Use drive_list_trash first to show the user what will be deleted, then ask for confirmation."
             );
           }
-          const denied = await requireApproval({ tool: name, effect: "irreversible", fields: {} }, true);
-          if (denied) return denied;
-          await drive.emptyTrash();
+          const listed = apMode !== "model" || askModel ? await emptyTrashOperation() : undefined;
+          // Never approved on a partial list: what cannot be recorded in full is refused.
+          if (listed && terminalSummary(listed).length > MAX_SUMMARY_CHARS) {
+            return refuse("approval_unavailable", `drive_empty_trash was not run: the trash holds ${listed.fields.itemCount} items, too many to list for approval. Nothing was deleted. Tell the user to empty it in the Proton Drive web or desktop app, or to delete items first (drive_delete).`);
+          }
+          const op: Operation = listed ?? { tool: name, effect: "irreversible", fields: {} };
+          if (listed && askModel) {
+            const no = modelAnswer(name, await askApproval(approvalSummary(listed)));
+            if (no) return no;
+            note.approval = { channel: "model", op: opHash(listed).slice(0, 16) };
+          } else {
+            const denied = await requireApproval(op, true);
+            if (denied) return denied;
+          }
+          // The approval covers exactly the listed items: list again and compare.
+          if (listed && opHash(await emptyTrashOperation()) !== opHash(listed)) {
+            return refuse("approval_changed", "drive_empty_trash not applied, nothing deleted: the trash changed after the user approved the list. Call drive_empty_trash again to ask about the current contents.");
+          }
+          await drive.emptyTrash(listed?.fields.itemCount as number | undefined);
           return ok({ message: "Trash emptied." });
         }
 
@@ -2376,14 +2420,16 @@ export async function main(options: MainOptions = {}) {
         case "drive_share_set_url": {
           legacyNeed("drive_share_set_url", "creates or replaces a PUBLIC link that anyone with the URL can open.");
           const setUrlPath = validateRemotePath(a.path);
-          const role = typeof a.role === "string" ? a.role : "viewer";
-          if (!["viewer", "editor"].includes(role)) return fail("role must be viewer or editor");
+          const roleArg = typeof a.role === "string" ? a.role : undefined;
+          if (roleArg !== undefined && !["viewer", "editor"].includes(roleArg)) return fail("role must be viewer or editor");
+          let role = roleArg ?? "viewer";
           const password = typeof a.password === "string" && a.password ? validateFlagValue(a.password, "password") : undefined;
           const expiration = typeof a.expiration === "string" && a.expiration ? validateFlagValue(a.expiration, "expiration") : undefined;
           const resetSettings = a.resetSettings === true;
           const checkLostSettings = (!password || !expiration) && !resetSettings;
           let replacesExistingLink: boolean | undefined;
-          if (checkLostSettings || apMode !== "model") {
+          let current: { digest: string; changes: Record<string, string> } | undefined;
+          if (checkLostSettings || apMode !== "model" || roleArg === undefined) {
             // set-url replaces the link's settings, so whatever this call omits would be silently removed.
             const before = await drive.shareStatus(setUrlPath); // a failed read refuses too: unknown settings are not safe to overwrite
             replacesExistingLink = before.shareUrl !== undefined || before.sharePasswordProtected !== undefined;
@@ -2393,11 +2439,29 @@ export async function main(options: MainOptions = {}) {
                 return refuse("link_settings", `drive_share_set_url refused: ${showValue(setUrlPath)} already has a public link, and this call does not pass its ${lost.join(" and ")}, which would be REMOVED (set-url replaces all link settings). Nothing was changed. Pass ${lost.length > 1 ? "them" : "it"} again, or pass resetSettings=true to drop ${lost.length > 1 ? "them" : "it"} on purpose.`);
               }
             }
+            if (replacesExistingLink) {
+              const { shareUrlRole: was, sharePasswordProtected: hadPassword, shareUrlExpiresAt: expired } = before;
+              // An omitted role keeps the link's role: it is never changed silently.
+              if (roleArg === undefined) {
+                if (was !== "viewer" && was !== "editor") {
+                  return refuse("link_settings", `drive_share_set_url refused: ${showValue(setUrlPath)} already has a public link whose role could not be read, so it cannot be kept. Nothing was changed. Ask the user which access the link should give and pass role.`);
+                }
+                role = was;
+              }
+              current = {
+                digest: digest(canonical([was ?? null, hadPassword ?? false, expired ?? null])),
+                changes: {
+                  roleChange: `${was ?? "unknown"} -> ${role}`,
+                  passwordChange: `${hadPassword ? "set" : "not set"} -> ${password ? (hadPassword ? "set (replaced)" : "set") : hadPassword ? "not set (REMOVED)" : "not set"}`,
+                  expirationChange: `${expired ?? "not set"} -> ${expiration ?? (expired ? "not set (REMOVED)" : "not set")}`,
+                },
+              };
+            }
           }
           const denied = await requireApproval({
             tool: name, effect: "outward",
-            fields: fieldsOf({ path: setUrlPath, role, passwordDigest: password === undefined ? null : passwordDigest(password), expiration: expiration ?? null, resetSettings, replacesExistingLink }),
-            display: { password: password !== undefined },
+            fields: fieldsOf({ path: setUrlPath, role, passwordDigest: password === undefined ? null : passwordDigest(password), expiration: expiration ?? null, resetSettings, replacesExistingLink, currentLinkDigest: current?.digest }),
+            display: { password: password !== undefined, ...current?.changes },
           }, true);
           if (denied) return denied;
           const link = await drive.shareSetUrl(setUrlPath, role as "viewer" | "editor", password, expiration);
@@ -2683,8 +2747,10 @@ export async function main(options: MainOptions = {}) {
         // let the human (never the model) grant it; any failure keeps the refusal.
         if (!confirmationRefusals.has(first) || !canElicit()) return first;
         const reason = (first.content?.[0]?.text ?? "").replace(/\s*(Describe this to the user|Ask the user|Show the user|Use \w+ first).*$/s, "");
-        const asked = await askApproval(`${req.params.name} needs your approval. ${showValue(reason, 300, 100)}\n${describeArgs(req.params.arguments ?? {})}`);
-        return asked ? handleCall({ params: { ...req.params, arguments: { ...(req.params.arguments ?? {}), confirmed: true } } }) : first;
+        const answer = await askApproval(`${req.params.name} needs your approval. ${showValue(reason, 300, 100)}\n${describeArgs(req.params.arguments ?? {})}`);
+        // Nobody said no (closed or failed): the first refusal stands, as in 1.10.1.
+        if (answer === "cancel" || answer === "error") return first;
+        return modelAnswer(req.params.name, answer) ?? handleCall({ params: { ...req.params, arguments: { ...(req.params.arguments ?? {}), confirmed: true } } });
       });
     } finally {
       inFlight--;
@@ -2697,7 +2763,7 @@ export async function main(options: MainOptions = {}) {
     removeAllTempDirsSync();
     process.exit(code);
   };
-  server.onclose = () => { abortBackgroundRefreshes(); killAllChildren(); removeAllTempDirsSync(); };
+  server.onclose = () => { clientGone.abort(); abortBackgroundRefreshes(); killAllChildren(); removeAllTempDirsSync(); };
   process.once("SIGTERM", () => shutdown(0));
   process.once("SIGINT", () => shutdown(0));
   process.stdout.on("error", (e: NodeJS.ErrnoException) => { if (e.code === "EPIPE") shutdown(0); });
@@ -2705,7 +2771,9 @@ export async function main(options: MainOptions = {}) {
   process.on("unhandledRejection", (err) => { logger.error("Unhandled rejection:", err); shutdown(1); });
   // Host went away: let in-flight calls finish briefly (one-shot `echo | node` use),
   // then kill whatever CLI is still running instead of lingering until its timeout.
+  process.stdin.on("close", () => clientGone.abort());
   process.stdin.on("end", () => {
+    clientGone.abort();
     if (inFlight > 0) setTimeout(() => shutdown(0), 15_000).unref();
   });
 

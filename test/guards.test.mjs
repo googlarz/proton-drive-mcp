@@ -647,7 +647,7 @@ describe("PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE", () => {
       assert.deepEqual(cli(sb).map((a) => a[1]), ["info", "info", "create-folder", "copy", "upload"]);
     });
     await withFs({ "/my-files/Docs/old.txt": file }, {}, async (c, sb, { local }) => {
-      await c.call("drive_upload", { localPath: join(local, "old.txt"), remotePath: "/my-files/Docs", fileConflictStrategy: "create-new-revision" });
+      await c.call("drive_upload", { localPath: join(local, "old.txt"), remotePath: "/my-files/Docs", fileConflictStrategy: "create-new-revision", confirmed: true });
       assert.deepEqual(cli(sb).map((a) => a[1]), ["upload"]);
     });
   });

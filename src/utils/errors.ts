@@ -22,7 +22,9 @@ export class DriveCliNotFoundError extends Error {
 export class DriveCliError extends Error {
   constructor(
     message: string,
-    public readonly stderr: string = ""
+    public readonly stderr: string = "",
+    /** A change was cut off part way (timeout, cancel): what it applied is unknown. */
+    public readonly interrupted: boolean = false
   ) {
     super(message);
     this.name = "DriveCliError";

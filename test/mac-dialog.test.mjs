@@ -228,9 +228,10 @@ function gate(answers, { mode = "human", store = memStore(), elicit, ...rest } =
 const DEL = { tool: "drive_delete", effect: "irreversible", fields: { path: "/trash/a" } };
 
 describe("gate: channel order", () => {
-  it("a client that can elicit never gets the native dialog, whatever it answers", async () => {
-    for (const answer of ["accept", "decline", "cancel", "error"]) {
-      const g = gate(["accept"], { elicit: async () => answer });
+  it("a client whose dialog answers (yes, no, or closed by a person) never gets the native dialog", async () => {
+    for (const answer of ["accept", "decline", "cancel"]) {
+      let t = 0;
+      const g = gate(["accept"], { now: () => t, elicit: async () => { t += 2000; return answer; } });
       const r = await g.gate.require(DEL);
       assert.equal(g.shown.length, 0, answer);
       assert.equal(r.ok, answer === "accept");
@@ -378,7 +379,9 @@ describe("gate: channel order", () => {
     const op = trashOp(many(120));
     const r = await new ApprovalGate({ mode: "human", store }).require(op);
     assert.match(r.message, /This client cannot ask the user\./);
-    assert.deepEqual(store.requests, [{ tool: op.tool, opHash: opHash(op), summary: renderOperation(op), fresh: true }]);
+    assert.equal(store.requests.length, 1);
+    // a destructive record lists every item
+    for (const p of many(120)) assert.ok(store.requests[0].summary.includes(`  - ${p}`), p);
   });
 });
 
@@ -437,10 +440,10 @@ describe("server wiring (injected runner)", { concurrency: 4 }, () => {
     }));
   }
 
-  it("an eliciting client: elicitation only, checkbox pre-ticked so Submit is the decision", () => withDialogServer({ elicit: { action: "accept", content: { approve: true } } }, async (c) => {
+  it("an eliciting client: elicitation only, checkbox unticked so only a deliberate tick approves", () => withDialogServer({ elicit: { action: "accept", content: { approve: true } } }, async (c) => {
     assert.ok(!(await c.call(...EMPTY)).isError);
     assert.equal(c.dialogs().length, 0);
-    assert.equal(c.requests[0].requestedSchema.properties.approve.default, true);
+    assert.equal(c.requests[0].requestedSchema.properties.approve.default, false);
   }));
 
   it("an eliciting client that unticks the box declines", () => withDialogServer({ elicit: { action: "accept", content: { approve: false } } }, async (c) => {
@@ -448,14 +451,14 @@ describe("server wiring (injected runner)", { concurrency: 4 }, () => {
     assert.equal(c.changes().length, 0);
   }));
 
-  it("model mode: no native dialog; the old pre-prompt still asks through elicitation, pre-ticked", async () => {
+  it("model mode: no native dialog; the old pre-prompt still asks through elicitation, unticked", async () => {
     await withDialogServer({ approval: "model" }, async (c) => {
       assert.ok(!(await c.call(...EMPTY)).isError);
       assert.equal(c.dialogs().length, 0);
     });
     await withDialogServer({ approval: "model", elicit: { action: "accept", content: { approve: true } } }, async (c) => {
       assert.ok(!(await c.call("drive_empty_trash", { confirmed: false })).isError);
-      assert.equal(c.requests[0].requestedSchema.properties.approve.default, true);
+      assert.equal(c.requests[0].requestedSchema.properties.approve.default, false);
       assert.equal(c.dialogs().length, 0);
     });
   });

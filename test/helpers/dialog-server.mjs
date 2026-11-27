@@ -10,6 +10,11 @@ const exec = (file, args, options, callback) => {
   appendFileSync(process.env.FAKE_DIALOG_LOG, JSON.stringify({ file, args }) + "\n");
   const mode = process.env.FAKE_DIALOG ?? "allow";
   const done = (err, out = "", errOut = "") => setImmediate(callback, err, out, errOut);
+  // "pending": nobody answers; being killed delivers a late Allow, which must not count.
+  if (mode === "pending") {
+    const open = setInterval(() => {}, 1000);
+    return { kill() { appendFileSync(process.env.FAKE_DIALOG_LOG, JSON.stringify({ event: "killed" }) + "\n"); clearInterval(open); done(null, "Allow\tfalse\n"); } };
+  }
   if (mode === "allow") done(null, "Allow\tfalse\n");
   else if (mode === "deny") done(Object.assign(new Error("failed"), { code: 1 }), "", "0:1: execution error: User cancelled. (-128)\n");
   else if (mode === "gaveup") done(null, "\ttrue\n");

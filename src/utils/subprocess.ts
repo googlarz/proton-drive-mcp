@@ -19,8 +19,24 @@ const MAX_ERROR_CHARS = 1500;
 const TRANSFER_COMMANDS = new Set(["upload", "download", "copy", "move"]);
 const TRANSFER_GROUPS = new Set(["filesystem", "photo"]);
 
-export function timeoutFor(args: string[]): number {
+// Trash, restore and delete take longer the more items one call names; empty-trash names none, so the caller passes the count.
+const BATCH_COMMANDS = new Set(["trash", "restore", "delete"]);
+const PER_ITEM_TIMEOUT_MS = 5_000;
+const MAX_BATCH_TIMEOUT_MS = 10 * 60_000;
+
+export interface RunOptions {
+  /** How many items the command touches, when the arguments do not say. */
+  items?: number;
+}
+
+export function timeoutFor(args: string[], opts: RunOptions = {}): number {
   // args[0] is the group (e.g. "filesystem"), args[1] is the subcommand
+  if (args[0] === "filesystem" && args[1] === "empty-trash") {
+    return opts.items === undefined ? MAX_BATCH_TIMEOUT_MS : Math.min(MAX_BATCH_TIMEOUT_MS, 2 * DEFAULT_TIMEOUT_MS + PER_ITEM_TIMEOUT_MS * opts.items);
+  }
+  if (args[0] === "filesystem" && BATCH_COMMANDS.has(args[1] ?? "")) {
+    return Math.min(MAX_BATCH_TIMEOUT_MS, DEFAULT_TIMEOUT_MS + PER_ITEM_TIMEOUT_MS * (args.length - 2));
+  }
   if (args[0] && TRANSFER_GROUPS.has(args[0]) && args[1] && TRANSFER_COMMANDS.has(args[1])) {
     return TRANSFER_TIMEOUT_MS;
   }
@@ -293,7 +309,14 @@ function describeFailure(e: ExecError, args: string[]): string {
 
 // Normalizes a raw exec failure into one of our typed errors. Shared by
 // runDrive and runDriveRaw so both entry points fail the same way.
-function normalizeExecError(err: unknown, args: string[]): never {
+const INTERRUPTIBLE = new Set(["trash", "restore", "delete", "empty-trash", "move"]);
+
+function interruption(what: string, args: string[]): DriveCliError {
+  if (args[0] !== "filesystem" || !INTERRUPTIBLE.has(args[1] ?? "")) return new DriveCliError(what, "");
+  return new DriveCliError(`${what}. The outcome is unknown: the change may have been applied partly or completely. List the folder or the trash before retrying.`, "", true);
+}
+
+function normalizeExecError(err: unknown, args: string[], opts: RunOptions = {}): never {
   if (
     err instanceof DriveCliError ||
     err instanceof DriveCliNotFoundError ||
@@ -306,7 +329,7 @@ function normalizeExecError(err: unknown, args: string[]): never {
   const e = err as ExecError;
 
   if (e.cancelled) {
-    throw new DriveCliError("Cancelled by client", "");
+    throw interruption("Cancelled by client", args);
   }
 
   // The program never started: missing, a folder, not executable, wrong format.
@@ -315,12 +338,11 @@ function normalizeExecError(err: unknown, args: string[]): never {
   }
 
   if (e.killed === true || e.code === "ETIMEDOUT") {
-    const secs = timeoutFor(args) / 1000;
-    throw new DriveCliError(`CLI process timed out after ${secs}s`, "");
+    throw interruption(`CLI process timed out after ${timeoutFor(args, opts) / 1000}s`, args);
   }
 
   if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
-    throw new DriveCliError("CLI output exceeded buffer limit (50 MB)", "");
+    throw interruption("CLI output exceeded buffer limit (50 MB)", args);
   }
 
   if (isAuthError(`${e.stderr ?? ""}\n${e.stdout ?? ""}`)) {
@@ -432,10 +454,10 @@ function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<boolean> 
   });
 }
 
-async function execCliWithRetry(args: string[], cliArgs: string[]): Promise<{ stdout: string; stderr: string }> {
+async function execCliWithRetry(args: string[], cliArgs: string[], opts: RunOptions = {}): Promise<{ stdout: string; stderr: string }> {
   const readOnly = READ_ONLY_COMMANDS.has(args.slice(0, 2).join(" "));
   const signal = callContext.getStore()?.signal;
-  const budget = timeoutFor(args);
+  const budget = timeoutFor(args, opts);
   const started = Date.now();
   for (let attempt = 0; ; attempt++) {
     try {
@@ -455,9 +477,9 @@ async function execCliWithRetry(args: string[], cliArgs: string[]): Promise<{ st
   }
 }
 
-export async function runDrive(args: string[]): Promise<unknown> {
+export async function runDrive(args: string[], opts?: RunOptions): Promise<unknown> {
   try {
-    const { stdout, stderr } = await execCliWithRetry(args, [...args, "--json"]);
+    const { stdout, stderr } = await execCliWithRetry(args, [...args, "--json"], opts);
 
     const raw = stdout.trim();
 
@@ -491,7 +513,7 @@ export async function runDrive(args: string[]): Promise<unknown> {
       throw new DriveParseError(`Failed to parse CLI output as JSON: ${snippet}`);
     }
   } catch (err) {
-    normalizeExecError(err, args);
+    normalizeExecError(err, args, opts);
   }
 }
 

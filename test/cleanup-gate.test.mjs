@@ -441,7 +441,7 @@ describe("drive_cleanup: modes and guards", () => {
     await withServer(opts({ approval: "model", replies: [DECLINE] }), async (ctx) => {
       const r = await ctx.call("drive_cleanup", { ...ARGS, confirmed: true });
       assert.equal(r.isError, true);
-      assert.match(text(r), /user did not approve/);
+      assert.match(text(r), /user declined drive_cleanup.*Do not retry/);
       assert.deepEqual(ctx.changes(), []);
     });
   });

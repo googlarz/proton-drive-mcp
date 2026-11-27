@@ -78,6 +78,7 @@ export const TOOL_TITLES: Readonly<Record<string, string>> = {
 const FIELD_ORDER = [
   "path", "paths", "sources", "sourcePath", "remotePath", "destinationPath", "destinationFolder", "newName", "localPath",
   "album", "albumName", "name", "uid", "item", "inviter", "invitedFolder", "email", "role", "expiration", "replacesExistingLink", "resetSettings", "password",
+  "roleChange", "passwordChange", "expirationChange", "itemCount", "totalBytes", "trashItems",
   "message", "content", "fileConflictStrategy", "folderConflictStrategy", "conflictStrategy",
   "fixes", "trash", "keeps", "id", "when", "restore", "moveBack",
 ];
@@ -90,16 +91,18 @@ const parentOf = (p: string) => p.slice(0, p.lastIndexOf("/")) || "/";
 const leadPath = (line: string) => line.split(" -> ", 1)[0];
 
 // Lines of these lists name a path or a "<now> -> <before>" pair: each path may be long, and a hidden middle could hide where an item goes.
-const LONG_LINE: Record<string, [head: number, tail: number]> = { moveBack: [400, 200], restore: [400, 200] };
+// A trashed name is at most 255 characters, six each when escaped: it is never elided.
+const LONG_LINE: Record<string, [head: number, tail: number]> = { moveBack: [400, 200], restore: [400, 200], trashItems: [1600, 200] };
 const SHOWN_HEAD = 120, SHOWN_TAIL = 60;
 
-/** How much of a list is written out. `countHidden` also says how many folders and items are left out (native dialog). */
-interface ListCut { items: number; folders: number; countHidden?: boolean }
+/** How much of a list is written out. `countHidden` also says how many folders and items are left out (native dialog); `full` never elides a value. */
+interface ListCut { items: number; folders: number; countHidden?: boolean; full?: boolean }
 const DEFAULT_CUT: ListCut = { items: LIST_FULL_MAX, folders: FOLDER_LINES_MAX };
 const NO_CUT: ListCut = { items: Infinity, folders: Infinity };
+const FULL: ListCut = { ...NO_CUT, full: true };
 
 function renderList(key: string, items: string[], cut: ListCut): string[] {
-  const [head, tail] = LONG_LINE[key] ?? [SHOWN_HEAD, SHOWN_TAIL];
+  const [head, tail] = cut.full ? [Infinity, 0] : LONG_LINE[key] ?? [SHOWN_HEAD, SHOWN_TAIL];
   const shown = (xs: string[]) => xs.map((x) => `  - ${showValueStrict(x, head, tail)}`);
   if (items.length <= cut.items) return [`${key} (${items.length}):`, ...shown(items)];
   const perFolder = new Map<string, number>();
@@ -143,7 +146,7 @@ function renderField(key: string, v: FieldValue, cut: ListCut): string[] {
   if (typeof v === "boolean") return [`${LABELS[key] ?? key}: ${v ? "yes" : "no"}`];
   if (typeof v === "number") return [`${key}: ${Number.isFinite(v) ? v : "invalid"}`];
   if (Array.isArray(v)) return renderList(key, v, cut);
-  return [`${key}: ${showValueStrict(v)}${RECOGNISED.has(key) && typeof v === "string" ? nonAsciiNote(v) : ""}`];
+  return [`${key}: ${showValueStrict(v, cut.full ? Infinity : undefined)}${RECOGNISED.has(key) && typeof v === "string" ? nonAsciiNote(v) : ""}`];
 }
 
 /**
@@ -153,9 +156,10 @@ function renderField(key: string, v: FieldValue, cut: ListCut): string[] {
  */
 function renderCleanupList(trash: string[], keeps: string[], cut: ListCut): string[] {
   if (trash.length > cut.items) return renderList("trash", trash, cut);
+  const head = cut.full ? Infinity : 400;
   return [
     `trash (${trash.length}):`,
-    ...trash.flatMap((t, i) => [`  - ${showValueStrict(t, 400, 200)}`, keeps[i] ? `    keeps: ${showValueStrict(keeps[i], 400, 200)}` : "    (empty folder)"]),
+    ...trash.flatMap((t, i) => [`  - ${showValueStrict(t, head, 200)}`, keeps[i] ? `    keeps: ${showValueStrict(keeps[i], head, 200)}` : "    (empty folder)"]),
   ];
 }
 
@@ -181,15 +185,40 @@ export function renderOperation(op: Operation, cut: ListCut = DEFAULT_CUT): stri
 
 export const DIALOG_MAX_LINES = 25;
 const DIALOG_LINE_CHARS = 60; // a conservative width: a long path wraps and takes several lines
+/** Every non-ASCII code point counts as two columns: wide, fullwidth and emoji characters must never be under-measured. */
+const columns = (s: string): number => [...s].reduce((n, c) => n + (c.codePointAt(0)! > 0x7f ? 2 : 1), 0);
+/** Word wrap as the dialog does it: a word that does not fit starts a new line, and a longer unbroken run is broken over several. */
+function wrappedLines(line: string): number {
+  let lines = 1, used = -1; // -1: nothing on the line yet
+  for (const word of line.split(" ")) {
+    const w = columns(word);
+    if (used + 1 + w <= DIALOG_LINE_CHARS) { used += 1 + w; continue; }
+    if (used >= 0) lines++;
+    const extra = Math.max(0, Math.ceil(w / DIALOG_LINE_CHARS) - 1);
+    lines += extra;
+    used = w - extra * DIALOG_LINE_CHARS;
+  }
+  return lines;
+}
 /** How many lines the text takes in the dialog, counting wrapped lines. */
 export function dialogLines(text: string): number {
-  return text.split("\n").reduce((n, line) => n + Math.max(1, Math.ceil(line.length / DIALOG_LINE_CHARS)), 0);
+  return text.split("\n").reduce((n, line) => n + wrappedLines(line), 0);
 }
 
 /** Operations whose every item the user must be able to see before saying yes. */
 function mustShowEveryItem(op: Operation): boolean {
   return op.effect !== "reversible" || op.tool === "drive_bulk_trash" || op.tool === "drive_cleanup" ||
-    ["fileConflictStrategy", "folderConflictStrategy", "conflictStrategy"].some((k) => op.fields[k] === "replace" || op.fields[k] === "remove");
+    ["fileConflictStrategy", "folderConflictStrategy", "conflictStrategy"].some((k) => ["replace", "remove", "create-new-revision"].includes(op.fields[k] as string));
+}
+
+/** What the client's dialog shows: every list is written out when every item must be seen. */
+export function approvalSummary(op: Operation): string {
+  return renderOperation(op, mustShowEveryItem(op) ? NO_CUT : DEFAULT_CUT);
+}
+
+/** What the terminal record holds: when every item must be seen, no value is shortened either. */
+export function terminalSummary(op: Operation): string {
+  return renderOperation(op, mustShowEveryItem(op) ? FULL : DEFAULT_CUT);
 }
 
 /**
@@ -199,7 +228,9 @@ function mustShowEveryItem(op: Operation): boolean {
 export function dialogText(op: Operation): string | null {
   const sentence = describeOperation(op);
   const whole = `${sentence}\n\n${renderOperation(op)}`;
-  if (dialogLines(whole) <= DIALOG_MAX_LINES) return whole;
+  // A shortened value hides characters too: an operation that must show everything then needs the full text of the terminal route.
+  const elided = mustShowEveryItem(op) && renderOperation(op) !== terminalSummary(op);
+  if (!elided && dialogLines(whole) <= DIALOG_MAX_LINES) return whole;
   if (mustShowEveryItem(op)) return null;
   for (const [items, folders] of [[8, 6], [5, 5], [3, 4], [2, 3], [1, 2], [1, 1]]) {
     const cut = `${sentence}\n\n${renderOperation(op, { items, folders, countHidden: true })}`;
@@ -259,10 +290,16 @@ export interface GateContext {
   mutatingTools?: ReadonlySet<string>;
 }
 
+const underRoot = (p: string, root: string): boolean => p.split("/").find((seg) => seg !== "" && seg !== ".")?.toLowerCase() === root;
+
 /** True when the first path segment is shared-with-me after dropping empty and "." segments (so `//shared-with-me/x`, `/./Shared-With-Me/x` count) and ignoring case. */
 export function underShared(p: string): boolean {
-  const first = p.split("/").find((seg) => seg !== "" && seg !== ".");
-  return first !== undefined && first.toLowerCase() === "shared-with-me";
+  return underRoot(p, "shared-with-me");
+}
+
+/** A path in the photo timeline: trashing it goes to /photos-trash, which drive_undo cannot restore from. */
+export function underPhotos(p: string): boolean {
+  return underRoot(p, "photos");
 }
 
 /** Whether this call must pass ApprovalGate.require. In model mode always false: the legacy confirmed=true path stays in force. */
@@ -279,7 +316,7 @@ export function requiresApproval(tool: string, args: Record<string, unknown>, mo
     if (ctx.mutatingTools.has(tool)) return true;
   }
   if (ALWAYS.has(tool)) return true;
-  if (tool === "drive_upload" && ["fileConflictStrategy", "folderConflictStrategy"].some((k) => args[k] === "replace")) return true;
+  if (tool === "drive_upload" && (args.fileConflictStrategy === "create-new-revision" || ["fileConflictStrategy", "folderConflictStrategy"].some((k) => args[k] === "replace"))) return true;
   if (tool === "drive_write_file" && ctx.overwritesExisting === true) return true;
   if (SHARED_DEST.has(tool)) {
     const fromArgs = PATH_ARGS.flatMap((k) => { const v = args[k]; return typeof v === "string" ? [v] : Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []; });
@@ -333,7 +370,9 @@ export interface GateInit {
 
 export const MAX_DECLINES_PER_MINUTE = 5;
 const WINDOW_MS = 60_000;
-const NO_RETRY = "Do not retry this operation or a variant of it unless the user asks you to.";
+/** An elicitation "cancel" faster than this cannot come from a human. */
+const HUMAN_MIN_MS = 1_000;
+export const NO_RETRY = "Do not retry this operation or a variant of it unless the user asks you to.";
 
 const TERMINAL_HOW = (code: string) => `\`proton-drive-cli approve ${code}\` (without a global install: \`npx -y -p proton-drive-mcp proton-drive-cli approve ${code}\`)`;
 
@@ -363,9 +402,10 @@ export class ApprovalGate {
         : refuse("approval_required", `${op.tool} needs the user's confirmation. Describe the operation to the user, get their explicit OK, then call again with confirmed=true.`);
     }
 
-    const summary = renderOperation(op);
+    const record = terminalSummary(op);
 
     if (elicit) {
+      const summary = approvalSummary(op);
       const early = this.beforeDialog(op, hash, refuse);
       if (early) return early;
       const now = this.now();
@@ -376,26 +416,36 @@ export class ApprovalGate {
         this.discardRecords(op, hash);
         return { ok: true, channel: "elicitation", opHash: hash };
       }
-      this.declinedAt.push(now);
       if (result === "decline") {
+        this.declinedAt.push(now);
         this.discardRecords(op, hash);
         return refuse("approval_declined", `The user declined ${op.tool}. Nothing was changed. ${NO_RETRY}`);
       }
+      // The user was never asked (an error, or a "cancel" no human is fast enough for): try the server's own dialog.
+      const counted = this.declinedAt.length;
+      if (native && !opts.signal?.aborted && (result === "error" || this.now() - now < HUMAN_MIN_MS)) {
+        const text = dialogText(op);
+        if (text !== null) {
+          const answered = await this.askNative(op, hash, text, native, opts.signal, refuse);
+          if (answered) return answered;
+        }
+      }
+      if (this.declinedAt.length === counted) this.declinedAt.push(now); // one failed prompt counts once
       // Cancelled, failed or timed out: nobody said no, so the terminal route is offered (it still needs a human at a terminal).
       const why = result === "cancel" ? "was closed without an answer" : "failed or timed out";
-      const viaTerminal = this.requestInStore(op, hash, summary, `The approval dialog ${why}.`, refuse);
+      const viaTerminal = this.requestInStore(op, hash, record, `The approval dialog ${why}.`, refuse);
       if (viaTerminal) { this.terminalFallback.add(hash); return viaTerminal; }
       return result === "cancel"
         ? refuse("approval_declined", `The user did not approve ${op.tool}: the approval dialog was closed without an answer. Nothing was changed. ${NO_RETRY}`)
         : refuse("approval_unavailable", `${op.tool} was not run: the approval request to the user failed or timed out. Nothing was changed. ${NO_RETRY}`);
     }
 
-    let stored = summary;
+    let stored = record;
     let preface = "This client cannot ask the user.";
     if (native) {
       const text = dialogText(op);
       if (text === null) {
-        stored = renderOperation(op, NO_CUT);
+        stored = renderOperation(op, mustShowEveryItem(op) ? FULL : NO_CUT);
         preface = "This is too long to show in a dialog.";
       } else {
         const early = this.beforeDialog(op, hash, refuse);

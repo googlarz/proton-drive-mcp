@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Security
+- `drive_empty_trash` lists the trash before asking: item count, total bytes and every name are part of the approval, and nothing is deleted if the trash changed meanwhile. A trash too large to list in full is refused. `/photos-trash` is not emptied, and the approval says so.
+- `drive_upload` with `create-new-revision` needs approval (`confirmed: true` in `model` mode), like `replace`.
+- `drive_share_set_url` keeps an existing link's role when `role` is omitted, and the approval shows current and new role, password (set or not set) and expiry, naming removals.
+- The approval checkbox starts unticked.
+- The native dialog counts non-ASCII characters as two columns; anything that would hide an item or part of a value in a destructive approval goes to the terminal route, which lists everything.
+- A failed or instantly cancelled client dialog is followed by the macOS dialog before the terminal route. A pending macOS dialog is closed when the client disconnects.
+- `model` mode: a person's Decline is final (`approval_declined`), and that tool asks again even with `confirmed: true`.
+- Trashing from `/photos` is no longer described as undoable.
+- Batch trash, restore, delete and empty-trash get a timeout that grows with the item count (at most 10 minutes); an interrupted change reports an unknown outcome instead of suggesting nothing was applied.
+
 ### Fixed
 - `drive_undo` reads the folders it needs up to 4 at a time instead of one after another, both while planning and while verifying.
 - The undo journal reads each item's uid from a fresh listing of its folder, no longer from a walk up to 5 minutes old. A single `drive_trash`, `drive_move` or `drive_rename` therefore always costs one folder listing.

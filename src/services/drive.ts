@@ -13,7 +13,7 @@ import type {
   TransferSummary,
   UploadResult,
 } from "../types/index.js";
-import { runDrive as defaultRunDrive, runDriveRaw as defaultRunDriveRaw } from "../utils/subprocess.js";
+import { runDrive as defaultRunDrive, runDriveRaw as defaultRunDriveRaw, type RunOptions } from "../utils/subprocess.js";
 import { DriveCliError, DriveNotAuthenticatedError, DriveParseError } from "../utils/errors.js";
 import { validateName } from "../utils/validation.js";
 import { invalidatePath } from "./walk.js";
@@ -25,7 +25,7 @@ function invalidateTrashAnd(path: string): void {
   invalidatePath("/photos-trash");
 }
 
-type Runner = (args: string[]) => Promise<unknown>;
+type Runner = (args: string[], opts?: RunOptions) => Promise<unknown>;
 type RawRunner = (args: string[]) => Promise<string>;
 
 // CLI v0.8.0 split the old unified --conflict-strategy into separate
@@ -667,8 +667,9 @@ export class DriveService {
     try {
       result = await this.run(args);
     } catch (err) {
-      // A failure of the whole call (e.g. a missing source) is rejected by the CLI before anything is applied.
-      if (err instanceof Error) err.message += " [the batch call failed; the CLI normally rejects a whole batch before applying anything, but list the folders before retrying]";
+      // A failure of the whole call (e.g. a missing source) is rejected by the CLI before anything is applied. An interrupted
+      // call is different: its message already says the outcome is unknown.
+      if (err instanceof Error && !(err instanceof DriveCliError && err.interrupted)) err.message += " [the batch call failed; the CLI normally rejects a whole batch before applying anything, but list the folders before retrying]";
       throw err;
     }
     try {
@@ -735,8 +736,10 @@ export class DriveService {
     return target;
   }
 
-  async emptyTrash(): Promise<void> {
-    try { await this.run(["filesystem", "empty-trash"]); } finally { invalidatePath("/trash"); invalidatePath("/photos-trash"); }
+  /** `items`: how many the caller saw in the trash; sizes the timeout. */
+  async emptyTrash(items?: number): Promise<void> {
+    const args = ["filesystem", "empty-trash"];
+    try { await (items === undefined ? this.run(args) : this.run(args, { items })); } finally { invalidatePath("/trash"); invalidatePath("/photos-trash"); }
   }
 
   // The destination is the target PARENT folder (unlike move). `newName` maps to
