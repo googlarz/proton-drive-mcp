@@ -1007,21 +1007,6 @@ function invalidateEntry(e: IndexEntry, p: string): IndexEntry | undefined {
   return { ...e, listed, nodes: written?.type === "file" ? e.nodes.filter((n) => n !== written) : e.nodes };
 }
 
-/**
- * The node at `path` from a walk still in the memory cache (never a saved index), or undefined. Used to avoid a folder listing when
- * a tool only needs an item's uid and parent uid; writes made by this server drop the cache entries they touch (invalidatePath).
- */
-export function cachedNode(path: string): WalkNode | undefined {
-  const now = Date.now(), ttl = ttlMs();
-  let best: { node: WalkNode; at: number } | undefined;
-  for (const e of cache.values()) {
-    if (e.seeded || now - e.createdAt >= ttl || !isUnder(path, e.root)) continue;
-    const node = e.nodes.find((n) => n.path === path);
-    if (node && (!best || e.createdAt > best.at)) best = { node, at: e.createdAt };
-  }
-  return best?.node;
-}
-
 /** Called after the server itself writes at `path`: cached walks that contain it go, the saved index loses only what the write touched. */
 export function invalidatePath(path: string): void {
   const p = normalizeRoot(path);

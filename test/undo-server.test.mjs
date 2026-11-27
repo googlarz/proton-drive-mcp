@@ -292,18 +292,6 @@ describe("review fixes: original folder identity, /trash listings, dialog effect
     });
   });
 
-  it("an item already in the memory cache of a walk is not looked up with a folder listing", async () => {
-    await withServer(opts(), async (ctx) => {
-      await ctx.call("drive_checkup", { sharing: false });
-      const lists = () => readArgvLog(ctx.sb.argvLog).filter((a) => a[1] === "list" && a[2] === "/my-files/docs").length;
-      const before = lists();
-      const r = json(await ctx.call("drive_trash", { path: "/my-files/docs/unique.txt" }));
-      assert.equal(lists(), before, "no extra listing of the parent");
-      assert.equal(readJournal(ctx, r.undoId).items[0].parentUid, "d1");
-      assert.equal(readJournal(ctx, r.undoId).items[0].uid, "f3");
-    });
-  });
-
   it("moving back into /shared-with-me is shown to the human as outward, plain restores as reversible", async () => {
     const swm = [folder("swm", null, "shared-with-me"), folder("t", "swm", "t"), file("g1", "t", "a.txt", { trashTime: "2026-11-19T10:00:00Z" }), folder("d1", "root", "docs"), file("f1", "d1", "b.txt", { trashTime: "2026-11-19T10:00:00Z" })];
     await withServer({
@@ -466,6 +454,18 @@ describe("drive_undo: roots, modes, records", () => {
       assert.equal(extra.isError, true);
       assert.match(text(extra), /Unknown argument 'confirmed'/);
       assert.equal(mutations(ctx, "restore").length, 0);
+    });
+  });
+});
+
+describe("the journal reads uids from a fresh listing", () => {
+  it("a walk still in the memory cache does not supply the uid of an item replaced since", async () => {
+    await withServer(opts(), async (ctx) => {
+      await ctx.call("drive_tree", { path: "/my-files" });
+      // another client replaces the file: same path, new uid
+      patchState(ctx, (n) => { delete n.f3; n.f3new = file("f3new", "d1", "unique.txt", { size: 3000 }); });
+      const r = json(await ctx.call("drive_trash", { path: "/my-files/docs/unique.txt" }));
+      assert.deepEqual(readJournal(ctx, r.undoId).items.map((i) => i.uid), ["f3new"]);
     });
   });
 });

@@ -232,6 +232,28 @@ describe("undo journal", () => {
       assert.equal((await readdir(dir)).filter((n) => n.endsWith(".json")).length, 50);
     });
 
+    it("single-item batches cannot evict bulk records: each class has its own quota of 50", () => {
+      const single = () => { t += 1000; return j.begin(batchArgs(1, { tool: "drive_trash" })).id; };
+      const bulk = [];
+      for (const over of [{ tool: "drive_cleanup" }, { tool: "drive_bulk_trash" }, { tool: "drive_bulk_move", kind: "move" }]) {
+        t += 1000;
+        bulk.push(j.begin(batchArgs(1, over)).id);
+      }
+      t += 1000;
+      bulk.push(j.begin(batchArgs(2, { tool: "drive_trash" })).id);
+      const singles = Array.from({ length: 55 }, single);
+      for (const id of bulk) assert.ok(j.get(id), `bulk ${id} survived`);
+      assert.deepEqual(j.list().map((x) => x.id), [...singles.slice(5).reverse(), ...bulk.reverse()]);
+    });
+
+    it("bulk batches are capped at 50 and do not evict single-item records", () => {
+      const one = j.begin(batchArgs(1, { tool: "drive_rename", kind: "rename" })).id;
+      const ids = Array.from({ length: 55 }, () => { t += 1000; return j.begin(batchArgs(2)).id; });
+      assert.ok(j.get(one));
+      assert.deepEqual(j.list().map((x) => x.id), [...ids.slice(5).reverse(), one]);
+      assert.equal(j.purge(), 0);
+    });
+
     it("honours custom limits", () => {
       const k = mk({ maxBatches: 2, maxAgeMs: 10 * DAY });
       const a = k.begin(batchArgs(1)).id;

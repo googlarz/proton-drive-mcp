@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- `drive_undo` reads the folders it needs up to 4 at a time instead of one after another, both while planning and while verifying.
+- The undo journal reads each item's uid from a fresh listing of its folder, no longer from a walk up to 5 minutes old. A single `drive_trash`, `drive_move` or `drive_rename` therefore always costs one folder listing.
+- Single-item changes no longer push a bulk record out of the undo journal: bulk records (several items, `drive_cleanup`, `drive_bulk_*`) and single-item records are each capped at 50 per account (30-day limit unchanged).
+- Trashing a photo no longer returns an `undoId` that could not work: photos go to `/photos-trash`, so they are counted in `notUndoable` with a note.
+
 ## 1.12.0 — 2026-11-20
 
 ### Added

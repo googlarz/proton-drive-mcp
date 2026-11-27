@@ -30,7 +30,7 @@ flowchart LR
 | File-name index (`PROTON_DRIVE_INDEX=1`) | Private local folder, **plaintext** | Mode 0700 folder; off by default |
 | Content index (`PROTON_DRIVE_CONTENT_INDEX=1`) | Local, AES-256-GCM | Key in the macOS keychain or Linux `secret-tool`, or from an environment variable; off by default |
 | Audit log (`PROTON_DRIVE_AUDIT_LOG`) | Local file, hash-chained, mode 0600 | Queries and file content are not logged; off by default |
-| Undo journal (1.12.0, `PROTON_DRIVE_UNDO=0` turns it off) | Private local folder (0700, files 0600), **plaintext**: the names and paths of items you changed, their ids, 30 days or 50 batches | Not writable by downloads or `drive_write_file`; refused inside `PROTON_DRIVE_SYNC_PATH`; every undo is approved by a person and verified by uid (below) |
+| Undo journal (1.12.0, `PROTON_DRIVE_UNDO=0` turns it off) | Private local folder (0700, files 0600), **plaintext**: the names and paths of items you changed, their ids, 30 days or 50 bulk plus 50 single-item batches | Not writable by downloads or `drive_write_file`; refused inside `PROTON_DRIVE_SYNC_PATH`; every undo is approved by a person and verified by uid (below) |
 
 ## Trust boundaries
 

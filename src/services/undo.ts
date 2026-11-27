@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { DriveFile } from "../types/index.js";
 import { ROOT_PATHS, splitRemotePath, unescapeName, type BatchItemResult, type DriveService } from "./drive.js";
 import { canonical } from "../utils/audit.js";
+import { pool } from "./analytics.js";
 import type { UndoBatch, UndoItem, UndoJournal } from "../utils/undoJournal.js";
 
 /**
@@ -100,6 +101,7 @@ interface Computed {
 const LIST_LIMIT = 20;
 const SAME_FOLDER_REASON = "original folder is not the same folder anymore";
 const RESTORE_CHUNK = 200;
+const LIST_CONCURRENCY = 4;
 
 function isNotFound(e: unknown): boolean {
   return e instanceof Error && /not found|does not exist|no such/i.test(e.message);
@@ -155,7 +157,22 @@ async function compute(drive: UndoDrive, journal: UndoJournal, id: string | unde
     const at = (await listing(splitRemotePath(folder).parent))?.find((e) => e.path === folder && e.type === "folder");
     return at?.uid === parentUid;
   };
-  const trash = batch.kind === "trash" ? await drive.listTrash() : [];
+  const allowed = (p: string) => !badPath(p) && isPathAllowed(p);
+  // Read every folder the checks below can ask for, a few at a time. A failed read surfaces only where an item awaits that folder.
+  const folders = new Set<string>();
+  for (const it of batch.items) {
+    const to = batch.kind === "trash" ? undefined : it.to;
+    if (!it.restorable || !allowed(it.from) || (to !== undefined && !allowed(to))) continue;
+    const parent = splitRemotePath(it.from).parent;
+    if (to !== undefined) folders.add(splitRemotePath(to).parent);
+    else if (batch.kind !== "trash") continue;
+    folders.add(parent);
+    if (it.parentUid !== undefined && !ROOT_PATHS.has(parent)) folders.add(splitRemotePath(parent).parent);
+  }
+  const [trash] = await Promise.all([
+    batch.kind === "trash" ? drive.listTrash() : [],
+    pool([...folders], LIST_CONCURRENCY, async (f) => { await listing(f).catch(() => {}); }),
+  ]);
   const seen = new Set<string>();
   /** `<parent>\0<name>` slots already promised to an earlier item of this batch. */
   const claimed = new Set<string>();
@@ -339,14 +356,14 @@ export async function applyUndo(
   // Verify by uid in the original folder; the CLI's own report is not trusted.
   const parents = [...new Set(todo.map((i) => splitRemotePath(i.from).parent))];
   const fresh = new Map<string, DriveFile[] | null>();
-  for (const p of parents) {
+  await pool(parents, LIST_CONCURRENCY, async (p) => {
     try {
       fresh.set(p, await drive.list(p, { includeUid: true }));
     } catch (e) {
       if (!isNotFound(e)) throw e;
       fresh.set(p, null);
     }
-  }
+  });
   let undone = 0;
   const failed: Array<{ path: string; reason: string }> = [];
   for (const it of todo) {

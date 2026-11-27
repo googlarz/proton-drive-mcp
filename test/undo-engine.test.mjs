@@ -431,3 +431,62 @@ describe("drive_undo: list, ids and accounts", () => {
     await assert.rejects(planUndo(drive, off, { action: "plan" }), (e) => e.code === "no_batch");
   });
 });
+
+describe("drive_undo: folder listings", () => {
+  /** The real service with `list` counted: calls per folder and the highest number in flight. */
+  const counted = () => {
+    const seen = { calls: [], max: 0, now: 0 };
+    return {
+      seen,
+      drive: {
+        list: async (path, opts) => {
+          seen.calls.push(path);
+          seen.max = Math.max(seen.max, ++seen.now);
+          try { await new Promise((r) => setTimeout(r, 20)); return await drive.list(path, opts); } finally { seen.now--; }
+        },
+        listTrash: () => drive.listTrash(),
+        restoreMany: (p) => drive.restoreMany(p),
+        moveMany: (a, b) => drive.moveMany(a, b),
+        move: (a, b) => drive.move(a, b),
+        rename: (a, b) => drive.rename(a, b),
+      },
+    };
+  };
+  const spread = () => {
+    const items = [];
+    patch((n) => {
+      for (let i = 0; i < 8; i++) {
+        n[`p${i}`] = folder(`p${i}`, "d3", `sub${i}`);
+        n[`g${i}`] = file(`g${i}`, `p${i}`, `g${i}.txt`, { trashTime: "2026-11-19T10:00:00Z" });
+        items.push({ ...item(`g${i}`, `/my-files/archive/sub${i}/g${i}.txt`), parentUid: `p${i}` });
+      }
+    });
+    return record("trash", items);
+  };
+
+  it("lists distinct folders in parallel (at most 4 at a time), each once per planning pass and once to verify", async () => {
+    const id = spread();
+    const parents = Array.from({ length: 8 }, (_, i) => `/my-files/archive/sub${i}`);
+    const expected = [...parents, "/my-files/archive"].sort();
+    const a = counted();
+    const plan = await planUndo(a.drive, journal, { action: "plan", id });
+    assert.equal(plan.restorableCount, 8);
+    assert.deepEqual([...a.seen.calls].sort(), expected);
+    assert.ok(a.seen.max > 1 && a.seen.max <= 4, `max in flight ${a.seen.max}`);
+
+    const b = counted();
+    const r = await applyUndo(b.drive, journal, { id, expectedFingerprint: plan.fingerprint });
+    assert.equal(r.undone, 8);
+    // one fresh re-plan, then one verification listing per folder
+    assert.deepEqual([...b.seen.calls].sort(), [...expected, ...parents].sort());
+    assert.ok(b.seen.max > 1 && b.seen.max <= 4, `max in flight ${b.seen.max}`);
+  });
+
+  it("lists no folder for an item refused before any lookup", async () => {
+    const id = spread();
+    const a = counted();
+    const plan = await planUndo(a.drive, journal, { action: "plan", id, isPathAllowed: () => false });
+    assert.equal(plan.restorableCount, 0);
+    assert.deepEqual(a.seen.calls, []);
+  });
+});

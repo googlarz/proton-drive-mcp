@@ -53,7 +53,7 @@ src/services/cleanupRun.ts drive_checkup / drive_cleanup plan orchestration: wal
 src/services/cleanup.ts   drive_cleanup planner: eligibility rules, keeper, skips, approval-dialog lines, plan fingerprint
 src/services/undo.ts      drive_undo engine: list / plan / apply, uid-verified restore and move-back
 src/services/undoRecord.ts Server-side glue: opens the journal, records a batch around each changing call (beginBatch)
-src/utils/undoJournal.ts  Undo journal: one JSON file per batch, PROTON_DRIVE_UNDO / PROTON_DRIVE_UNDO_DIR, 30 days / 50 batches
+src/utils/undoJournal.ts  Undo journal: one JSON file per batch, PROTON_DRIVE_UNDO / PROTON_DRIVE_UNDO_DIR, 30 days / 50 bulk + 50 single-item batches
 src/utils/syncfs.ts       Symlink-safe read/write inside PROTON_DRIVE_SYNC_PATH
 src/utils/isMainModule.ts Entry-point detection (realpath, so npm's .bin symlink works)
 src/types/index.ts        Shared response types
