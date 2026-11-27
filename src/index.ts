@@ -57,6 +57,7 @@ import { snapshotBeforeOverwrite, snapshotLocalBeforeOverwrite, snapshotEnabled,
 import { AuditLog, auditLogInside, redactArgs, canonical, type AuditEntry } from "./utils/audit.js";
 import { ApprovalGate, requiresApproval, resolveApprovalMode, underShared, type ApprovalMode, type Effect, type Elicit, type FieldValue, type GateContext, type Operation } from "./utils/approval.js";
 import { createApprovalStore, resolveApprovalDir, type ApprovalStore } from "./utils/approvalStore.js";
+import { askMacDialog, dialogTimeoutSeconds, nativeDialogEnabled, type DialogExec } from "./utils/macDialog.js";
 import { assertApprovalDirUsable, assertUndoDirUsable } from "./utils/localguard.js";
 import { resolveUndoDir, undoEnabled } from "./utils/undoJournal.js";
 import { openUndoJournal, beginBatch, type JournalOpen } from "./services/undoRecord.js";
@@ -1561,7 +1562,7 @@ async function elicitApproval(server: Server, message: string, signal?: AbortSig
     const res = await server.elicitInput(
       {
         message,
-        requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Approve this action", default: false } }, required: ["approve"] },
+        requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Approve this action", default: true } }, required: ["approve"] },
       },
       { timeout: 120_000, signal },
     );
@@ -1571,7 +1572,12 @@ async function elicitApproval(server: Server, message: string, signal?: AbortSig
   }
 }
 
-export async function main() {
+export interface MainOptions {
+  /** Test seam for the native dialog. Only code that imports main() can set it: no environment variable, flag or setting does. */
+  dialog?: { platform: NodeJS.Platform; exec: DialogExec };
+}
+
+export async function main(options: MainOptions = {}) {
   const drive = new DriveService();
   const tier = resolveTier(process.env.PROTON_DRIVE_TOOL_TIER); // read once at startup
   const mode = resolveMode(process.env.PROTON_DRIVE_MODE);
@@ -1619,7 +1625,7 @@ export async function main() {
       const res = await server.elicitInput(
         {
           message: summary,
-          requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Approve this action", default: false } }, required: ["approve"] },
+          requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Approve this action", default: true } }, required: ["approve"] },
         },
         { timeout: 120_000, signal },
       );
@@ -1629,7 +1635,7 @@ export async function main() {
       return "error";
     }
   };
-  // Channel 2: the out-of-band store, for a client that cannot elicit and as the terminal route when a dialog is cancelled or fails.
+  // Channel 3: the out-of-band store, when neither dialog is available and as the terminal route when a dialog is cancelled or fails.
   // Created on first use so nothing touches the disk otherwise.
   let approvalStore: ApprovalStore | undefined;
   let approvalStoreTried = false;
@@ -1652,9 +1658,15 @@ export async function main() {
     if (opened.journal) journalOpen = opened; // only a working journal is kept: the account key may be known on the next call
     return opened;
   };
+  // Channel 2: the server's own macOS dialog, for a client that cannot elicit.
+  const dialogSeconds = dialogTimeoutSeconds(process.env);
+  const nativeDialog = nativeDialogEnabled(process.env, options.dialog?.platform ?? process.platform)
+    ? (text: string, signal?: AbortSignal) => askMacDialog(text, { seconds: dialogSeconds, signal, exec: options.dialog?.exec })
+    : undefined;
   const gate = new ApprovalGate({
     mode: apMode,
     get elicit() { return canElicit() ? elicitHuman : undefined; },
+    native: nativeDialog,
     get store() {
       if (apMode === "model") return undefined;
       if (!approvalStoreTried) {

@@ -3,6 +3,8 @@
 // so everything here is testable without a server. See PLAN-1.11.0.md section 2.
 import { createHash } from "node:crypto";
 import { canonical } from "./audit.js";
+import { describeOperation } from "./describeOperation.js";
+import type { DialogAnswer } from "./macDialog.js";
 import { showValueStrict } from "./text.js";
 
 // ---- Operation: what is shown = what is hashed = what runs -------------------------------------------------------
@@ -91,19 +93,26 @@ const leadPath = (line: string) => line.split(" -> ", 1)[0];
 const LONG_LINE: Record<string, [head: number, tail: number]> = { moveBack: [400, 200], restore: [400, 200] };
 const SHOWN_HEAD = 120, SHOWN_TAIL = 60;
 
-function renderList(key: string, items: string[]): string[] {
+/** How much of a list is written out. `countHidden` also says how many folders and items are left out (native dialog). */
+interface ListCut { items: number; folders: number; countHidden?: boolean }
+const DEFAULT_CUT: ListCut = { items: LIST_FULL_MAX, folders: FOLDER_LINES_MAX };
+const NO_CUT: ListCut = { items: Infinity, folders: Infinity };
+
+function renderList(key: string, items: string[], cut: ListCut): string[] {
   const [head, tail] = LONG_LINE[key] ?? [SHOWN_HEAD, SHOWN_TAIL];
   const shown = (xs: string[]) => xs.map((x) => `  - ${showValueStrict(x, head, tail)}`);
-  if (items.length <= LIST_FULL_MAX) return [`${key} (${items.length}):`, ...shown(items)];
+  if (items.length <= cut.items) return [`${key} (${items.length}):`, ...shown(items)];
   const perFolder = new Map<string, number>();
   for (const it of items) { const f = parentOf(leadPath(it)); perFolder.set(f, (perFolder.get(f) ?? 0) + 1); }
   const folders = [...perFolder].sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1));
+  const rest = folders.slice(cut.folders);
   return [
-    `${key} (${items.length}): only the first ${LIST_FULL_MAX} are listed; counts per folder first`,
-    ...folders.slice(0, FOLDER_LINES_MAX).map(([f, n]) => `  folder ${showValueStrict(f)}: ${n}`),
-    ...(folders.length > FOLDER_LINES_MAX ? [`  (+${folders.length - FOLDER_LINES_MAX} more folders)`] : []),
-    `first ${LIST_FULL_MAX}:`,
-    ...shown(items.slice(0, LIST_FULL_MAX)),
+    `${key} (${items.length}): only the first ${cut.items} are listed; counts per folder first`,
+    ...folders.slice(0, cut.folders).map(([f, n]) => `  folder ${showValueStrict(f)}: ${n}`),
+    ...(rest.length ? [`  (+${rest.length} more folders${cut.countHidden ? ` with ${rest.reduce((sum, [, n]) => sum + n, 0)} items` : ""})`] : []),
+    `first ${cut.items}:`,
+    ...shown(items.slice(0, cut.items)),
+    ...(cut.countHidden ? [`  (${items.length - cut.items} more not shown)`] : []),
   ];
 }
 
@@ -120,7 +129,7 @@ function nonAsciiNote(v: string): string {
   return ` (contains non-ASCII: ${shown.join(" ")}${cps.length > 12 ? ` +${cps.length - 12} more` : ""})`;
 }
 
-function renderField(key: string, v: FieldValue): string[] {
+function renderField(key: string, v: FieldValue, cut: ListCut): string[] {
   if (key === "password") return [`password: ${v === true || (typeof v === "string" && v.length > 0) ? "set" : "not set"}`];
   if (key === "message") {
     if (typeof v === "number") return [`message: ${v > 0 ? `${v} characters` : "none"}`];
@@ -133,7 +142,7 @@ function renderField(key: string, v: FieldValue): string[] {
   if (v === null) return [`${key}: none`];
   if (typeof v === "boolean") return [`${LABELS[key] ?? key}: ${v ? "yes" : "no"}`];
   if (typeof v === "number") return [`${key}: ${Number.isFinite(v) ? v : "invalid"}`];
-  if (Array.isArray(v)) return renderList(key, v);
+  if (Array.isArray(v)) return renderList(key, v, cut);
   return [`${key}: ${showValueStrict(v)}${RECOGNISED.has(key) && typeof v === "string" ? nonAsciiNote(v) : ""}`];
 }
 
@@ -142,8 +151,8 @@ function renderField(key: string, v: FieldValue): string[] {
  * own with a generous limit (600 characters before the middle is elided), so the copy that is kept is always visible. The cap of 50 items per
  * call (CLEANUP_CAP) keeps the whole list within what is shown in full; a longer list falls back to counts per folder of the trashed paths.
  */
-function renderCleanupList(trash: string[], keeps: string[]): string[] {
-  if (trash.length > LIST_FULL_MAX) return renderList("trash", trash);
+function renderCleanupList(trash: string[], keeps: string[], cut: ListCut): string[] {
+  if (trash.length > cut.items) return renderList("trash", trash, cut);
   return [
     `trash (${trash.length}):`,
     ...trash.flatMap((t, i) => [`  - ${showValueStrict(t, 400, 200)}`, keeps[i] ? `    keeps: ${showValueStrict(keeps[i], 400, 200)}` : "    (empty folder)"]),
@@ -151,7 +160,7 @@ function renderCleanupList(trash: string[], keeps: string[]): string[] {
 }
 
 /** The text the human sees (and the store records). Every line is server-composed; values are neutralised and cannot add or reorder lines. */
-export function renderOperation(op: Operation): string {
+export function renderOperation(op: Operation, cut: ListCut = DEFAULT_CUT): string {
   const title = TOOL_TITLES[op.tool];
   if (title === undefined) throw new Error(`approval: no prompt text for tool ${showValueStrict(op.tool)}`);
   if (!(op.effect in EFFECT_LABEL)) throw new Error(`approval: unknown effect ${showValueStrict(op.effect)}`);
@@ -164,8 +173,39 @@ export function renderOperation(op: Operation): string {
   const rank = (k: string) => { const i = FIELD_ORDER.indexOf(k); return i < 0 ? FIELD_ORDER.length : i; };
   keys.sort((x, y) => rank(x) - rank(y) || (x < y ? -1 : x > y ? 1 : 0));
   const cleanup = op.tool === "drive_cleanup" && Array.isArray(shown.trash) && Array.isArray(shown.keeps) && shown.keeps.length === shown.trash.length;
-  const body = (k: string): string[] => (cleanup && k === "trash" ? renderCleanupList(shown.trash as string[], shown.keeps as string[]) : cleanup && k === "keeps" ? [] : renderField(k, shown[k]));
+  const body = (k: string): string[] => (cleanup && k === "trash" ? renderCleanupList(shown.trash as string[], shown.keeps as string[], cut) : cleanup && k === "keeps" ? [] : renderField(k, shown[k], cut));
   return [`${op.tool}: ${title} (${EFFECT_LABEL[op.effect]})`, ...keys.flatMap(body)].join("\n");
+}
+
+// ---- Native dialog text -----------------------------------------------------------------------------------------
+
+export const DIALOG_MAX_LINES = 25;
+const DIALOG_LINE_CHARS = 60; // a conservative width: a long path wraps and takes several lines
+/** How many lines the text takes in the dialog, counting wrapped lines. */
+export function dialogLines(text: string): number {
+  return text.split("\n").reduce((n, line) => n + Math.max(1, Math.ceil(line.length / DIALOG_LINE_CHARS)), 0);
+}
+
+/** Operations whose every item the user must be able to see before saying yes. */
+function mustShowEveryItem(op: Operation): boolean {
+  return op.effect !== "reversible" || op.tool === "drive_bulk_trash" || op.tool === "drive_cleanup" ||
+    ["fileConflictStrategy", "folderConflictStrategy", "conflictStrategy"].some((k) => op.fields[k] === "replace" || op.fields[k] === "remove");
+}
+
+/**
+ * The plain sentence, then the rendered operation. When that is too long for a dialog, lists are cut to counts per folder and
+ * the first items; null when it still does not fit or when no item may be left out (the terminal route then shows them all).
+ */
+export function dialogText(op: Operation): string | null {
+  const sentence = describeOperation(op);
+  const whole = `${sentence}\n\n${renderOperation(op)}`;
+  if (dialogLines(whole) <= DIALOG_MAX_LINES) return whole;
+  if (mustShowEveryItem(op)) return null;
+  for (const [items, folders] of [[8, 6], [5, 5], [3, 4], [2, 3], [1, 2], [1, 1]]) {
+    const cut = `${sentence}\n\n${renderOperation(op, { items, folders, countHidden: true })}`;
+    if (dialogLines(cut) <= DIALOG_MAX_LINES) return cut;
+  }
+  return null;
 }
 
 // ---- Mode -------------------------------------------------------------------------------------------------------
@@ -264,7 +304,7 @@ export interface ApprovalStoreLike {
 }
 
 export type ApprovalResult =
-  | { ok: true; channel: "elicitation" | "cli" | "model"; opHash: string; code?: string }
+  | { ok: true; channel: "elicitation" | "dialog" | "cli" | "model"; opHash: string; code?: string }
   | { ok: false; code: "approval_required" | "approval_declined" | "approval_unavailable"; message: string; opHash: string };
 
 export interface RequireOptions {
@@ -276,6 +316,8 @@ export interface RequireOptions {
 export interface GateInit {
   mode: ApprovalMode;
   elicit?: Elicit;
+  /** The server's own dialog (macOS), used only when the client cannot elicit. */
+  native?: (text: string, signal?: AbortSignal) => Promise<DialogAnswer>;
   /** Read when needed, not at construction (the server creates it lazily). */
   store?: ApprovalStoreLike;
   /** Why the store cannot be used (set by the server when its folder is misconfigured); worded to the model as a server problem. */
@@ -297,9 +339,9 @@ const TERMINAL_HOW = (code: string) => `\`proton-drive-cli approve ${code}\` (wi
 
 export class ApprovalGate {
   private readonly declinedAt: number[] = [];
-  /** One elicitation at a time: a second gated call while a dialog is open is refused, never queued. */
+  /** One dialog at a time: a second gated call while one is open is refused, never queued. */
   private promptOpen = false;
-  /** Operations that were refused with a terminal code because the dialog was cancelled or failed; their next call looks in the store first. */
+  /** Operations that fell back to the terminal because a dialog was cancelled or failed; their next call looks in the store first. */
   private readonly terminalFallback = new Set<string>();
   private readonly now: () => number;
   private readonly timeoutMs: number;
@@ -313,7 +355,7 @@ export class ApprovalGate {
   async require(op: Operation, opts: RequireOptions = {}): Promise<ApprovalResult> {
     const hash = opHash(op);
     const refuse = (code: "approval_required" | "approval_declined" | "approval_unavailable", message: string): ApprovalResult => ({ ok: false, code, message, opHash: hash });
-    const { mode, elicit } = this.init;
+    const { mode, elicit, native } = this.init;
 
     if (mode === "model") {
       return opts.legacyConfirmed === true
@@ -324,22 +366,9 @@ export class ApprovalGate {
     const summary = renderOperation(op);
 
     if (elicit) {
-      if (this.terminalFallback.has(hash)) {
-        // The dialog failed earlier and the user may have approved in a terminal since.
-        try {
-          const used = this.init.store?.consume({ tool: op.tool, opHash: hash });
-          if (used) { this.terminalFallback.delete(hash); return { ok: true, channel: "cli", opHash: hash, code: used.code }; }
-        } catch { /* fall through to a new dialog */ }
-      }
-      if (this.promptOpen) {
-        return refuse("approval_unavailable", `${op.tool} was not run: another approval request is already waiting for the user's answer. Only one can be open at a time and this one was not queued. Nothing was changed. Wait for the user to answer, and call again only if they ask you to.`);
-      }
+      const early = this.beforeDialog(op, hash, refuse);
+      if (early) return early;
       const now = this.now();
-      while (this.declinedAt.length && now - this.declinedAt[0] > WINDOW_MS) this.declinedAt.shift();
-      if (this.declinedAt.length >= MAX_DECLINES_PER_MINUTE) {
-        this.init.onWarning?.(`approval prompts suspended: ${MAX_DECLINES_PER_MINUTE} declined or failed within a minute`);
-        return refuse("approval_unavailable", `${op.tool} was not run: too many approval requests were declined or failed in the last minute, so the user is not being asked again for now. ${NO_RETRY}`);
-      }
       this.promptOpen = true;
       let result: ElicitResult;
       try { result = await this.ask(elicit, summary, opts.signal); } finally { this.promptOpen = false; }
@@ -361,6 +390,22 @@ export class ApprovalGate {
         : refuse("approval_unavailable", `${op.tool} was not run: the approval request to the user failed or timed out. Nothing was changed. ${NO_RETRY}`);
     }
 
+    let stored = summary;
+    let preface = "This client cannot ask the user.";
+    if (native) {
+      const text = dialogText(op);
+      if (text === null) {
+        stored = renderOperation(op, NO_CUT);
+        preface = "This is too long to show in a dialog.";
+      } else {
+        const early = this.beforeDialog(op, hash, refuse);
+        if (early) return early;
+        const answered = await this.askNative(op, hash, text, native, opts.signal, refuse);
+        if (answered) return answered;
+        // The user could not be asked: continue with the terminal route.
+      }
+    }
+
     const store = this.init.store;
     if (store) {
       try {
@@ -370,13 +415,63 @@ export class ApprovalGate {
         this.init.onWarning?.(`approval store failed: ${err instanceof Error ? err.message : String(err)}`);
         return refuse("approval_unavailable", `${op.tool} was not run: the approval store failed. Nothing was changed. ${NO_RETRY}`);
       }
-      return this.requestInStore(op, hash, summary, "This client cannot ask the user.", refuse) ?? refuse("approval_unavailable", `${op.tool} was not run: the approval store failed. Nothing was changed. ${NO_RETRY}`);
+      return this.requestInStore(op, hash, stored, preface, refuse) ?? refuse("approval_unavailable", `${op.tool} was not run: the approval store failed. Nothing was changed. ${NO_RETRY}`);
     }
 
     if (this.init.storeProblem) {
       return refuse("approval_unavailable", `${op.tool} was not run: the server is misconfigured and cannot record an approval (${this.init.storeProblem}). This is a server setting the user has to fix, not something to retry or work around. Nothing was changed. Tell the user.`);
     }
     return refuse("approval_required", `${op.tool} needs the user's approval, but this client cannot ask them and no terminal approval is set up. Nothing was changed. Tell the user; do not retry. To knowingly allow operations the assistant confirms by itself, the user can set PROTON_DRIVE_APPROVAL=model and restart the server.`);
+  }
+
+  /** What can settle a call before a dialog opens: an earlier terminal approval, a dialog already open, too many refusals. */
+  private beforeDialog(op: Operation, hash: string, refuse: (c: "approval_unavailable", m: string) => ApprovalResult): ApprovalResult | undefined {
+    if (this.terminalFallback.has(hash)) {
+      // The dialog failed earlier and the user may have approved in a terminal since.
+      try {
+        const used = this.init.store?.consume({ tool: op.tool, opHash: hash });
+        if (used) { this.terminalFallback.delete(hash); return { ok: true, channel: "cli", opHash: hash, code: used.code }; }
+      } catch { /* fall through to a new dialog */ }
+    }
+    if (this.promptOpen) {
+      return refuse("approval_unavailable", `${op.tool} was not run: another approval request is already waiting for the user's answer. Only one can be open at a time and this one was not queued. Nothing was changed. Wait for the user to answer, and call again only if they ask you to.`);
+    }
+    const now = this.now();
+    while (this.declinedAt.length && now - this.declinedAt[0] > WINDOW_MS) this.declinedAt.shift();
+    if (this.declinedAt.length >= MAX_DECLINES_PER_MINUTE) {
+      this.init.onWarning?.(`approval prompts suspended: ${MAX_DECLINES_PER_MINUTE} declined or failed within a minute`);
+      return refuse("approval_unavailable", `${op.tool} was not run: too many approval requests were declined or failed in the last minute, so the user is not being asked again for now. ${NO_RETRY}`);
+    }
+    return undefined;
+  }
+
+  /** Asks in the server's own dialog. Only "accept" approves; undefined means: use the terminal route. */
+  private async askNative(op: Operation, hash: string, text: string, native: NonNullable<GateInit["native"]>, signal: AbortSignal | undefined, refuse: (c: "approval_required" | "approval_declined" | "approval_unavailable", m: string) => ApprovalResult): Promise<ApprovalResult | undefined> {
+    const now = this.now();
+    let answer: DialogAnswer;
+    this.promptOpen = true;
+    try { answer = await native(text, signal); } catch { answer = "error"; } finally { this.promptOpen = false; }
+    if (answer === "accept" && !signal?.aborted) {
+      this.discardRecords(op, hash);
+      return { ok: true, channel: "dialog", opHash: hash };
+    }
+    if (answer === "decline") {
+      this.declinedAt.push(now);
+      this.discardRecords(op, hash);
+      return refuse("approval_declined", `The user declined ${op.tool}. Nothing was changed. ${NO_RETRY}`);
+    }
+    if (answer === "gaveup") {
+      this.declinedAt.push(now);
+      return refuse("approval_required", `${op.tool} was not run: the approval dialog closed after waiting without an answer. Nothing was changed. Tell the user, and call ${op.tool} again only if the user asks you to; that opens the dialog again.`);
+    }
+    if (answer === "aborted" || signal?.aborted) {
+      this.declinedAt.push(now);
+      return refuse("approval_unavailable", `${op.tool} was not run: the request was cancelled while the approval dialog was open. Nothing was changed. ${NO_RETRY}`);
+    }
+    // A dialog that never appeared costs the user nothing, so it does not count; one we had to kill may have been on screen.
+    if (answer === "timeout") this.declinedAt.push(now);
+    this.terminalFallback.add(hash);
+    return undefined;
   }
 
   /** Writes (or reuses) a pending record and returns the refusal that tells the model what the user must do; undefined when there is no usable store. */
@@ -386,7 +481,7 @@ export class ApprovalGate {
     try {
       // fresh: an approval that is already sitting in the store (given earlier, never used) must not answer a question that was just asked now
       const req = store.request({ tool: op.tool, opHash: hash, summary, fresh: true });
-      return refuse("approval_required", `${preface} ${op.tool} needs the user's approval. Tell the user to run ${TERMINAL_HOW(req.code)} in a terminal and answer yes there; then call ${op.tool} again with exactly the same arguments. The code is only an identifier. It expires in ${Math.max(1, Math.round((req.expiresAt - this.now()) / 60_000))} minute(s).`);
+      return refuse("approval_required", `${describeOperation(op)} ${preface} ${op.tool} needs the user's approval. Tell the user to run ${TERMINAL_HOW(req.code)} in a terminal (this needs Node.js to be installed) and answer yes there; then call ${op.tool} again with exactly the same arguments. The code is only an identifier. It expires in ${Math.max(1, Math.round((req.expiresAt - this.now()) / 60_000))} minute(s).`);
     } catch (err) {
       this.init.onWarning?.(`approval store failed: ${err instanceof Error ? err.message : String(err)}`);
       return undefined;

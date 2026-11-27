@@ -53,12 +53,14 @@ export const readPids = (file) => readJsonLines(file);
 /** Base env for a server/CLI process talking to the fake binary. */
 export function fakeEnv(mode, sandbox, extra = {}) {
   const env = { ...process.env };
-  for (const k of Object.keys(env)) if (k.startsWith("FAKE_") || k === "PROTON_DRIVE_SYNC_PATH" || k.startsWith("PROTON_DRIVE_INDEX") || k.startsWith("PROTON_DRIVE_CONTENT_INDEX") || k === "PROTON_DRIVE_KEYCHAIN_SERVICE" || k === "PROTON_DRIVE_LOCAL_ROOT" || /^PROTON_DRIVE_(MODE|REMOTE_ROOTS|AUDIT_LOG|SNAPSHOT_BEFORE_OVERWRITE|APPROVAL|APPROVAL_DIR|UNDO|UNDO_DIR)$/.test(k)) delete env[k];
+  for (const k of Object.keys(env)) if (k.startsWith("FAKE_") || k === "PROTON_DRIVE_SYNC_PATH" || k.startsWith("PROTON_DRIVE_INDEX") || k.startsWith("PROTON_DRIVE_CONTENT_INDEX") || k === "PROTON_DRIVE_KEYCHAIN_SERVICE" || k === "PROTON_DRIVE_LOCAL_ROOT" || /^PROTON_DRIVE_(MODE|REMOTE_ROOTS|AUDIT_LOG|SNAPSHOT_BEFORE_OVERWRITE|APPROVAL|APPROVAL_DIR|UNDO|UNDO_DIR|DIALOG|DIALOG_TIMEOUT)$/.test(k)) delete env[k];
   const out = {
     ...env,
     PROTON_DRIVE_BIN: FAKE_CLI,
     // The suites written for 1.10.1 rely on confirmed=true being enough; the approval suites set the mode they test (null = leave it unset).
     PROTON_DRIVE_APPROVAL: "model",
+    // A test server must never open a real macOS dialog; the dialog suite injects its own runner (helpers/dialog-server.mjs).
+    PROTON_DRIVE_DIALOG: "0",
     // Never touch the real user's approval store from a test.
     PROTON_DRIVE_APPROVAL_DIR: join(sandbox.dir, "approvals"),
     // Same for the undo journal (1.12.0).
