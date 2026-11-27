@@ -1,13 +1,11 @@
 import { execFile } from "node:child_process";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildNpxEntry, isExecutableFile, planNpxEntry, resolveBinary, resolveDriveCli, writeEntry, SERVER_KEY } from "./claudeConfig.js";
+import { buildNpxEntry, planNpxEntry, resolveBinary, resolveDriveCli, writeEntry, SERVER_KEY } from "./claudeConfig.js";
 import { formatDoctor, type Check } from "./doctor.js";
+import { findDriveCli } from "./subprocess.js";
 
 const DOWNLOAD_URL = "https://proton.me/download/drive/cli/index.html";
-// Probed when the CLI is not on PATH (a minimal shell, or a fresh install not yet on PATH).
-const FALLBACK_DIRS = [join(homedir(), ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin"];
 // Directories Claude Desktop (a GUI app) can be expected to find `npx` in.
 const GUI_PATH_DIRS = ["/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin"];
 
@@ -22,16 +20,10 @@ export interface InitResult {
   json: Record<string, unknown>;
 }
 
-/** PROTON_DRIVE_BIN or PATH (the server's own resolver), then the usual install dirs. */
+/** PROTON_DRIVE_BIN, else the server's own auto-detection (PATH, then the usual install dirs). */
 export function locateDriveCli(): { path?: string; viaFallback: boolean } {
-  const direct = resolveDriveCli();
-  if (direct) return { path: direct, viaFallback: false };
-  if (process.env["PROTON_DRIVE_BIN"]) return { viaFallback: false }; // an explicit setting is never second-guessed
-  for (const dir of FALLBACK_DIRS) {
-    const candidate = join(dir, "proton-drive");
-    if (isExecutableFile(candidate)) return { path: candidate, viaFallback: true };
-  }
-  return { viaFallback: false };
+  if (process.env["PROTON_DRIVE_BIN"]?.trim()) return { path: resolveDriveCli(), viaFallback: false }; // an explicit setting is never second-guessed
+  return findDriveCli() ?? { viaFallback: false };
 }
 
 /** Single-quotes for a POSIX shell: nothing inside expands (not `$`, backticks or history `!`); a literal `'` becomes '\''. */

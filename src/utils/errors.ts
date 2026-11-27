@@ -1,10 +1,19 @@
+const CLI_DOWNLOAD_URL = "https://proton.me/download/drive/cli/index.html";
+const CLI_SETTING = 'open Claude Desktop > Settings > Extensions > Proton Drive and set "proton-drive CLI path"';
+
 export class DriveCliNotFoundError extends Error {
-  constructor() {
+  /** `configured`: the program that failed to start; omitted when no CLI was found anywhere. */
+  constructor(configured?: { path: string; exists: boolean }) {
+    const fix =
+      `${CLI_SETTING} to the full path printed by this Terminal command: \`which proton-drive\` ` +
+      "(or clear the field to search automatically), then restart Claude. Outside the extension, the same setting is the PROTON_DRIVE_BIN environment variable.";
     super(
-      "proton-drive CLI not found in PATH. " +
-        "Download it from https://proton.me/download/drive/cli/index.html and ensure it is in your PATH, " +
-        "or set PROTON_DRIVE_BIN to its absolute path (e.g. ~/.local/bin/proton-drive; find it with `which proton-drive`). " +
-        "Claude Desktop starts servers with a minimal PATH, so PROTON_DRIVE_BIN is usually needed there."
+      configured
+        ? `${configured.exists
+            ? `proton-drive CLI cannot be run: "${configured.path}" must be the program file itself (not a folder) with permission to run`
+            : `proton-drive CLI not found: "${configured.path}" does not exist`}. To fix it, ${fix}`
+        : "proton-drive CLI not found (looked in PATH, ~/.local/bin, /opt/homebrew/bin and /usr/local/bin). " +
+          `Install it from ${CLI_DOWNLOAD_URL}. If it is already installed, ${fix}`
     );
     this.name = "DriveCliNotFoundError";
   }
@@ -21,9 +30,9 @@ export class DriveCliError extends Error {
 }
 
 export class DriveNotAuthenticatedError extends Error {
-  constructor() {
+  constructor(command = "proton-drive auth login") {
     super(
-      "Not authenticated. Run `proton-drive auth login` in your terminal first."
+      `Not authenticated: you are not signed in to Proton Drive. Open Terminal, run \`${command}\`, finish signing in, then try again.`
     );
     this.name = "DriveNotAuthenticatedError";
   }

@@ -18,7 +18,7 @@ import {
   type PhotoDownloadConflictStrategy,
 } from "./services/drive.js";
 import { DriveCliError, DriveCliNotFoundError, DriveNotAuthenticatedError, DriveParseError } from "./utils/errors.js";
-import { checkCliAvailable } from "./utils/subprocess.js";
+import { checkCliAvailable, cliLaunchError } from "./utils/subprocess.js";
 import { runDoctor, formatDoctor } from "./utils/doctor.js";
 import { runInit } from "./utils/init.js";
 import { buildEntry, defaultConfigPath, isDirectory, resolveDriveCli, writeEntry, SERVER_KEY } from "./utils/claudeConfig.js";
@@ -345,7 +345,7 @@ function setupClaudeDesktop() {
   const rawSync = getFlag("--sync-path");
   const cliPath = resolveDriveCli();
   if (!cliPath) {
-    console.error("Error: proton-drive CLI not found. Install it from https://proton.me/download/drive/cli/index.html, or set PROTON_DRIVE_BIN to its absolute path (`which proton-drive`).");
+    console.error(`Error: ${cliLaunchError().message}`);
     process.exit(1);
   }
   const syncPath = rawSync !== undefined ? resolve(rawSync) : undefined;
@@ -430,9 +430,7 @@ async function run() {
 
   const cliCheck = await checkCliAvailable();
   if (!cliCheck.available) {
-    const msg = cliCheck.reason === "not_executable"
-      ? "Error: proton-drive CLI found but not executable.\nRun: chmod +x $(which proton-drive)"
-      : "Error: proton-drive CLI not found in PATH.\nDownload from https://proton.me/download/drive/cli/index.html, or set PROTON_DRIVE_BIN to its absolute path (find it with `which proton-drive`).";
+    const msg = `Error: ${cliLaunchError().message}`;
     console.error(msg);
     process.exit(1);
   }

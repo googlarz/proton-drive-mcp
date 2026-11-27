@@ -30,7 +30,7 @@ describe("mcpb manifest", () => {
     assert.deepEqual([...refs].sort(), Object.keys(manifest.user_config).sort());
     assert.deepEqual(Object.keys(env).sort(), [
       "PROTON_DRIVE_APPROVAL", "PROTON_DRIVE_AUDIT_LOG", "PROTON_DRIVE_BIN", "PROTON_DRIVE_INDEX", "PROTON_DRIVE_MODE", "PROTON_DRIVE_REMOTE_ROOTS",
-      "PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE", "PROTON_DRIVE_SYNC_PATH",
+      "PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE", "PROTON_DRIVE_SYNC_PATH", "PROTON_DRIVE_UNDO",
     ]);
     assert.ok(Object.values(manifest.user_config).every((c) => c.required === false));
   });

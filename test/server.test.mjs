@@ -536,13 +536,14 @@ describe("CLI output handling and error sanitization", () => {
     withServer("auth-fail", {}, async (c) => {
       const r = await c.call("drive_auth_status", {});
       assert.equal(r.isError, false, r.text);
-      assert.deepEqual(r.data, { authenticated: false });
+      assert.equal(r.data.authenticated, false);
+      assert.equal(r.data.approvalMode, "model");
     }));
 
   it("drive_auth_status reports authenticated:true when the probe succeeds", () =>
     withServer("json", { FAKE_STDOUT: "{}" }, async (c) => {
       const r = await c.call("drive_auth_status", {});
-      assert.deepEqual(r.data, { authenticated: true });
+      assert.deepEqual(r.data, { authenticated: true, approvalMode: "model" });
     }));
 
   it("ansi-prefixed-json is parsed", () =>

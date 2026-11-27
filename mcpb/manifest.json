@@ -4,7 +4,7 @@
   "display_name": "Proton Drive",
   "version": "0.0.0",
   "description": "Give Claude access to your Proton Drive: list, upload, download, share and manage end-to-end encrypted files via the official proton-drive CLI.",
-  "long_description": "Upload, download, search, share, move, trash and manage your Proton Drive files and photos from Claude Desktop. This extension wraps the official proton-drive CLI, so files stay end-to-end encrypted and nothing goes through a third-party relay.\n\nA folder checkup reports duplicates, empty folders, risky sharing and trash; a cleanup moves redundant copies to the trash from a list the server builds, and an undo puts recorded changes back while the items are still in the trash. Destructive or outward-facing actions (deleting, sharing, public links, replacing files) need your approval, asked by the extension itself. If Claude Desktop cannot show that question, the action is refused until you approve it in a terminal with proton-drive-cli approve. Requires the official proton-drive CLI to be installed and signed in (run `proton-drive auth login` once). Enter the path to the CLI in the settings field below: run `which proton-drive` in a terminal (usually ~/.local/bin/proton-drive).",
+  "long_description": "Upload, download, search, share, move, trash and manage your Proton Drive files and photos from Claude Desktop. This extension wraps the official proton-drive CLI, so files stay end-to-end encrypted and nothing goes through a third-party relay.\n\nA folder checkup reports duplicates, empty folders, risky sharing and trash; a cleanup moves redundant copies to the trash from a list the server builds, and an undo puts recorded changes back while the items are still in the trash. Destructive or outward-facing actions (deleting, sharing, public links, replacing files) need your approval, asked by the extension itself. If Claude Desktop cannot show that question, the action is refused until you approve it in a terminal with proton-drive-cli approve. Requires the official proton-drive CLI to be installed and signed in (run `proton-drive auth login` once). The CLI is found automatically in the usual places; if not, enter its path in the settings field below: run `which proton-drive` in a terminal.",
   "author": {
     "name": "googlarz",
     "url": "https://github.com/googlarz"
@@ -40,7 +40,8 @@
         "PROTON_DRIVE_REMOTE_ROOTS": "${user_config.remote_roots}",
         "PROTON_DRIVE_AUDIT_LOG": "${user_config.audit_log}",
         "PROTON_DRIVE_APPROVAL": "${user_config.approval_mode}",
-        "PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE": "${user_config.snapshot_before_overwrite}"
+        "PROTON_DRIVE_SNAPSHOT_BEFORE_OVERWRITE": "${user_config.snapshot_before_overwrite}",
+        "PROTON_DRIVE_UNDO": "${user_config.undo_journal}"
       }
     }
   },
@@ -48,7 +49,7 @@
     "proton_drive_bin": {
       "type": "file",
       "title": "proton-drive CLI path",
-      "description": "Path to the official proton-drive CLI. Run `which proton-drive` in a terminal to find it; usually ~/.local/bin/proton-drive. Leave empty to search PATH (Claude Desktop's PATH is minimal, so setting this is recommended).",
+      "description": "Path to the official proton-drive CLI. Run `which proton-drive` in a terminal to find it; usually ~/.local/bin/proton-drive. Leave empty to find it automatically (PATH, ~/.local/bin, /opt/homebrew/bin, /usr/local/bin).",
       "required": false
     },
     "sync_path": {
@@ -95,6 +96,13 @@
       "title": "Keep a copy before overwriting",
       "description": "Optional, off by default. Before a file is overwritten (text written to the sync folder, or an upload that replaces it), copies the current version to a .versions folder next to it. The overwrite is refused if the copy fails.",
       "default": false,
+      "required": false
+    },
+    "undo_journal": {
+      "type": "boolean",
+      "title": "Keep an undo record",
+      "description": "On by default. Keeps a record on this computer of the items Claude moved to the trash, moved or renamed, so you can ask to undo it. The record contains file names and folder paths in plain text (owner-only permissions). Turn off to keep no record; those changes then cannot be undone through Claude.",
+      "default": true,
       "required": false
     }
   },

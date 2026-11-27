@@ -1,7 +1,7 @@
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DriveService } from "../services/drive.js";
-import { runDriveRaw } from "./subprocess.js";
+import { runDriveRaw, wellKnownCliDirs } from "./subprocess.js";
 import { cliCompatWarning, TESTED_CLIS } from "./cliVersion.js";
 import { chooseEngines, ocrEnabled, ocrLanguages, resolveTool, runOcrTool } from "../services/ocr.js";
 import { defaultConfigPath, findOwnServerKey, isDirectory, isExecutableFile, resolveBinary, resolveDriveCli } from "./claudeConfig.js";
@@ -31,8 +31,8 @@ async function cliChecks(): Promise<{ checks: Check[]; cliPath?: string }> {
       checks: [{
         id: "cli",
         status: "fail",
-        message: bin ? `PROTON_DRIVE_BIN=${bin} is not an executable file` : "proton-drive CLI not found in PATH",
-        hint: "Install it from https://proton.me/download/drive/cli/index.html, or set PROTON_DRIVE_BIN to its absolute path (`which proton-drive`).",
+        message: bin ? `PROTON_DRIVE_BIN=${bin} is not an executable file` : "proton-drive CLI not found in PATH or the usual install folders",
+        hint: "Install it from https://proton.me/download/drive/cli/index.html. If it is installed, set \"proton-drive CLI path\" in the Claude Desktop extension settings (or PROTON_DRIVE_BIN) to the output of `which proton-drive`.",
       }],
     };
   }
@@ -99,7 +99,7 @@ function configCheck(configPath: string, cliPath: string | undefined): Check {
     if (!isExecutableFile(bin)) {
       return { id, status: "fail", message: `Entry "${key}": PROTON_DRIVE_BIN=${bin} is not an executable file`, hint: SETUP_HINT };
     }
-  } else if (cliPath && !SYSTEM_PATH_DIRS.some((d) => resolve(cliPath).startsWith(d + "/"))) {
+  } else if (cliPath && ![...SYSTEM_PATH_DIRS, ...wellKnownCliDirs()].some((d) => resolve(cliPath).startsWith(d + "/"))) {
     return {
       id, status: "warn",
       message: `Entry "${key}" found, but has no PROTON_DRIVE_BIN and ${cliPath} is outside Claude Desktop's minimal PATH`,
