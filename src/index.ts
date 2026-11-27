@@ -1754,13 +1754,13 @@ export async function main(options: MainOptions = {}) {
     // only (the uid stays in the hashed fields); a failed lookup is shown as such and never blocks or approves anything.
     const NOT_RESOLVED = "(name not resolved)";
     const trashedItem = async (uid: string): Promise<Record<string, FieldValue>> => {
-      try { const hit = (await drive.listTrash({ requireOutput: false })).find((f) => f.uid === uid); return { item: hit ? hit.path : NOT_RESOLVED }; }
+      try { const hit = (await drive.listTrash()).find((f) => f.uid === uid); return { item: hit ? hit.path : NOT_RESOLVED }; }
       catch { return { item: NOT_RESOLVED }; }
     };
     // What drive_empty_trash would delete (/trash only: the CLI's empty-trash leaves /photos-trash alone). Names are shown,
     // the digest binds the approval to these exact items.
     const emptyTrashOperation = async (): Promise<Operation> => {
-      const items = await drive.listTrash({ requireOutput: true });
+      const items = await drive.listTrash();
       return {
         tool: "drive_empty_trash", effect: "irreversible",
         fields: {

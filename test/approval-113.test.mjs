@@ -380,7 +380,7 @@ describe("9b: an empty trash is never asked about or emptied", () => {
       }));
   }
   it("listTrash rejects missing output", async () => {
-    await assert.rejects(new DriveService(async () => null).listTrash({ requireOutput: true }), /no output|empty/i);
+    await assert.rejects(new DriveService(async () => null).listTrash(), /no output|empty/i);
     assert.deepEqual(await new DriveService(async () => []).listTrash(), []);
   });
 });
