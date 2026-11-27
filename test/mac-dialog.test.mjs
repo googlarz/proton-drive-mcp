@@ -31,9 +31,16 @@ describe("macDialog: when it is used", () => {
     for (const p of ["linux", "win32", "freebsd"]) assert.equal(nativeDialogEnabled({ PROTON_DRIVE_DIALOG: "1" }, p), false, p);
   });
 
-  it("timeout: 55 s by default, override clamped to 10..110, junk ignored", () => {
-    const t = (v) => dialogTimeoutSeconds(v === undefined ? {} : { PROTON_DRIVE_DIALOG_TIMEOUT: v });
-    assert.deepEqual([undefined, "", "abc", "30", "1", "-5", "0", "10", "110", "9999", "30.6", "Infinity"].map(t), [55, 55, 55, 30, 10, 10, 10, 10, 110, 110, 31, 55]);
+  it("timeout: what is left of 45 s from the start of the call, never under 10 s", () => {
+    const t = (ms) => dialogTimeoutSeconds({}, ms);
+    assert.deepEqual([0, 1, 1000, 34_999, 35_000, 35_001, 60_000].map(t), [45, 44, 44, 10, 10, null, null]);
+    assert.equal(dialogTimeoutSeconds({}), 45);
+    assert.equal(dialogTimeoutSeconds({ PROTON_DRIVE_DIALOG_TIMEOUT: "abc" }, 5000), 40);
+  });
+
+  it("an explicit timeout is clamped to 10..110 and ignores the budget", () => {
+    const t = (v) => dialogTimeoutSeconds({ PROTON_DRIVE_DIALOG_TIMEOUT: v }, 100_000);
+    assert.deepEqual(["30", "1", "-5", "0", "10", "110", "9999", "30.6"].map(t), [30, 10, 10, 10, 10, 110, 110, 31]);
   });
 
   it("test servers get PROTON_DRIVE_DIALOG=0, whatever the developer's environment says", () => {
@@ -413,7 +420,7 @@ describe("server wiring (injected runner)", { concurrency: 4 }, () => {
     assert.equal(c.dialogs().length, 1);
     assert.equal(c.dialogs()[0].file, "/usr/bin/osascript");
     assert.match(c.dialogs()[0].args.at(-1), /^Permanently delete everything in the trash\..*\n\ndrive_empty_trash: /s);
-    assert.equal(c.dialogs()[0].args[3], "55");
+    assert.ok(["44", "45"].includes(c.dialogs()[0].args[3]), c.dialogs()[0].args[3]);
     assert.equal(c.changes().length, 1);
     assert.equal(c.audit().at(-1).approval.channel, "dialog");
   }));
@@ -421,6 +428,12 @@ describe("server wiring (injected runner)", { concurrency: 4 }, () => {
   it("PROTON_DRIVE_DIALOG_TIMEOUT reaches the dialog, clamped", () => withDialogServer({ env: { PROTON_DRIVE_DIALOG_TIMEOUT: "500" } }, async (c) => {
     await c.call(...EMPTY);
     assert.equal(c.dialogs()[0].args[3], "110");
+  }));
+
+  it("time spent before the question comes out of the dialog's budget", () => withDialogServer({ env: { FAKE_SLEEP_MS: "2000" } }, async (c) => {
+    await c.call(...EMPTY);
+    const seconds = Number(c.dialogs()[0].args[3]);
+    assert.ok(seconds >= 10 && seconds <= 43, String(seconds));
   }));
 
   for (const [mode, code] of [["deny", /declined/], ["gaveup", /without an answer/], ["nogui", /proton-drive-cli approve/]]) {

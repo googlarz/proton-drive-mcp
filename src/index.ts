@@ -1669,11 +1669,14 @@ export async function main(options: MainOptions = {}) {
     return opened;
   };
   // Channel 2: the server's own macOS dialog, for a client that cannot elicit.
-  const dialogSeconds = dialogTimeoutSeconds(process.env);
   // Aborted once the client is gone: a dialog still on screen then closes and cannot approve anything.
   const clientGone = new AbortController();
   const nativeDialog = nativeDialogEnabled(process.env, options.dialog?.platform ?? process.platform)
-    ? (text: string, signal?: AbortSignal) => askMacDialog(text, { seconds: dialogSeconds, signal: signal ? AbortSignal.any([signal, clientGone.signal]) : clientGone.signal, exec: options.dialog?.exec })
+    ? async (text: string, signal?: AbortSignal) => {
+        const seconds = dialogTimeoutSeconds(process.env, Date.now() - (callContext.getStore()?.startedAt ?? Date.now()));
+        if (seconds === null) return "error" as const; // too late in the call to ask on screen: the terminal route
+        return askMacDialog(text, { seconds, signal: signal ? AbortSignal.any([signal, clientGone.signal]) : clientGone.signal, exec: options.dialog?.exec });
+      }
     : undefined;
   const gate = new ApprovalGate({
     mode: apMode,
@@ -1758,7 +1761,6 @@ export async function main(options: MainOptions = {}) {
     // the digest binds the approval to these exact items.
     const emptyTrashOperation = async (): Promise<Operation> => {
       const items = await drive.listTrash();
-      items.sort((x, y) => x.name.localeCompare(y.name) || ((x.uid ?? "") < (y.uid ?? "") ? -1 : 1));
       return {
         tool: "drive_empty_trash", effect: "irreversible",
         fields: {
@@ -2344,6 +2346,7 @@ export async function main(options: MainOptions = {}) {
             );
           }
           const listed = apMode !== "model" || askModel ? await emptyTrashOperation() : undefined;
+          if (listed?.fields.itemCount === 0) return ok({ message: "Trash is already empty. Nothing was deleted." });
           // Never approved on a partial list: what cannot be recorded in full is refused.
           if (listed && terminalSummary(listed).length > MAX_SUMMARY_CHARS) {
             return refuse("approval_unavailable", `drive_empty_trash was not run: the trash holds ${listed.fields.itemCount} items, too many to list for approval. Nothing was deleted. Tell the user to empty it in the Proton Drive web or desktop app, or to delete items first (drive_delete).`);
@@ -2739,7 +2742,7 @@ export async function main(options: MainOptions = {}) {
     try {
       // The request's AbortSignal reaches the CLI child via AsyncLocalStorage, so
       // notifications/cancelled actually kills a running upload/download.
-      return await callContext.run({ signal: extra?.signal }, async () => {
+      return await callContext.run({ signal: extra?.signal, startedAt: Date.now() }, async () => {
         const first = await handleCall(req);
         // Human/strict ask the human inside the call, whatever `confirmed` says. Only model mode (1.10.1) upgrades a refusal here.
         if (apMode !== "model") return first;

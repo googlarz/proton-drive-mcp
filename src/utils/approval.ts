@@ -185,8 +185,8 @@ export function renderOperation(op: Operation, cut: ListCut = DEFAULT_CUT): stri
 
 export const DIALOG_MAX_LINES = 25;
 const DIALOG_LINE_CHARS = 60; // a conservative width: a long path wraps and takes several lines
-/** Every non-ASCII code point counts as two columns: wide, fullwidth and emoji characters must never be under-measured. */
-const columns = (s: string): number => [...s].reduce((n, c) => n + (c.codePointAt(0)! > 0x7f ? 2 : 1), 0);
+/** Non-ASCII code points and the widest ASCII characters count as two columns: text must never be under-measured. */
+const columns = (s: string): number => [...s].reduce((n, c) => n + (c.codePointAt(0)! > 0x7f || "WM@%mw".includes(c) ? 2 : 1), 0);
 /** Word wrap as the dialog does it: a word that does not fit starts a new line, and a longer unbroken run is broken over several. */
 function wrappedLines(line: string): number {
   let lines = 1, used = -1; // -1: nothing on the line yet
@@ -370,7 +370,7 @@ export interface GateInit {
 
 export const MAX_DECLINES_PER_MINUTE = 5;
 const WINDOW_MS = 60_000;
-/** An elicitation "cancel" faster than this cannot come from a human. */
+/** An elicitation "cancel" or "error" faster than this cannot come from a human who was asked. */
 const HUMAN_MIN_MS = 1_000;
 export const NO_RETRY = "Do not retry this operation or a variant of it unless the user asks you to.";
 
@@ -421,9 +421,10 @@ export class ApprovalGate {
         this.discardRecords(op, hash);
         return refuse("approval_declined", `The user declined ${op.tool}. Nothing was changed. ${NO_RETRY}`);
       }
-      // The user was never asked (an error, or a "cancel" no human is fast enough for): try the server's own dialog.
+      // A "cancel" or "error" no human is fast enough for means the user was never asked: try the server's own dialog.
+      // A slower one (such as the 120 s timeout) may follow a question on screen and goes to the terminal.
       const counted = this.declinedAt.length;
-      if (native && !opts.signal?.aborted && (result === "error" || this.now() - now < HUMAN_MIN_MS)) {
+      if (native && !opts.signal?.aborted && this.now() - now < HUMAN_MIN_MS) {
         const text = dialogText(op);
         if (text !== null) {
           const answered = await this.askNative(op, hash, text, native, opts.signal, refuse);

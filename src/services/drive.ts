@@ -271,8 +271,9 @@ export class DriveService {
 
   // list() plus each item's raw CLI node, for callers (the tree walker) that need
   // fields DriveFile drops: uid chain, revision mtime, claimed sha1, share flags.
-  async listEntries(remotePath: string, opts: { includeUid?: boolean; type?: "file" | "folder" } = {}): Promise<{ item: Record<string, unknown>; file: DriveFile }[]> {
+  async listEntries(remotePath: string, opts: { includeUid?: boolean; type?: "file" | "folder"; requireOutput?: boolean } = {}): Promise<{ item: Record<string, unknown>; file: DriveFile }[]> {
     const result = await this.run(opts.type ? ["filesystem", "list", "-t", opts.type, remotePath] : ["filesystem", "list", remotePath]);
+    if (result === null && opts.requireOutput) throw new DriveParseError(`The CLI returned no output when listing ${remotePath}.`);
     if (result === null) return [];
     if (!Array.isArray(result)) throw new DriveParseError(`Expected array from list, got: ${JSON.stringify(result).slice(0, 100)}`);
     // The CLI's order changes between calls and callers page by re-listing, so
@@ -645,7 +646,8 @@ export class DriveService {
   // /trash/<name>, so restore/delete by that path is ambiguous. uid (and the
   // trash time, when the CLI provides it) let the caller tell them apart.
   async listTrash(): Promise<DriveFile[]> {
-    return this.list("/trash", { includeUid: true });
+    // An empty trash lists as []: no output at all is a failed listing, never "nothing there".
+    return (await this.listEntries("/trash", { includeUid: true, requireOutput: true })).map((e) => e.file);
   }
 
   async trash(remotePath: string): Promise<void> {

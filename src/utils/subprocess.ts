@@ -104,7 +104,7 @@ export function cliLaunchError(binary: string | undefined = configuredBinary()):
 // Per-request context: lets the MCP dispatch hand the request's AbortSignal to
 // whichever CLI process that request spawns, without threading a parameter
 // through every DriveService method.
-export const callContext = new AsyncLocalStorage<{ signal?: AbortSignal }>();
+export const callContext = new AsyncLocalStorage<{ signal?: AbortSignal; startedAt?: number }>();
 
 const running = new Set<ChildProcess>();
 

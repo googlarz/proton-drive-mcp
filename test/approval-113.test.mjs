@@ -300,7 +300,7 @@ describe("7: a failed or instant-cancel elicitation falls back to the native dia
     return { gate, shown, store: s };
   };
 
-  for (const [label, o] of [["an error", { reply: "error" }], ["a throwing elicit", { reply: new Error("boom") }], ["a slow error", { reply: "error", tookMs: 5000 }], ["cancel after 0.999 s", { reply: "cancel", tookMs: 999 }]]) {
+  for (const [label, o] of [["an error", { reply: "error" }], ["a throwing elicit", { reply: new Error("boom") }], ["an error after 0.999 s", { reply: "error", tookMs: 999 }], ["cancel after 0.999 s", { reply: "cancel", tookMs: 999 }]]) {
     it(`${label}: native dialog, Allow runs it`, async () => {
       const g = make(o);
       const r = await g.gate.require(OP);
@@ -309,7 +309,7 @@ describe("7: a failed or instant-cancel elicitation falls back to the native dia
     });
   }
 
-  for (const [label, o, code] of [["cancel after 1 s", { reply: "cancel", tookMs: 1000 }, "approval_required"], ["a real decline", { reply: "decline" }, "approval_declined"]]) {
+  for (const [label, o, code] of [["cancel after 1 s", { reply: "cancel", tookMs: 1000 }, "approval_required"], ["an error after 1 s", { reply: "error", tookMs: 1000 }, "approval_required"], ["the 120 s client timeout", { reply: "error", tookMs: 120_000 }, "approval_required"], ["a real decline", { reply: "decline" }, "approval_declined"]]) {
     it(`${label}: no native dialog`, async () => {
       const g = make(o);
       assert.equal((await g.gate.require(OP)).code, code);
@@ -345,6 +345,43 @@ describe("7: a failed or instant-cancel elicitation falls back to the native dia
     const r = await g.gate.require(OP, { signal: AbortSignal.abort() });
     assert.equal(r.ok, false);
     assert.equal(g.shown.length, 0);
+  });
+});
+
+describe("9a: wide ASCII counts as two columns in the dialog", () => {
+  for (const c of ["W", "M", "@", "%", "m", "w"]) {
+    it(`${c}: 30 fit one line, 31 take two`, () => {
+      assert.equal(dialogLines(c.repeat(30)), 1);
+      assert.equal(dialogLines(c.repeat(31)), 2);
+    });
+  }
+  it("other ASCII still counts as one", () => assert.equal(dialogLines("a".repeat(60)), 1));
+});
+
+describe("9b: an empty trash is never asked about or emptied", () => {
+  for (const [label, o] of [["human", { replies: [ACCEPT] }], ["model with elicitation", { approval: "model", replies: [ACCEPT] }]]) {
+    it(`${label}: "already empty", no question, no empty-trash`, () =>
+      withServer({ ...trashTree([]), ...o }, async (ctx) => {
+        const r = await ctx.call("drive_empty_trash", {});
+        assert.ok(!r.isError, text(r));
+        assert.match(text(r), /already empty/);
+        assert.equal(ctx.messages.length, 0);
+        assert.deepEqual(ctx.changes(), []);
+      }));
+  }
+  for (const fakeMode of ["empty", "undefined-literal", "garbage"]) {
+    it(`${fakeMode} listing output fails: not an empty trash`, () =>
+      withServer({ fakeMode, replies: [ACCEPT] }, async (ctx) => {
+        const r = await ctx.call("drive_empty_trash", {});
+        assert.equal(r.isError, true, text(r));
+        assert.doesNotMatch(text(r), /already empty/);
+        assert.equal(ctx.messages.length, 0);
+        assert.deepEqual(ctx.changes(), []);
+      }));
+  }
+  it("listTrash rejects missing output", async () => {
+    await assert.rejects(new DriveService(async () => null).listTrash(), /no output|empty/i);
+    assert.deepEqual(await new DriveService(async () => []).listTrash(), []);
   });
 });
 

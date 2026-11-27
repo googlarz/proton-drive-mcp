@@ -618,7 +618,8 @@ async function run() {
           (removeAll.publicLink ? " A public link is still active — remove it with: share remove-url <path>" : ""));
       } else if (sub === "set-url") {
         const setUrlPath = requirePath(rest[0], "share set-url <path> [--role] [--password] [--expiration]");
-        const roleRaw = getFlag("--role") ?? "viewer";
+        const roleFlag = getFlag("--role");
+        let roleRaw = roleFlag ?? "viewer";
         if (!["viewer", "editor"].includes(roleRaw)) {
           console.error(`Invalid --role value: ${roleRaw}. Must be viewer or editor.`);
           process.exit(1);
@@ -627,6 +628,17 @@ async function run() {
         const rawExpiration = getFlag("--expiration");
         const password = rawPassword ? validateFlagValue(rawPassword, "password") : undefined;
         const expiration = rawExpiration ? validateFlagValue(rawExpiration, "expiration") : undefined;
+        if (roleFlag === undefined) {
+          // An omitted role keeps the existing link's role: it is never changed silently.
+          const before = await drive.shareStatus(setUrlPath);
+          if (before.shareUrl !== undefined || before.sharePasswordProtected !== undefined) {
+            if (before.shareUrlRole !== "viewer" && before.shareUrlRole !== "editor") {
+              console.error("This path already has a public link whose role could not be read, so it cannot be kept. Pass --role viewer or --role editor.");
+              process.exit(1);
+            }
+            roleRaw = before.shareUrlRole;
+          }
+        }
         print(await drive.shareSetUrl(setUrlPath, roleRaw as "viewer" | "editor", password, expiration));
       } else if (sub === "remove-url") {
         const removeUrlPath = requirePath(rest[0], "share remove-url <path>");
